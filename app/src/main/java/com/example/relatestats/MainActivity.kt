@@ -7,6 +7,8 @@ import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.text.SimpleDateFormat
 import android.app.usage.UsageStatsManager
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -159,6 +161,10 @@ enum class ContactSortType(val label: String) { NAME("名稱"), INTERACTIONS("�
 
 // 🏆 全面改用 Long 累加：舊版用 Int 加總，資料量一大就整數溢位，
 // 會出現「742246 小時」這種天文數字或負數
+// 單次聊天室停留的合理上限（藍圖規定 30 分鐘）。
+// 同時作為「異常紀錄」的判定門檻：超過這個值的停留紀錄一定是壞資料。
+const val MAX_STAY_SECONDS = 1800
+
 fun formatDuration(seconds: Long): String {
     val s = seconds.coerceAtLeast(0L)
     return when {
@@ -331,6 +337,9 @@ object DataRepository {
     var autoBackupPassword = MutableStateFlow("")
     var lastAutoBackupTime = MutableStateFlow(0L)
 
+    // 升級後自動清理掉幾筆異常紀錄（給設定頁顯示用）
+    val lastCleanupRemoved = MutableStateFlow(0)
+
     @Volatile
     private var prefs: SharedPreferences? = null
 
@@ -349,7 +358,10 @@ object DataRepository {
         }
         loadData()
         val appContext = context.applicationContext
-        ioScope.launch { performAutoBackupIfNeeded(appContext) }
+        ioScope.launch {
+            runOneTimeCleanupIfNeeded(appContext)
+            performAutoBackupIfNeeded(appContext)
+        }
     }
 
     // 舊版任何一筆資料格式壞掉就整個 associate 拋 IndexOutOfBounds → 一開 App 就閃退。
@@ -526,6 +538,64 @@ object DataRepository {
         }
         saveData(immediate = true)
     }
+
+    /**
+     * 異常紀錄判定。
+     * 舊版無障礙服務的碼錶永遠不會停，且時長沒有正確換算成秒，
+     * 於是產生大量「單筆停留 26 年」這種不可能的紀錄，
+     * 加總後就是畫面上的 88 萬小時。這些資料無法還原成有意義的數值，只能剔除。
+     * 注意：訊息紀錄的 durationSeconds 是 0，不會被誤刪。
+     */
+    private fun isAbnormal(r: InteractionRecord): Boolean =
+        r.durationSeconds < 0 || r.durationSeconds > MAX_STAY_SECONDS || r.timestamp <= 0L
+
+    fun countAbnormalRecords(): Int = _interactions.value.count { isAbnormal(it) }
+
+    fun removeAbnormalRecords(): Int {
+        val before = _interactions.value.size
+        _interactions.value = _interactions.value.filterNot { isAbnormal(it) }
+        val removed = before - _interactions.value.size
+        if (removed > 0) saveData(immediate = true)
+        return removed
+    }
+
+    /** 升級後自動執行一次；清理前會先把原始資料另存一份到 App 內部空間 */
+    private fun runOneTimeCleanupIfNeeded(context: Context) {
+        val p = prefs ?: return
+        if (p.getBoolean("cleanup_v2_done", false)) return
+        val bad = countAbnormalRecords()
+        if (bad > 0) {
+            runCatching {
+                File(context.filesDir, "RelateStats_PreCleanup_${System.currentTimeMillis()}.txt")
+                    .writeText(exportBackupString(""))
+            }
+            removeAbnormalRecords()
+        }
+        lastCleanupRemoved.value = bad
+        p.edit().putBoolean("cleanup_v2_done", true).apply()
+    }
+
+    /**
+     * 產生備份檔並交給系統分享選單。
+     * 藍圖 §8.1 的做法：不接 Google Drive API / OAuth，直接用 Share Intent，
+     * 使用者就能一鍵送到 Google 雲端硬碟、LINE Keep、Gmail 等任何地方。
+     * 用 FileProvider 傳檔案而不是塞進 EXTRA_TEXT —— 備份字串可能有十幾 MB，
+     * 放進 Intent 會超過 Binder 傳輸上限直接閃退。
+     */
+    fun buildShareBackupIntent(context: Context): Intent? = runCatching {
+        val dir = File(context.cacheDir, "backups").apply { mkdirs() }
+        dir.listFiles()?.forEach { runCatching { it.delete() } }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+        val file = File(dir, "RelateStats_Backup_$stamp.txt")
+        file.writeText(exportBackupString(""))
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+        Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "RelateStats 備份 $stamp")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }.getOrNull()
 
     fun performAutoBackupIfNeeded(context: Context) {
         if (!autoBackupEnabled.value) return
@@ -864,7 +934,7 @@ class ChatTrackerService : AccessibilityService() {
     private companion object {
         // 藍圖規定單次停留上限 30 分鐘，舊版寫成 3600 秒（1 小時），
         // 加上碼錶不會停，時間會被灌到誇張的數字
-        const val MAX_SESSION_SECONDS = 1800
+        const val MAX_SESSION_SECONDS = MAX_STAY_SECONDS
         const val CONTENT_THROTTLE_MS = 1200L
         const val MAX_TREE_DEPTH = 12
         const val MAX_TREE_NODES = 400
@@ -1228,6 +1298,10 @@ class RelateViewModel : ViewModel() {
     fun clearInteractions(scope: String) { DataRepository.clearInteractions(scope) }
     fun clearInteractionsByDate(timestamp: Long) { DataRepository.clearInteractionsByDate(timestamp) }
     fun mergeContact(rawName: String, unifiedName: String) { DataRepository.setAlias(rawName, unifiedName) }
+    val lastCleanupRemoved = DataRepository.lastCleanupRemoved
+    fun countAbnormalRecords() = DataRepository.countAbnormalRecords()
+    fun removeAbnormalRecords() = DataRepository.removeAbnormalRecords()
+    fun buildShareBackupIntent(context: Context) = DataRepository.buildShareBackupIntent(context)
     fun exportBackup(key: String) = DataRepository.exportBackupString(key)
     fun importBackup(str: String, key: String) = DataRepository.importBackupString(str, key)
 }
@@ -2496,6 +2570,11 @@ fun SettingsView(viewModel: RelateViewModel) {
     val (showGuideDialog, setShowGuideDialog) = remember { mutableStateOf(false) }
     val weekStartDay by viewModel.weekStartDay.collectAsState()
 
+    val records by viewModel.interactions.collectAsState()
+    val autoCleanedCount by viewModel.lastCleanupRemoved.collectAsState()
+    var abnormalCount by remember { mutableStateOf(0) }
+    LaunchedEffect(records) { abnormalCount = viewModel.countAbnormalRecords() }
+
     // 舊版只在進入分頁那一刻檢查一次，去系統設定開完權限回來仍顯示「去設定」
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -2591,26 +2670,99 @@ fun SettingsView(viewModel: RelateViewModel) {
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("雲端硬碟 / 本機備份", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("備份與還原", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Icon(Icons.Rounded.Lock, contentDescription = null, tint = AppColors.TextSecondary)
                     }
-                    Text("點擊匯出後，在系統選單左上角可直接選擇存入「Google 雲端硬碟」，換手機時一鍵選取即可無痛還原。", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+                    Text("所有資料只存在這支手機，換機或重灌前請務必先備份。", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
 
+                    // 一鍵送到 Google 雲端硬碟 / LINE Keep / Gmail —— 走系統分享選單，
+                    // 不需要登入 Google 帳號或授權任何 API
+                    Button(
+                        onClick = {
+                            ioScope.launch {
+                                val intent = withContext(Dispatchers.IO) { viewModel.buildShareBackupIntent(context) }
+                                if (intent != null) {
+                                    runCatching { context.startActivity(Intent.createChooser(intent, "備份到雲端")) }
+                                        .onFailure { Toast.makeText(context, "找不到可接收的 App", Toast.LENGTH_SHORT).show() }
+                                } else {
+                                    Toast.makeText(context, "備份檔產生失敗", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("備份到 Google 雲端硬碟 / LINE Keep", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { exportLauncher.launch("RelateStats_Backup.txt") }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)) { Text("匯出至手機或雲端", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                        Button(onClick = { importLauncher.launch(arrayOf("text/plain")) }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue)) { Text("選擇檔案還原", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        OutlinedButton(onClick = { exportLauncher.launch("RelateStats_Backup.txt") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)) {
+                            Text("存成檔案", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Button(onClick = { importLauncher.launch(arrayOf("text/plain")) }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue), shape = RoundedCornerShape(12.dp)) {
+                            Text("選擇檔案還原", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
             }
         }
 
-        item { Spacer(modifier = Modifier.height(64.dp)) }
-
+        // 舊版把資料管理藏成最底下 50% 透明度的灰色小字，幾乎不可能被發現。
+        // 改成正式的區塊，並直接顯示目前資料量與異常筆數。
         item {
-            Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("⚠️ 進階資料管理 (清除舊資料)", color = AppColors.TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { setShowDataManager(true) }.padding(16.dp))
+            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("資料管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("${records.size} 筆紀錄", color = AppColors.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    }
+
+                    if (autoCleanedCount > 0) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).background(AppColors.FriendBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.Top) {
+                            Icon(Icons.Rounded.Info, contentDescription = null, tint = AppColors.FriendText, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤留下的異常紀錄，清理前的原始資料已另存一份在 App 內部空間。", color = AppColors.FriendText, fontSize = 12.sp, lineHeight = 17.sp)
+                        }
+                    }
+
+                    if (abnormalCount > 0) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).background(AppColors.WorkBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.Top) {
+                            Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("偵測到 $abnormalCount 筆異常紀錄：單筆停留時間超過 30 分鐘上限，是舊版計時錯誤的產物，會讓總時長暴增到不合理的數字。", color = AppColors.WorkText, fontSize = 12.sp, lineHeight = 17.sp)
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                val removed = viewModel.removeAbnormalRecords()
+                                abnormalCount = viewModel.countAbnormalRecords()
+                                Toast.makeText(context, "已清理 $removed 筆異常紀錄", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
+                            shape = RoundedCornerShape(12.dp)
+                        ) { Text("清理 $abnormalCount 筆異常紀錄", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = { setShowDataManager(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = AppColors.TextSecondary)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("清除資料（今日／本週／指定日期／全部）", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
             }
         }
+
+        item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 
     if (showGuideDialog) {

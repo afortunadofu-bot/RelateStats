@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 備份檔透過 FileProvider 分享出去（Google 雲端硬碟 / LINE Keep / Gmail…）。
+         備份字串可能有十幾 MB，不能塞進 Intent 的 EXTRA_TEXT，會超過 Binder 上限。 -->
+    <cache-path name="backups" path="backups/" />
+    <files-path name="internal" path="." />
+</paths>
