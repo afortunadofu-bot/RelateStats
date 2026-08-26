@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">RelateStats</string>
+    <string name="accessibility_desc">允許 RelateStats 監測你在聊天室的真實停留時間</string>
+</resources>
