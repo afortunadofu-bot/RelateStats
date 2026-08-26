@@ -2,6 +2,11 @@ package com.example.relatestats
 
 import android.accessibilityservice.AccessibilityService
 import android.app.AppOpsManager
+import android.app.Notification
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import android.app.usage.UsageStatsManager
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -58,6 +63,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.foundation.verticalScroll
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -69,12 +78,17 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.*
 
@@ -143,26 +157,36 @@ data class DateFilter(val type: FilterType, val timestamp: Long = System.current
 enum class SortType(val label: String) { TIME("停留時間"), MESSAGES("互動頻率") }
 enum class ContactSortType(val label: String) { NAME("名稱"), INTERACTIONS("互動量") }
 
-// 🏆 回歸純粹秒數，效能與精準度最高
-fun formatDuration(seconds: Int): String {
-    return if (seconds >= 3600) {
-        val h = seconds / 3600
-        val m = (seconds % 3600) / 60
-        "${h}h ${m}m"
-    } else if (seconds >= 60) {
-        val m = seconds / 60
-        val s = seconds % 60
-        "${m}m ${s}s"
-    } else {
-        "${seconds}s"
+// 🏆 全面改用 Long 累加：舊版用 Int 加總，資料量一大就整數溢位，
+// 會出現「742246 小時」這種天文數字或負數
+fun formatDuration(seconds: Long): String {
+    val s = seconds.coerceAtLeast(0L)
+    return when {
+        s >= 3600 -> "${s / 3600}h ${(s % 3600) / 60}m"
+        s >= 60 -> "${s / 60}m ${s % 60}s"
+        else -> "${s}s"
     }
 }
 
+fun formatDuration(seconds: Int): String = formatDuration(seconds.toLong())
+
+// 名稱若含這些分隔符會讓 CSV 解析錯位，導致整批紀錄讀不回來
+private val CSV_SEPARATORS = listOf("|#|", "|=|", "|cat|", "||", ";")
+fun sanitizeForCsv(raw: String): String {
+    var out = raw
+    CSV_SEPARATORS.forEach { out = out.replace(it, " ") }
+    return out.replace('\n', ' ').replace('\r', ' ').trim()
+}
+
 fun getStartOfWeekTimestamp(timestamp: Long, startDay: Int): Long {
+    // 防呆：startDay 若被存壞（非 1..7）舊版會無限迴圈直接 ANR 卡死
+    val safeDay = if (startDay in Calendar.SUNDAY..Calendar.SATURDAY) startDay else Calendar.MONDAY
     val cal = Calendar.getInstance().apply { timeInMillis = timestamp }
-    cal.firstDayOfWeek = startDay
-    while (cal.get(Calendar.DAY_OF_WEEK) != startDay) {
+    cal.firstDayOfWeek = safeDay
+    var guard = 0
+    while (cal.get(Calendar.DAY_OF_WEEK) != safeDay && guard < 7) {
         cal.add(Calendar.DATE, -1)
+        guard++
     }
     cal.apply {
         set(Calendar.HOUR_OF_DAY, 0)
@@ -201,40 +225,73 @@ data class InteractionRecord(
     val isCall: Boolean = false,
     val subSender: String? = null
 ) {
-    fun toCsvString() = listOf(id, rawSenderName, appName, isIncoming.toString(), wordCount.toString(), durationSeconds.toString(), isGroup.toString(), timestamp.toString()).joinToString("|#|")
+    // ⚠️ 舊版只存 8 個欄位，isMissedCall / isCall / subSender 存檔即遺失，
+    // 導致重開 App 後「通話數」「未接來電」「群組發言排行」永遠是 0。
+    // 新版存 11 個欄位，並且仍能讀回舊的 8 欄位資料。
+    fun toCsvString() = listOf(
+        id,
+        sanitizeForCsv(rawSenderName),
+        sanitizeForCsv(appName),
+        isIncoming.toString(),
+        wordCount.toString(),
+        durationSeconds.toString(),
+        isGroup.toString(),
+        timestamp.toString(),
+        isMissedCall.toString(),
+        isCall.toString(),
+        subSender?.let { sanitizeForCsv(it) } ?: ""
+    ).joinToString("|#|")
+
     companion object {
         fun fromCsvString(csv: String): InteractionRecord? {
             try {
                 val parts = csv.split("|#|")
-                if (parts.size >= 8) return InteractionRecord(parts[0], parts[1], parts[2], parts[3].toBoolean(), parts[4].toInt(), parts[5].toInt(), parts[6].toBoolean(), parts[7].toLong())
-            } catch (e: Exception) { }
+                if (parts.size < 8) return null
+                return InteractionRecord(
+                    id = parts[0],
+                    rawSenderName = parts[1],
+                    appName = parts[2],
+                    isIncoming = parts[3].toBoolean(),
+                    wordCount = parts[4].toIntOrNull() ?: 0,
+                    durationSeconds = parts[5].toIntOrNull() ?: 0,
+                    isGroup = parts[6].toBoolean(),
+                    timestamp = parts[7].toLongOrNull() ?: 0L,
+                    isMissedCall = parts.getOrNull(8)?.toBoolean() ?: false,
+                    isCall = parts.getOrNull(9)?.toBoolean() ?: false,
+                    subSender = parts.getOrNull(10)?.takeIf { it.isNotBlank() }
+                )
+            } catch (_: Exception) { }
             return null
         }
     }
 }
 
 
-data class HourlyStat(val hour: Int, var durationSeconds: Int = 0, var msgCount: Int = 0, var missedCalls: Int = 0) {
-    val score: Int get() = (durationSeconds / 60) + (if (durationSeconds % 60 > 0) 1 else 0) + msgCount + (missedCalls * 5)
+data class HourlyStat(val hour: Int, var durationSeconds: Long = 0L, var msgCount: Int = 0, var missedCalls: Int = 0) {
+    val score: Long get() = (durationSeconds / 60) + (if (durationSeconds % 60 > 0) 1 else 0) + msgCount + (missedCalls * 5L)
 }
 
 data class SenderStat(
     val unifiedName: String,
+    // recordCount = 所有紀錄數（含自己開著聊天室的停留紀錄）
+    // incomingCount = 真正「對方傳進來」的次數 —— 舊版兩者混用同一個欄位，
+    // 導致「依互動頻率」排序其實是在排停留紀錄筆數
+    val recordCount: Int,
     val incomingCount: Int,
     val msgCount: Int,
     val callCount: Int,
     val incomingWords: Int,
     val avgWordsPerMessage: Int,
-    val totalDurationSeconds: Int,
-    val callDurationSeconds: Int,
+    val totalDurationSeconds: Long,
+    val callDurationSeconds: Long,
     val appNames: Set<String>,
     val category: ContactCategory,
     val isGroup: Boolean,
     val subSenders: Map<String, Int> = emptyMap()
 )
 
-data class AppUsageStat(val appName: String, val totalDurationSeconds: Int, val incomingCount: Int)
-data class CategoryStat(val category: ContactCategory, val totalDurationSeconds: Int, val incomingCount: Int)
+data class AppUsageStat(val appName: String, val totalDurationSeconds: Long, val incomingCount: Int)
+data class CategoryStat(val category: ContactCategory, val totalDurationSeconds: Long, val incomingCount: Int)
 data class TimeOfDayStat(val period: String, val percentage: Float, val color: Color, val explicitTimeRange: String)
 
 data class SocialPersona(val title: String, val description: String, val emoji: String) {
@@ -274,31 +331,62 @@ object DataRepository {
     var autoBackupPassword = MutableStateFlow("")
     var lastAutoBackupTime = MutableStateFlow(0L)
 
+    @Volatile
     private var prefs: SharedPreferences? = null
+
+    // 存檔一律丟到背景，主執行緒／通知執行緒不再被卡住
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pendingSaveJob: Job? = null
+
+    // 上限保護：避免資料無限膨脹讓每次存檔越來越慢，最後 ANR
+    private const val MAX_RECORDS = 200000
 
     fun init(context: Context) {
         if (prefs != null) return
-        prefs = context.getSharedPreferences("RelateStatsData", Context.MODE_PRIVATE)
+        synchronized(this) {
+            if (prefs != null) return
+            prefs = context.getSharedPreferences("RelateStatsData", Context.MODE_PRIVATE)
+        }
         loadData()
-        performAutoBackupIfNeeded(context)
+        val appContext = context.applicationContext
+        ioScope.launch { performAutoBackupIfNeeded(appContext) }
     }
 
+    // 舊版任何一筆資料格式壞掉就整個 associate 拋 IndexOutOfBounds → 一開 App 就閃退。
+    // 現在每一段都獨立防護，壞掉的那筆丟掉，其餘照常載入。
     fun loadData() {
-        isFirstLaunch.value = prefs?.getBoolean("is_first_launch", true) ?: true
-        weekStartDay.value = prefs?.getInt("week_start_day", Calendar.MONDAY) ?: Calendar.MONDAY
-        autoBackupEnabled.value = prefs?.getBoolean("auto_backup_enabled", false) ?: false
-        autoBackupPassword.value = prefs?.getString("auto_backup_pwd", "") ?: ""
-        lastAutoBackupTime.value = prefs?.getLong("last_auto_backup_time", 0L) ?: 0L
+        val p = prefs ?: return
+        isFirstLaunch.value = p.getBoolean("is_first_launch", true)
+        weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
+        autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
+        autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
+        lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
 
-        val recordsSet = prefs?.getStringSet("interactions", emptySet()) ?: emptySet()
-        _interactions.value = recordsSet.mapNotNull { InteractionRecord.fromCsvString(it) }
-        val aliasSet = prefs?.getStringSet("aliases", emptySet()) ?: emptySet()
-        _aliases.value = aliasSet.associate { it.substringBefore("|=|") to it.substringAfter("|=|") }
-        val catSet = prefs?.getStringSet("categories", emptySet()) ?: emptySet()
-        _categories.value = catSet.associate { parts -> parts.split("|=|").let { it[0] to it[1] } }
-        val customCatsSet = prefs?.getStringSet("custom_categories", emptySet()) ?: emptySet()
-        val loadedCustomCats = customCatsSet.mapNotNull { ContactCategory.fromCsvString(it) }
+        _interactions.value = runCatching {
+            (p.getStringSet("interactions", emptySet()) ?: emptySet())
+                .mapNotNull { InteractionRecord.fromCsvString(it) }
+                .sortedBy { it.timestamp }
+        }.getOrDefault(emptyList())
+
+        _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
+        _categories.value = runCatching { parsePairs(p.getStringSet("categories", emptySet())) }.getOrDefault(emptyMap())
+
+        val loadedCustomCats = runCatching {
+            (p.getStringSet("custom_categories", emptySet()) ?: emptySet()).mapNotNull { ContactCategory.fromCsvString(it) }
+        }.getOrDefault(emptyList())
         _availableCategories.value = ContactCategory.defaultCategories + loadedCustomCats
+    }
+
+    private fun parsePairs(raw: Set<String>?): Map<String, String> {
+        if (raw.isNullOrEmpty()) return emptyMap()
+        val out = HashMap<String, String>(raw.size)
+        raw.forEach { line ->
+            val idx = line.indexOf("|=|")
+            if (idx > 0 && idx + 3 < line.length) {
+                out[line.substring(0, idx)] = line.substring(idx + 3)
+            }
+        }
+        return out
     }
 
     fun completeOnboarding() {
@@ -321,18 +409,47 @@ object DataRepository {
         }
     }
 
-    private fun saveData() {
-        prefs?.edit()?.apply {
-            putStringSet("interactions", _interactions.value.map { it.toCsvString() }.toSet())
-            putStringSet("aliases", _aliases.value.map { "${it.key}|=|${it.value}" }.toSet())
-            putStringSet("categories", _categories.value.map { "${it.key}|=|${it.value}" }.toSet())
-            putStringSet("custom_categories", _availableCategories.value.filter { it !in ContactCategory.defaultCategories }.map { it.toCsvString() }.toSet())
-            apply()
+    // 舊版每收到一則通知就把「整份紀錄」重新序列化寫檔，而且是在通知執行緒同步做，
+    // 資料一多就是明顯卡頓／掉通知。改成背景執行緒 + 1.5 秒去抖動合併寫入。
+    private fun saveData(immediate: Boolean = false) {
+        pendingSaveJob?.cancel()
+        if (immediate) {
+            ioScope.launch { writeToDisk() }
+        } else {
+            pendingSaveJob = ioScope.launch {
+                delay(1500)
+                writeToDisk()
+            }
+        }
+    }
+
+    private fun writeToDisk() {
+        val p = prefs ?: return
+        runCatching {
+            val records = _interactions.value.map { it.toCsvString() }.toSet()
+            val aliases = _aliases.value.map { "${it.key}|=|${it.value}" }.toSet()
+            val cats = _categories.value.map { "${it.key}|=|${it.value}" }.toSet()
+            val customCats = _availableCategories.value
+                .filter { it !in ContactCategory.defaultCategories }
+                .map { it.toCsvString() }.toSet()
+            p.edit().apply {
+                putStringSet("interactions", records)
+                putStringSet("aliases", aliases)
+                putStringSet("categories", cats)
+                putStringSet("custom_categories", customCats)
+            }.apply()
         }
     }
 
     fun addInteraction(record: InteractionRecord) {
-        _interactions.update { it + record }
+        // 服務可能在 Activity 還沒開過的情況下先啟動（例如開機後），
+        // 此時 prefs 還沒建立，舊版會靜靜地把資料丟掉 →「訊息統計不進去」
+        if (prefs == null) return
+
+        _interactions.update { list ->
+            val next = list + record
+            if (next.size > MAX_RECORDS) next.takeLast(MAX_RECORDS) else next
+        }
         val unifiedName = _aliases.value[record.rawSenderName] ?: record.rawSenderName
         if (!_categories.value.containsKey(unifiedName)) {
             _categories.update { it + (unifiedName to ContactCategory.OTHER.id) }
@@ -340,9 +457,37 @@ object DataRepository {
         saveData()
     }
 
-    fun updateCategory(unifiedName: String, categoryId: String) { _categories.update { it + (unifiedName to categoryId) }; saveData() }
-    fun setAlias(rawName: String, unifiedName: String) { _aliases.update { it + (rawName to unifiedName) }; saveData() }
-    fun addCustomCategory(cat: ContactCategory) { _availableCategories.update { it + cat }; saveData() }
+    fun updateCategory(unifiedName: String, categoryId: String) { _categories.update { it + (unifiedName to categoryId) }; saveData(immediate = true) }
+    /**
+     * 帳號合併。
+     * 舊版只寫一筆 A -> B，但查詢時只跳一層（aliases[raw] ?: raw），
+     * 所以「A 已併到 B，再把 B 併到 C」之後 A 仍然停留在 B，變成同一個人拆成兩筆。
+     * 現在會把目標解析到最終節點，並把原本指向 A 的別名一起改指過去。
+     */
+    fun setAlias(rawName: String, unifiedName: String) {
+        if (rawName == unifiedName || rawName.isBlank() || unifiedName.isBlank()) return
+        _aliases.update { current ->
+            val target = resolveAlias(unifiedName, current)
+            if (target == rawName) return@update current  // 會形成循環，放棄
+            val next = HashMap(current)
+            next[rawName] = target
+            current.forEach { (k, v) -> if (v == rawName) next[k] = target }
+            next
+        }
+        saveData(immediate = true)
+    }
+
+    private fun resolveAlias(name: String, map: Map<String, String>): String {
+        var cur = name
+        var guard = 0
+        while (guard++ < 10) {
+            val next = map[cur] ?: return cur
+            if (next == cur) return cur
+            cur = next
+        }
+        return cur
+    }
+    fun addCustomCategory(cat: ContactCategory) { _availableCategories.update { it + cat }; saveData(immediate = true) }
 
     fun clearInteractions(scope: String) {
         val now = System.currentTimeMillis()
@@ -363,8 +508,9 @@ object DataRepository {
         if (scope == "ALL") {
             _aliases.value = emptyMap()
             _categories.value = emptyMap()
+            _availableCategories.value = ContactCategory.defaultCategories
         }
-        saveData()
+        saveData(immediate = true)
     }
 
     fun clearInteractionsByDate(timestamp: Long) {
@@ -378,7 +524,7 @@ object DataRepository {
                 rCal.get(Calendar.YEAR) == targetYear && rCal.get(Calendar.DAY_OF_YEAR) == targetDay
             }
         }
-        saveData()
+        saveData(immediate = true)
     }
 
     fun performAutoBackupIfNeeded(context: Context) {
@@ -446,13 +592,16 @@ object DataRepository {
             }
 
             val parts = decodedStr.split("||")
-            if (!parts[0].startsWith("V")) return false
-            val newRecords = parts[1].split(";").filter { it.isNotBlank() }.mapNotNull { InteractionRecord.fromCsvString(it) }
-            val newAliases = parts[2].split(";").filter { it.isNotBlank() }.associate { it.substringBefore("|=|") to it.substringAfter("|=|") }
-            val newCategories = parts[3].split(";").filter { it.isNotBlank() }.associate { p -> p.split("|=|").let { it[0] to it[1] } }
+            // 舊版沒檢查欄位數，備份檔略有損毀就整個炸掉
+            if (parts.size < 5 || !parts[0].startsWith("V")) return false
+            val newRecords = parts[1].split(";").filter { it.isNotBlank() }
+                .mapNotNull { InteractionRecord.fromCsvString(it) }.sortedBy { it.timestamp }
+            val newAliases = parsePairs(parts[2].split(";").filter { it.isNotBlank() }.toSet())
+            val newCategories = parsePairs(parts[3].split(";").filter { it.isNotBlank() }.toSet())
             val newCustomCats = parts[4].split(";").filter { it.isNotBlank() }.mapNotNull { ContactCategory.fromCsvString(it) }
+            if (newRecords.isEmpty() && newAliases.isEmpty() && newCategories.isEmpty()) return false
             _interactions.value = newRecords; _aliases.value = newAliases; _categories.value = newCategories; _availableCategories.value = ContactCategory.defaultCategories + newCustomCats
-            saveData()
+            saveData(immediate = true)
             return true
         } catch (_: Exception) { return false }
     }
@@ -462,140 +611,343 @@ object DataRepository {
 // 4. 核心服務
 // ==========================================
 class RelateNotificationService : NotificationListenerService() {
+
     private val targetApps = mapOf(
         "jp.naver.line.android" to "LINE", "com.facebook.orca" to "Messenger",
         "com.instagram.android" to "Instagram", "com.whatsapp" to "WhatsApp",
         "com.instagram.barcelona" to "Threads", "org.telegram.messenger" to "Telegram",
         "com.google.android.dialer" to "電話", "com.samsung.android.dialer" to "電話", "com.samsung.android.incallui" to "電話"
     )
-    private val ignoreKeywords = listOf(
-        "貼圖", "照片", "表情", "收回了", "attachment", "語音訊息", "影片",
-        "正在傳送", "傳送中", "正在", "上傳", "sent a", "sending", "串文"
+
+    // ⚠️ 舊版用 content.contains() 比對這一串關鍵字，其中「正在」「上傳」「影片」等
+    // 詞彙會把「我正在路上」「影片我看過了」這種真實訊息整個丟掉 —— 這是
+    // 「訊息統計不進去」最主要的原因。
+    // 新版只在「整則內容就是雜訊」或「以雜訊前綴開頭」時才略過。
+    private val noiseExact = setOf(
+        "貼圖", "照片", "圖片", "影片", "語音訊息", "檔案", "位置資訊",
+        "[貼圖]", "[照片]", "[影片]", "[語音訊息]",
+        "Sent a sticker", "Sent a photo", "Sent an attachment", "串文"
     )
+    private val noisePrefix = listOf("正在傳送", "傳送中", "收回了", "已收回", "sending", "sent a ")
+
+    // 通知去重：LINE / IG 會為同一則訊息重複 post（已讀、已收到、摘要都會觸發），
+    // 舊版每 post 一次就加一筆 → 訊息數虛胖。
+    private val seenMessages = object : LinkedHashMap<String, Long>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?) = size > 400
+    }
+    // 每個對話已處理到哪個訊息時間點（避免同一則通知被重複 post 時重算）
+    private val lastHandledTime = object : LinkedHashMap<String, Long>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?) = size > 300
+    }
 
     override fun onCreate() { super.onCreate(); DataRepository.init(applicationContext) }
+    override fun onListenerConnected() { super.onListenerConnected(); DataRepository.init(applicationContext) }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        try {
+            handleNotification(sbn)
+        } catch (_: Exception) {
+            // 通知監聽器一旦拋例外，系統會直接把服務停掉，之後全部都收不到 → 一律吞掉
+        }
+    }
+
+    private fun handleNotification(sbn: StatusBarNotification) {
         val appName = targetApps[sbn.packageName] ?: return
-        val extras = sbn.notification.extras
+        val n = sbn.notification ?: return
 
+        // 群組摘要／常駐通知不是真實訊息（常駐通知還會每分鐘更新一次）
+        val flags = n.flags
+        if (flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+        if (flags and Notification.FLAG_ONGOING_EVENT != 0 && appName != "電話") return
+
+        val extras = n.extras ?: return
         val convTitle = extras.getString("android.conversationTitle")
-        val baseTitle = extras.getString("android.title") ?: extras.getString("android.conversationTitle") ?: return
-
-        var senderName: String
-        var subSender: String? = null
+        val baseTitle = extras.getString("android.title") ?: convTitle ?: return
 
         val text = extras.getCharSequence("android.text")?.toString() ?: ""
         val bigText = extras.getCharSequence("android.bigText")?.toString() ?: ""
-        val content = if (bigText.isNotBlank()) bigText else text
-        var isGroup = extras.getBoolean("android.isGroup", false)
+        val fallbackContent = if (bigText.isNotBlank()) bigText else text
+
+        // ---- 通話類優先處理 ----
+        val callInfo = detectCall(appName, baseTitle, fallbackContent)
+        if (callInfo != null) {
+            val cleanName = stripCallSuffix(baseTitle)
+            if (cleanName.isBlank()) return
+            if (!markSeen(sbn.key, n.`when`, cleanName + "|" + fallbackContent)) return
+            DataRepository.addInteraction(
+                InteractionRecord(
+                    rawSenderName = cleanName,
+                    appName = appName,
+                    isIncoming = true,
+                    wordCount = 0,
+                    durationSeconds = callInfo.second,
+                    isGroup = false,
+                    isMissedCall = callInfo.first,
+                    isCall = true
+                )
+            )
+            return
+        }
+        // 撥號 App 只可能產生通話紀錄；沒判定成通話就直接略過，
+        // 否則「通話中」常駐通知會被當成一則訊息記進去
+        if (appName == "電話") return
+
+        // ---- 一般訊息 ----
+        // 一次收到多則訊息時，系統只會 post 一則通知（LINE/Messenger 都是這樣），
+        // 舊版只算 1 則 → 訊息數嚴重短少。這裡直接讀官方的 android.messages 陣列，
+        // 把這則通知裡「還沒處理過」的每一則訊息都算進去。
+        // 註：Notification.MessagingStyle.extractMessagingStyleFromNotification()
+        //     在公開 SDK 已被隱藏，只能走 extras。
+        val parsed = extractMessages(extras)
+        val isGroupFlag = extras.getBoolean("android.isGroupConversation", false) ||
+                extras.getBoolean("android.isGroup", false) ||
+                !convTitle.isNullOrBlank()
+
+        if (parsed.isNotEmpty()) {
+            val convName = convTitle?.trim()
+            val convKey = sbn.key + "|" + (convName ?: baseTitle)
+            val since = lastHandledTime[convKey] ?: 0L
+            var newest = since
+            var handled = 0
+            parsed.forEach { msg ->
+                if (msg.time <= since) return@forEach
+                if (msg.time > newest) newest = msg.time
+                if (isNoise(msg.text)) return@forEach
+                val isGroup = isGroupFlag || !convName.isNullOrBlank()
+                val speaker = msg.sender?.trim()?.takeIf { it.isNotBlank() }
+                val senderName = if (isGroup && !convName.isNullOrBlank()) convName else (speaker ?: baseTitle)
+                val subSender = if (isGroup) speaker else null
+                addMessage(appName, senderName, subSender, msg.text, isGroup, msg.time)
+                handled++
+            }
+            lastHandledTime[convKey] = newest
+            if (handled > 0) return
+            // 這則通知裡沒有新訊息（只是被重新 post）就不要再重複計算一次
+            if (since > 0L) return
+        }
+
+        // ---- 沒有 MessagingStyle 的後備路徑 ----
+        var senderName = baseTitle.trim()
+        var subSender: String? = null
+        var isGroup = isGroupFlag
+        var content = fallbackContent
 
         if (isGroup && !convTitle.isNullOrBlank()) {
-            senderName = convTitle
-            subSender = baseTitle
-        } else {
-            senderName = baseTitle
-            subSender = null
+            senderName = convTitle.trim()
+            subSender = baseTitle.trim()
         }
 
         if (appName == "Instagram") {
-
+            // 「(你的帳號) 群組名」→ 群組；「帳號 : 朋友名」→ 私訊
             if (baseTitle.startsWith("(") && baseTitle.contains(") ")) {
                 isGroup = true
                 senderName = baseTitle.substringAfter(") ").trim()
-
-                val textStr = text.toString()
-                if (textStr.contains(" : ")) {
-                    subSender = textStr.substringBefore(" : ").trim()
-                } else if (textStr.contains(": ")) {
-                    subSender = textStr.substringBefore(": ").trim()
+                val sepIdx = content.indexOf(" : ").takeIf { it > 0 } ?: content.indexOf(": ")
+                if (sepIdx > 0) {
+                    subSender = content.substring(0, sepIdx).trim()
+                    content = content.substring(sepIdx).removePrefix(" : ").removePrefix(": ")
                 }
-            }
-            else if (baseTitle.contains(" : ")) {
+            } else if (baseTitle.contains(" : ")) {
                 isGroup = false
                 senderName = baseTitle.substringAfterLast(" : ").trim()
             }
-        }
-
-
-        if (senderName.isBlank()) return
-
-        var isMissedCall = false
-        var isCall = false
-        var parsedDurationSecs = 0
-
-        if (appName == "電話" || content.contains("未接來電") || content.contains("取消通話") || senderName.contains("未接來電") || content.contains("通話時間") || content.contains("已通話")) {
-            isCall = true
-            if (content.contains("未接來電") || content.contains("取消通話") || senderName.contains("未接來電")) {
-                isMissedCall = true
-            } else {
-                val timeMatch = Regex("(?:通話時間\\s*)?(\\d{1,2})[:：分](\\d{2})秒?").find(content)
-                if (timeMatch != null) {
-                    parsedDurationSecs = (timeMatch.groupValues[1].toInt() * 60) + timeMatch.groupValues[2].toInt()
-                }
+        } else if (isGroup && subSender != null && content.contains(" : ")) {
+            // LINE 群組：內文為「發言人 : 訊息」
+            val speaker = content.substringBefore(" : ").trim()
+            if (speaker.isNotBlank() && speaker.length <= 40) {
+                subSender = speaker
+                content = content.substringAfter(" : ")
             }
         }
 
-        if (!isCall && ignoreKeywords.any { content.contains(it) }) return
+        if (senderName.isBlank() || isNoise(content)) return
+        if (!markSeen(sbn.key, n.`when`, senderName + "|" + subSender + "|" + content)) return
+        addMessage(appName, senderName, subSender, content, isGroup, sbn.postTime)
+    }
 
-        val aliasesMap = DataRepository.aliases.value
-        val finalSenderName = aliasesMap[senderName.trim()] ?: senderName.trim()
-        val finalSubSender = subSender?.trim()?.let { aliasesMap[it] ?: it }
+    private class ParsedMessage(val text: String, val time: Long, val sender: String?)
 
-        var finalWordCount = content.length
-        if (appName == "Instagram" && isGroup && subSender != null) {
-            val prefix1 = "$subSender : "
-            val prefix2 = "$subSender: "
-            if (content.startsWith(prefix1)) finalWordCount = content.removePrefix(prefix1).length
-            else if (content.startsWith(prefix2)) finalWordCount = content.removePrefix(prefix2).length
+    /** 讀取 Notification.EXTRA_MESSAGES ("android.messages")：一則通知可包含多則訊息 */
+    private fun extractMessages(extras: android.os.Bundle): List<ParsedMessage> {
+        val arr = runCatching {
+            @Suppress("DEPRECATION")
+            extras.getParcelableArray("android.messages")
+        }.getOrNull() ?: return emptyList()
+
+        val out = ArrayList<ParsedMessage>(arr.size)
+        arr.forEach { item ->
+            val b = item as? android.os.Bundle ?: return@forEach
+            val text = b.getCharSequence("text")?.toString()?.trim().orEmpty()
+            if (text.isEmpty()) return@forEach
+            val time = b.getLong("time", 0L)
+            val sender = b.getCharSequence("sender")?.toString()
+            out.add(ParsedMessage(text, time, sender))
         }
+        return out.sortedBy { it.time }
+    }
 
+    private fun addMessage(appName: String, senderName: String, subSender: String?, body: String, isGroup: Boolean, ts: Long) {
+        val name = senderName.trim()
+        if (name.isBlank()) return
+        DataRepository.addInteraction(
+            InteractionRecord(
+                rawSenderName = name,
+                appName = appName,
+                isIncoming = true,
+                // 舊版算的是含「發言人 :」前綴的長度，字數統計偏高
+                wordCount = body.trim().length,
+                durationSeconds = 0,
+                isGroup = isGroup,
+                timestamp = if (ts in 1..System.currentTimeMillis() + 60000L) ts else System.currentTimeMillis(),
+                isMissedCall = false,
+                isCall = false,
+                // ⭐ 舊版算出 subSender 卻沒放進紀錄，群組發言排行永遠是空的
+                subSender = subSender?.trim()?.takeIf { it.isNotBlank() && it != name }
+            )
+        )
+    }
 
-        DataRepository.addInteraction(InteractionRecord(
-            rawSenderName = senderName.trim(),
-            appName = appName,
-            isIncoming = true,
-            wordCount = if (isCall) 0 else content.length,
-            durationSeconds = parsedDurationSecs,
-            isGroup = isGroup
-        ))
+    /** @return null = 不是通話；否則 (是否未接, 通話秒數) */
+    private fun detectCall(appName: String, title: String, content: String): Pair<Boolean, Int>? {
+        val blob = "$title $content"
+        val missed = blob.contains("未接來電") || blob.contains("取消通話") || blob.contains("未接視訊")
+        val answered = blob.contains("通話時間") || blob.contains("已通話") || blob.contains("通話結束")
+        if (appName != "電話" && !missed && !answered) return null
+        if (appName == "電話" && !missed && !answered) {
+            // 來電中／通話中的常駐通知，等結束後的那則再算，避免重複計次
+            return null
+        }
+        if (missed) return true to 0
+        return false to parseCallSeconds(content)
+    }
+
+    // 舊版只認得「12分34秒」一種格式，其他寫法（1:02:03 / 1小時2分）通話時長全部算 0
+    private fun parseCallSeconds(content: String): Int {
+        Regex("(\\d{1,2}):(\\d{2}):(\\d{2})").find(content)?.let {
+            return it.groupValues[1].toInt() * 3600 + it.groupValues[2].toInt() * 60 + it.groupValues[3].toInt()
+        }
+        Regex("(\\d{1,3})\\s*小時\\s*(\\d{1,2})\\s*分").find(content)?.let {
+            val sec = Regex("(\\d{1,2})\\s*秒").find(content)?.groupValues?.get(1)?.toInt() ?: 0
+            return it.groupValues[1].toInt() * 3600 + it.groupValues[2].toInt() * 60 + sec
+        }
+        Regex("(\\d{1,3})\\s*[:：分]\\s*(\\d{1,2})\\s*秒?").find(content)?.let {
+            return it.groupValues[1].toInt() * 60 + it.groupValues[2].toInt()
+        }
+        Regex("(\\d{1,4})\\s*秒").find(content)?.let { return it.groupValues[1].toInt() }
+        return 0
+    }
+
+    private fun stripCallSuffix(title: String): String =
+        title.replace("未接來電", "").replace("未接視訊通話", "")
+            .replace("通話時間", "").trim().trim('-', '·', '•', ' ')
+
+    private fun isNoise(content: String): Boolean {
+        val c = content.trim()
+        if (c.isEmpty()) return true
+        if (c in noiseExact) return true
+        return noisePrefix.any { c.startsWith(it, ignoreCase = true) }
+    }
+
+    /** 同一則訊息在短時間內重複 post 就略過 */
+    private fun markSeen(key: String?, whenMs: Long, payload: String): Boolean {
+        val id = (key ?: "") + "|" + whenMs + "|" + payload.hashCode()
+        val now = System.currentTimeMillis()
+        val prev = seenMessages[id]
+        if (prev != null && now - prev < 60_000L) return false
+        seenMessages[id] = now
+        return true
     }
 }
 
 class ChatTrackerService : AccessibilityService() {
+
+    private companion object {
+        // 藍圖規定單次停留上限 30 分鐘，舊版寫成 3600 秒（1 小時），
+        // 加上碼錶不會停，時間會被灌到誇張的數字
+        const val MAX_SESSION_SECONDS = 1800
+        const val CONTENT_THROTTLE_MS = 1200L
+        const val MAX_TREE_DEPTH = 12
+        const val MAX_TREE_NODES = 400
+    }
+
     private var currentChatName: String? = null
     private var currentAppName: String? = null
     private var chatStartTime: Long = 0
+    private var lastContentScan: Long = 0
+    private var screenReceiver: BroadcastReceiver? = null
+
     private val targetApps = mapOf(
-        "jp.naver.line.android" to "LINE", "com.facebook.orca" to "Messenger", "com.instagram.android" to "Instagram",
+        "jp.naver.line.android" to "LINE", "com.facebook.orca" to "Messenger",
+        "com.instagram.android" to "Instagram", "com.instagram.barcelona" to "Threads",
+        "com.whatsapp" to "WhatsApp", "org.telegram.messenger" to "Telegram",
         "com.google.android.dialer" to "電話", "com.samsung.android.incallui" to "電話"
     )
 
-    override fun onServiceConnected() { super.onServiceConnected(); DataRepository.init(applicationContext) }
+    private val ignoreTitles = setOf(
+        "LINE", "主頁", "聊天", "通話", "Instagram", "Messenger", "Threads", "WhatsApp", "Telegram",
+        "搜尋", "設定", "動態", "貼文", "留言", "分享", "限時動態", "觀看完整 Reel",
+        "更多選項", "應用程式圖示", "查看洞察報告", "新增", "相機", "通知"
+    )
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        DataRepository.init(applicationContext)
+        // 關螢幕／解鎖時強制結算：舊版整夜掛在聊天室，隔天一開就是好幾小時
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) { leaveChat() }
+        }
+        screenReceiver = receiver
+        runCatching { ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED) }
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        val appName = targetApps[event.packageName?.toString()] ?: return
+        val appName = targetApps[event.packageName?.toString()]
 
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-            val root = rootInActiveWindow ?: return
-            val isChatScreen = hasEditText(root) || extractChatName(root) != null || appName == "電話"
-            if (!isChatScreen) { leaveChat(); return }
-            val chatName = extractChatName(root) ?: event.text.firstOrNull()?.toString()
-            val ignoreList = listOf("LINE", "主頁", "聊天", "通話", "Instagram", "Messenger", "搜尋", "觀看完整 Reel", "更多選項", "應用程式圖示", "留言", "分享", "查看洞察報告")
-            if (chatName != null && chatName !in ignoreList && chatName.length < 25) {
-                enterChat(chatName, appName)
-            } else {
-                leaveChat()
-            }
+        // ⭐ 最關鍵的修正：舊版對非目標 App 直接 return，碼錶永遠不會停。
+        // 使用者切去別的 App、回桌面、甚至關螢幕，時間都繼續累加到最後一個聊天室頭上。
+        if (appName == null) {
+            leaveChat()
+            return
         }
+
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> Unit
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                // 內容變更事件在滑動時每秒可觸發數十次，舊版每次都走訪整棵節點樹 → 明顯卡頓
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastContentScan < CONTENT_THROTTLE_MS) return
+                lastContentScan = now
+            }
+            else -> return
+        }
+
+        val root = rootInActiveWindow ?: return
+        val rawTitle = extractChatName(root)
+
+        // ⛔ 舊版在抓不到標題時退而用 event.text（往往就是訊息內容本身），
+        // 於是訊息文字被當成「聯絡人名稱」建成一堆假聯絡人並瓜分停留時間。
+        if (rawTitle == null) { leaveChat(); return }
+
+        val chatName = rawTitle.trim()
+        if (chatName.isEmpty() || chatName.length > 60 || chatName in ignoreTitles) { leaveChat(); return }
+
+        // 通話畫面沒有輸入框，其餘 App 必須看到輸入框才算真的在聊天室
+        if (appName != "電話" && !hasEditText(root, 0, intArrayOf(0))) { leaveChat(); return }
+
+        enterChat(chatName, appName)
     }
 
-    private fun hasEditText(node: AccessibilityNodeInfo?): Boolean {
-        if (node == null) return false
+    private fun hasEditText(node: AccessibilityNodeInfo?, depth: Int, visited: IntArray): Boolean {
+        if (node == null || depth > MAX_TREE_DEPTH || visited[0] > MAX_TREE_NODES) return false
+        visited[0]++
         if (node.isEditable || node.className?.toString()?.contains("EditText") == true) return true
         for (i in 0 until node.childCount) {
-            if (hasEditText(node.getChild(i))) return true
+            if (hasEditText(node.getChild(i), depth + 1, visited)) return true
         }
         return false
     }
@@ -608,38 +960,66 @@ class ChatTrackerService : AccessibilityService() {
             "com.instagram.android:id/action_bar_title",
             "com.instagram.android:id/thread_title_textview",
             "com.instagram.android:id/action_bar_textview_title",
-            "com.samsung.android.incallui:id/name"
+            "org.telegram.messenger:id/action_bar_title",
+            "com.whatsapp:id/conversation_contact_name",
+            "com.samsung.android.incallui:id/name",
+            "com.google.android.dialer:id/contactgrid_contact_name"
         )
         for (id in ids) {
-            val nodes = root.findAccessibilityNodeInfosByViewId(id)
-            if (nodes.isNotEmpty() && nodes[0].text != null) return nodes[0].text.toString()
+            val nodes = runCatching { root.findAccessibilityNodeInfosByViewId(id) }.getOrNull() ?: continue
+            val text = nodes.firstOrNull { it.text != null }?.text?.toString()
+            if (!text.isNullOrBlank()) return text
         }
         return null
     }
 
     private fun enterChat(chatName: String, appName: String) {
-        if (currentChatName == chatName) return
+        if (currentChatName == chatName && currentAppName == appName) return
         leaveChat()
-        currentChatName = chatName; currentAppName = appName; chatStartTime = System.currentTimeMillis()
+        currentChatName = chatName
+        currentAppName = appName
+        chatStartTime = System.currentTimeMillis()
     }
 
     private fun leaveChat() {
-        if (currentChatName != null && chatStartTime > 0) {
-            val durationSecs = ((System.currentTimeMillis() - chatStartTime) / 1000).toInt()
-            val safeDurationSecs = durationSecs.coerceAtMost(3600)
-            if (safeDurationSecs > 0) {
-                val aliasesMap = DataRepository.aliases.value
-                val finalSenderName = aliasesMap[currentChatName!!] ?: currentChatName!!
+        val name = currentChatName
+        val app = currentAppName
+        val start = chatStartTime
+        currentChatName = null
+        currentAppName = null
+        chatStartTime = 0
+        if (name == null || start <= 0L) return
 
-                DataRepository.addInteraction(InteractionRecord(
-                    rawSenderName = finalSenderName, appName = currentAppName ?: "Unknown",
-                    isIncoming = false, wordCount = 0, durationSeconds = safeDurationSecs
-                ))
-            }
-            currentChatName = null; chatStartTime = 0
-        }
+        val elapsed = (System.currentTimeMillis() - start) / 1000L
+        // 超過上限視為掛在背景，直接丟棄而不是記成上限值 —— 記成上限一樣會虛胖
+        if (elapsed <= 0L || elapsed > MAX_SESSION_SECONDS) return
+
+        DataRepository.addInteraction(
+            InteractionRecord(
+                rawSenderName = name,
+                appName = app ?: "Unknown",
+                isIncoming = false,
+                wordCount = 0,
+                durationSeconds = elapsed.toInt()
+            )
+        )
     }
-    override fun onInterrupt() {}
+
+    override fun onInterrupt() { leaveChat() }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        leaveChat()
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        leaveChat()
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
+        super.onDestroy()
+    }
 }
 
 // ==========================================
@@ -671,12 +1051,16 @@ class RelateViewModel : ViewModel() {
     fun setAutoBackup(enabled: Boolean, pwd: String) { DataRepository.setAutoBackup(enabled, pwd) }
     fun restoreAutoBackup(context: Context): Boolean { return DataRepository.restoreAutoBackup(context) }
 
+    private fun startOfDay(ts: Long): Long = Calendar.getInstance().apply {
+        timeInMillis = ts
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
     fun getFilteredRecords(records: List<InteractionRecord>, filter: DateFilter): List<InteractionRecord> {
         return when (filter.type) {
             FilterType.SPECIFIC_DAY -> {
-                val cal = Calendar.getInstance().apply { timeInMillis = filter.timestamp }
-                val start = cal.apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
-                val end = cal.apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59); set(Calendar.MILLISECOND, 999) }.timeInMillis
+                val start = startOfDay(filter.timestamp)
+                val end = start + 86_399_999L
                 records.filter { it.timestamp in start..end }
             }
             FilterType.WEEK -> {
@@ -692,13 +1076,13 @@ class RelateViewModel : ViewModel() {
         val filtered = getFilteredRecords(records, filter)
         if (filtered.isEmpty()) return SocialPersona.ALL_TYPES[0]
 
-        val totalDurSecs = filtered.sumOf { it.durationSeconds }
+        val totalDurSecs = filtered.sumOf { it.durationSeconds.toLong() }
         val totalMsg = filtered.count { it.isIncoming }
 
         if (totalMsg == 0 && totalDurSecs > 60) return SocialPersona.ALL_TYPES[1]
         if (totalMsg == 0) return SocialPersona.ALL_TYPES[2]
 
-        val avgSecsPerMsg = if(totalMsg > 0) totalDurSecs / totalMsg else totalDurSecs
+        val avgSecsPerMsg = if (totalMsg > 0) totalDurSecs / totalMsg else totalDurSecs
         return when {
             avgSecsPerMsg > 120 -> SocialPersona.ALL_TYPES[3]
             totalMsg > 50 && avgSecsPerMsg < 15 -> SocialPersona.ALL_TYPES[4]
@@ -725,8 +1109,13 @@ class RelateViewModel : ViewModel() {
 
     fun getAppUsageStats(records: List<InteractionRecord>, filter: DateFilter): List<AppUsageStat> {
         return getFilteredRecords(records, filter).groupBy { it.appName }.map { (appName, appRecords) ->
-            AppUsageStat(appName = appName, totalDurationSeconds = appRecords.sumOf { it.durationSeconds }, incomingCount = appRecords.count { it.isIncoming })
-        }.filter { it.totalDurationSeconds > 0 || it.incomingCount > 0 }.sortedByDescending { it.totalDurationSeconds + (it.incomingCount * 5L) }
+            AppUsageStat(
+                appName = appName,
+                totalDurationSeconds = appRecords.sumOf { it.durationSeconds.toLong() },
+                incomingCount = appRecords.count { it.isIncoming }
+            )
+        }.filter { it.totalDurationSeconds > 0 || it.incomingCount > 0 }
+            .sortedByDescending { it.totalDurationSeconds + (it.incomingCount * 5L) }
     }
 
     fun getCategoryStats(records: List<InteractionRecord>, filter: DateFilter, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>): List<CategoryStat> {
@@ -735,68 +1124,73 @@ class RelateViewModel : ViewModel() {
             val catId = catsMap[unifiedName] ?: ContactCategory.OTHER.id
             availableCats.find { c -> c.id == catId } ?: ContactCategory.OTHER
         }.map { (category, catRecords) ->
-            CategoryStat(category = category, totalDurationSeconds = catRecords.sumOf { it.durationSeconds }, incomingCount = catRecords.count { it.isIncoming })
+            CategoryStat(
+                category = category,
+                totalDurationSeconds = catRecords.sumOf { it.durationSeconds.toLong() },
+                incomingCount = catRecords.count { it.isIncoming }
+            )
         }.filter { it.totalDurationSeconds > 0 || it.incomingCount > 0 }.sortedByDescending { it.totalDurationSeconds }
     }
 
-    fun getDynamicLeaderboard(baseRecords: List<InteractionRecord>, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>): List<SenderStat> {
-        return baseRecords.groupBy { currentAliases[it.rawSenderName] ?: it.rawSenderName }
+    /**
+     * 唯一的統計建構器。
+     * 舊版 getLeaderboard 與 getDynamicLeaderboard 各寫了一份規則且互相衝突
+     * （一個把未接來電算進訊息、另一個不算；一個排除通話、另一個沒排除），
+     * 於是「總覽」點進去的排行和「排行」分頁的數字對不起來。
+     */
+    private fun buildStats(
+        records: List<InteractionRecord>,
+        catsMap: Map<String, String>,
+        currentAliases: Map<String, String>,
+        availableCats: List<ContactCategory>
+    ): List<SenderStat> {
+        return records.groupBy { currentAliases[it.rawSenderName] ?: it.rawSenderName }
             .map { (unifiedName, userRecords) ->
-                val msgIncoming = userRecords.filter { it.isIncoming && !it.isCall && !it.isMissedCall }
-                val calls = userRecords.filter { it.isCall || it.appName == "電話" }
+                // 舊資料沒有 isCall 欄位，靠 appName 補判斷
+                val calls = userRecords.filter { it.isCall || it.isMissedCall || it.appName == "電話" }
+                val msgIncoming = userRecords.filter { it.isIncoming && !it.isCall && !it.isMissedCall && it.appName != "電話" }
                 val avgWords = if (msgIncoming.isNotEmpty()) msgIncoming.sumOf { it.wordCount } / msgIncoming.size else 0
                 val catId = catsMap[unifiedName] ?: ContactCategory.OTHER.id
                 val categoryObj = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
 
                 val subSenderCounts = msgIncoming.mapNotNull { it.subSender }
-                    .filter { it != unifiedName }
+                    .filter { it.isNotBlank() && it != unifiedName }
                     .groupingBy { it }.eachCount()
 
                 SenderStat(
-                    unifiedName = unifiedName, incomingCount = userRecords.size, msgCount = msgIncoming.size, callCount = calls.size,
-                    incomingWords = msgIncoming.sumOf { it.wordCount }, avgWordsPerMessage = avgWords,
-                    totalDurationSeconds = userRecords.sumOf { it.durationSeconds }, callDurationSeconds = calls.sumOf { it.durationSeconds },
-                    appNames = userRecords.map { it.appName }.toSet(), category = categoryObj,
-                    isGroup = userRecords.any { it.isGroup }, subSenders = subSenderCounts.toList().sortedByDescending { it.second }.toMap()
-                )
-            }.filter { it.totalDurationSeconds > 0 || it.incomingCount > 0 }.sortedByDescending { it.totalDurationSeconds + (it.incomingCount * 60L) }
-    }
-    fun getLeaderboard(records: List<InteractionRecord>, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>, filter: DateFilter, sort: SortType, catFilter: ContactCategory?, appFlt: String?): List<SenderStat> {
-        val filteredByTimeAndApp = getFilteredRecords(records, filter).let { if (appFlt != null) it.filter { r -> r.appName == appFlt } else it }
-        val baseStats = filteredByTimeAndApp.groupBy { currentAliases[it.rawSenderName] ?: it.rawSenderName }
-            .map { (unifiedName, userRecords) ->
-                val chats = userRecords.filter { !it.isCall }
-                val calls = userRecords.filter { it.isCall || it.appName == "電話" }
-                val msgIncoming = chats.filter { it.isIncoming && !it.isMissedCall }
-
-                val avgWords = if (msgIncoming.isNotEmpty()) msgIncoming.sumOf { it.wordCount } / msgIncoming.size else 0
-                val catId = catsMap[unifiedName] ?: ContactCategory.OTHER.id
-                val categoryObj = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
-
-                val subSenderCounts = msgIncoming.mapNotNull { it.subSender }.groupingBy { it }.eachCount()
-                val sortedSubSenders = subSenderCounts.toList().sortedByDescending { it.second }.toMap()
-
-                SenderStat(
                     unifiedName = unifiedName,
-                    incomingCount = userRecords.size,
+                    recordCount = userRecords.size,
+                    incomingCount = userRecords.count { it.isIncoming },
                     msgCount = msgIncoming.size,
                     callCount = calls.size,
                     incomingWords = msgIncoming.sumOf { it.wordCount },
                     avgWordsPerMessage = avgWords,
-                    totalDurationSeconds = userRecords.sumOf { it.durationSeconds },
-                    callDurationSeconds = calls.sumOf { it.durationSeconds },
+                    totalDurationSeconds = userRecords.sumOf { it.durationSeconds.toLong() },
+                    callDurationSeconds = calls.sumOf { it.durationSeconds.toLong() },
                     appNames = userRecords.map { it.appName }.toSet(),
                     category = categoryObj,
                     isGroup = userRecords.any { it.isGroup },
-                    subSenders = sortedSubSenders
+                    subSenders = subSenderCounts.toList().sortedByDescending { it.second }.toMap()
                 )
-            }.filter { it.totalDurationSeconds > 0 || it.incomingCount > 0 }
+            }.filter { it.totalDurationSeconds > 0 || it.recordCount > 0 }
+    }
+
+    fun getDynamicLeaderboard(baseRecords: List<InteractionRecord>, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>): List<SenderStat> {
+        return buildStats(baseRecords, catsMap, currentAliases, availableCats)
+            .sortedByDescending { it.totalDurationSeconds + (it.incomingCount * 60L) }
+    }
+
+    fun getLeaderboard(records: List<InteractionRecord>, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>, filter: DateFilter, sort: SortType, catFilter: ContactCategory?, appFlt: String?): List<SenderStat> {
+        val scoped = getFilteredRecords(records, filter).let { if (appFlt != null) it.filter { r -> r.appName == appFlt } else it }
+        val baseStats = buildStats(scoped, catsMap, currentAliases, availableCats)
         val filteredByCategory = if (catFilter != null) baseStats.filter { it.category.id == catFilter.id } else baseStats
 
         return if (sort == SortType.TIME) {
             filteredByCategory.sortedByDescending { it.totalDurationSeconds }
         } else {
-            filteredByCategory.sortedByDescending { it.incomingCount }
+            // 「互動頻率」應該看真正收到的訊息與通話數，
+            // 舊版用的是「全部紀錄筆數」，連自己開著聊天室的停留紀錄都算進去
+            filteredByCategory.sortedByDescending { it.msgCount + it.callCount }
         }
     }
 
@@ -804,7 +1198,7 @@ class RelateViewModel : ViewModel() {
         val hourlyData = Array(24) { HourlyStat(it) }
         getFilteredRecords(records, filter).filter { (aliases[it.rawSenderName] ?: it.rawSenderName) == unifiedName }.forEach {
             val hour = Calendar.getInstance().apply { timeInMillis = it.timestamp }.get(Calendar.HOUR_OF_DAY)
-            hourlyData[hour].durationSeconds += it.durationSeconds
+            hourlyData[hour].durationSeconds += it.durationSeconds.toLong()
             if (it.isMissedCall) hourlyData[hour].missedCalls += 1
             else if (it.wordCount > 0 || it.isIncoming) hourlyData[hour].msgCount += 1
         }
@@ -838,23 +1232,35 @@ class RelateViewModel : ViewModel() {
     fun importBackup(str: String, key: String) = DataRepository.importBackupString(str, key)
 }
 
-fun getDeviceUsageTimeSec(context: Context, filter: DateFilter, weekStartDay: Int): Int {
-    if (!hasUsageStatsPermission(context)) return 0
-    val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+fun getDeviceUsageTimeSec(context: Context, filter: DateFilter, weekStartDay: Int, allRangeStart: Long = 0L): Long {
+    if (!hasUsageStatsPermission(context)) return 0L
+    val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager ?: return 0L
     val (start, end) = when (filter.type) {
         FilterType.SPECIFIC_DAY -> {
-            val c = Calendar.getInstance().apply { timeInMillis = filter.timestamp }
-            c.apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis to c.apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59); set(Calendar.MILLISECOND, 999) }.timeInMillis
+            val s = Calendar.getInstance().apply {
+                timeInMillis = filter.timestamp
+                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            s to (s + 86_399_999L)
         }
-        FilterType.WEEK -> {
-            val s = getStartOfWeekTimestamp(filter.timestamp, weekStartDay)
-            val e = getEndOfWeekTimestamp(filter.timestamp, weekStartDay)
-            s to e
+        FilterType.WEEK -> getStartOfWeekTimestamp(filter.timestamp, weekStartDay) to getEndOfWeekTimestamp(filter.timestamp, weekStartDay)
+        // 舊版「全部」直接回 0，佔比分析永遠不會出現
+        FilterType.ALL -> {
+            if (allRangeStart <= 0L) return 0L
+            allRangeStart to System.currentTimeMillis()
         }
-        FilterType.ALL -> return 0
     }
-    val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, start, end)
-    return (stats?.sumOf { it.totalTimeInForeground } ?: 0L / 1000L).toInt()
+    if (end <= start) return 0L
+
+    return runCatching {
+        // ⚠️ 舊版寫成 `stats?.sumOf {...} ?: 0L / 1000L`
+        // Kotlin 的 `/` 優先序高於 `?:`，所以 /1000 只套用在「0L」這個預設值上，
+        // 真正的加總完全沒有除以 1000 → 回傳的是「毫秒」卻被當成「秒」，
+        // 於是畫面出現 742246 小時這種數字。
+        val aggregated = usm.queryAndAggregateUsageStats(start, end)
+        val totalMs = aggregated?.values?.sumOf { it.totalTimeInForeground } ?: 0L
+        totalMs / 1000L
+    }.getOrDefault(0L)
 }
 
 fun hasUsageStatsPermission(context: Context): Boolean {
@@ -873,7 +1279,7 @@ class MainActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         @Suppress("DEPRECATION")
-        window.navigationBarColor = android.graphics.Color.WHITE
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
@@ -1064,7 +1470,7 @@ fun MainAppContent(viewModel: RelateViewModel) {
             }
         }
     ) { paddingValues ->
-        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues).navigationBarsPadding()) {
             when (activeTab) {
                 "overview" -> OverviewView(viewModel)
                 "leaderboard" -> LeaderboardView(viewModel)
@@ -1076,17 +1482,23 @@ fun MainAppContent(viewModel: RelateViewModel) {
 }
 
 @Composable
-fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit) {
+fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStartDay: Int = Calendar.MONDAY) {
     val (currentMonthCal, setCurrentMonthCal) = remember(selectedTime) { mutableStateOf(Calendar.getInstance().apply { timeInMillis = selectedTime }) }
 
     val year = currentMonthCal.get(Calendar.YEAR)
     val month = currentMonthCal.get(Calendar.MONTH)
 
-    val firstDayCal = Calendar.getInstance().apply { set(year, month, 1) }
-    val firstDayOfWeek = firstDayCal.get(Calendar.DAY_OF_WEEK) - 1
+    val firstDayCal = Calendar.getInstance().apply {
+        set(year, month, 1)
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }
+    // 舊版固定以「週日」開頭，和設定頁的「一週起始日」不一致，日期會整排錯位
+    val safeStart = if (weekStartDay in Calendar.SUNDAY..Calendar.SATURDAY) weekStartDay else Calendar.MONDAY
+    val firstDayOfWeek = ((firstDayCal.get(Calendar.DAY_OF_WEEK) - safeStart) + 7) % 7
     val daysInMonth = firstDayCal.getActualMaximum(Calendar.DAY_OF_MONTH)
 
-    val weekdays = listOf("日", "一", "二", "三", "四", "五", "六")
+    val allWeekdays = listOf("日", "一", "二", "三", "四", "五", "六")
+    val weekdays = List(7) { allWeekdays[(safeStart - 1 + it) % 7] }
 
     Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(16.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(16.dp)).padding(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -1124,7 +1536,11 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit) {
                                 .clip(CircleShape)
                                 .background(if (isSelected) AppColors.ActiveBlue else Color.Transparent)
                                 .clickable {
-                                    val cal = Calendar.getInstance().apply { set(year, month, dayNumber) }
+                                    val cal = Calendar.getInstance().apply {
+                                        set(year, month, dayNumber)
+                                        set(Calendar.HOUR_OF_DAY, 12); set(Calendar.MINUTE, 0)
+                                        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                                    }
                                     onDateSelected(cal.timeInMillis)
                                 },
                             contentAlignment = Alignment.Center
@@ -1161,8 +1577,9 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
             Spacer(modifier = Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = {
-                    val offset = if(currentFilter.type == FilterType.SPECIFIC_DAY) -86400000L else -7 * 86400000L
-                    onFilterChange(currentFilter.copy(timestamp = currentFilter.timestamp + offset))
+                    val days = if (currentFilter.type == FilterType.SPECIFIC_DAY) -1 else -7
+                    val shifted = Calendar.getInstance().apply { timeInMillis = currentFilter.timestamp; add(Calendar.DATE, days) }.timeInMillis
+                    onFilterChange(currentFilter.copy(timestamp = shifted))
                 }, modifier = Modifier.background(AppColors.Surface, CircleShape).size(36.dp).border(1.dp, AppColors.BorderLight, CircleShape)) {
                     Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, contentDescription = "上一筆", tint = AppColors.TextPrimary)
                 }
@@ -1190,8 +1607,9 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
                 }
 
                 IconButton(onClick = {
-                    val offset = if(currentFilter.type == FilterType.SPECIFIC_DAY) 86400000L else 7 * 86400000L
-                    onFilterChange(currentFilter.copy(timestamp = currentFilter.timestamp + offset))
+                    val days = if (currentFilter.type == FilterType.SPECIFIC_DAY) 1 else 7
+                    val shifted = Calendar.getInstance().apply { timeInMillis = currentFilter.timestamp; add(Calendar.DATE, days) }.timeInMillis
+                    onFilterChange(currentFilter.copy(timestamp = shifted))
                 }, modifier = Modifier.background(AppColors.Surface, CircleShape).size(36.dp).border(1.dp, AppColors.BorderLight, CircleShape)) {
                     Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = "下一筆", tint = AppColors.TextPrimary)
                 }
@@ -1203,7 +1621,7 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
                 MinimalCalendar(selectedTime = currentFilter.timestamp, onDateSelected = {
                     onFilterChange(currentFilter.copy(timestamp = it))
                     setShowCalendar(false)
-                })
+                }, weekStartDay = weekStartDay)
             }
         }
     }
@@ -1275,6 +1693,9 @@ fun OverviewView(viewModel: RelateViewModel) {
     val persona = remember(filteredRecords) { viewModel.getSocialPersona(filteredRecords, DateFilter(FilterType.ALL)) }
 
     val leaderboard = remember(filteredRecords, categoriesMap, aliases, availableCats) { viewModel.getDynamicLeaderboard(filteredRecords, categoriesMap, aliases, availableCats) }
+    val catStats = remember(filteredRecords, categoriesMap, aliases, availableCats) {
+        viewModel.getCategoryStats(filteredRecords, DateFilter(FilterType.ALL), categoriesMap, aliases, availableCats)
+    }
     val topTimeDrainer = leaderboard.maxByOrNull { it.totalDurationSeconds }
 
     val (showPersonaInfo, setShowPersonaInfo) = remember { mutableStateOf(false) }
@@ -1329,8 +1750,12 @@ fun OverviewView(viewModel: RelateViewModel) {
                     val context = LocalContext.current
                     val totalTimeSec = appStats.sumOf { it.totalDurationSeconds }
                     val totalNotifs = appStats.sumOf { it.incomingCount }
-                    val deviceTotalSecs = remember(filter, weekStartDay) { getDeviceUsageTimeSec(context, filter, weekStartDay) }
-                    val screenPct = if (deviceTotalSecs > 0 && totalTimeSec > 0) ((totalTimeSec.toFloat() / deviceTotalSecs.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
+                    val allRangeStart = remember(records) { records.minOfOrNull { it.timestamp } ?: 0L }
+                    val deviceTotalSecs = remember(filter, weekStartDay, allRangeStart) {
+                        getDeviceUsageTimeSec(context, filter, weekStartDay, allRangeStart)
+                    }
+                    val screenPct = if (deviceTotalSecs > 0L && totalTimeSec > 0L)
+                        ((totalTimeSec.toFloat() / deviceTotalSecs.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
 
                     Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(20.dp)) {
@@ -1349,17 +1774,21 @@ fun OverviewView(viewModel: RelateViewModel) {
                                 val hrs = totalTimeSec / 3600
                                 val mins = (totalTimeSec % 3600) / 60
                                 val secs = totalTimeSec % 60
-                                Row(verticalAlignment = Alignment.Bottom) {
+                                // 數字過大時舊版會把整排字擠到換行破版，改成單行可橫向捲動
+                                Row(
+                                    verticalAlignment = Alignment.Bottom,
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                                ) {
                                     if (hrs > 0) {
-                                        Text("$hrs", fontSize = 36.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary)
-                                        Text("小時", fontSize = 14.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(start=2.dp, end=6.dp, bottom=6.dp))
+                                        Text("$hrs", fontSize = 36.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
+                                        Text("小時", fontSize = 14.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(start=2.dp, end=6.dp, bottom=6.dp))
                                     }
                                     if (mins > 0 || hrs > 0) {
-                                        Text("$mins", fontSize = 36.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary)
-                                        Text("分鐘", fontSize = 14.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(start=2.dp, end=6.dp, bottom=6.dp))
+                                        Text("$mins", fontSize = 36.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
+                                        Text("分鐘", fontSize = 14.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(start=2.dp, end=6.dp, bottom=6.dp))
                                     }
-                                    Text("$secs", fontSize = 36.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary)
-                                    Text("秒", fontSize = 14.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(start=2.dp, bottom=6.dp))
+                                    Text("$secs", fontSize = 36.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
+                                    Text("秒", fontSize = 14.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(start=2.dp, bottom=6.dp))
                                 }
                                 if (screenPct > 0) {
                                     Text("通訊軟體佔據您本期手機總使用的 $screenPct%", fontSize = 12.sp, color = AppColors.ActiveBlue, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top=2.dp))
@@ -1431,7 +1860,9 @@ fun OverviewView(viewModel: RelateViewModel) {
                                             Box(modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
                                                 Box(modifier = Modifier.fillMaxWidth(progress).fillMaxHeight().background(stat.color))
                                             }
-                                            Text("${(stat.percentage * 100).toInt()}%", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary, modifier = Modifier.width(40.dp), textAlign = TextAlign.End)
+                                            Text("${(stat.percentage * 100).toInt()}%", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary,
+                                                maxLines = 1, softWrap = false,
+                                                modifier = Modifier.widthIn(min = 44.dp).padding(start = 8.dp), textAlign = TextAlign.End)
                                         }
                                     }
                                 }
@@ -1456,7 +1887,11 @@ fun OverviewView(viewModel: RelateViewModel) {
                                             Box(modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
                                                 Box(modifier = Modifier.fillMaxWidth(progress).fillMaxHeight().background(brandColor))
                                             }
-                                            Text(valText, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary, modifier = Modifier.width(60.dp), textAlign = TextAlign.End)
+                                            // 舊版固定 width(60.dp) 又沒鎖單行，"250888h 41m" 這種長字串
+                                            // 會被折成三行，就是截圖看到的破版
+                                            Text(valText, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary,
+                                                maxLines = 1, softWrap = false, overflow = TextOverflow.Visible,
+                                                modifier = Modifier.widthIn(min = 60.dp).padding(start = 8.dp), textAlign = TextAlign.End)
                                         }
                                     }
                                 }
@@ -1466,7 +1901,6 @@ fun OverviewView(viewModel: RelateViewModel) {
                 }
             }
 
-            val catStats = viewModel.getCategoryStats(filteredRecords, DateFilter(FilterType.ALL), categoriesMap, aliases, availableCats)
             if (catStats.isNotEmpty()) {
                 item {
                     val (showTime, setShowTime) = remember { mutableStateOf(true) }
@@ -1544,7 +1978,7 @@ fun CatStatCard(stat: CategoryStat, showTime: Boolean) {
 @Composable
 fun ContactDetailDialog(stat: SenderStat, hourlyData: Array<HourlyStat>, missedCalls: Int, onDismiss: () -> Unit) {
     val (selectedHour, setSelectedHour) = remember { mutableStateOf<Int?>(null) }
-    val maxAct = hourlyData.maxOfOrNull { it.score }?.coerceAtLeast(1) ?: 1
+    val maxAct = hourlyData.maxOfOrNull { it.score }?.coerceAtLeast(1L) ?: 1L
     val avgAct = hourlyData.map { it.score }.average().toFloat()
 
     AlertDialog(
@@ -1563,7 +1997,8 @@ fun ContactDetailDialog(stat: SenderStat, hourlyData: Array<HourlyStat>, missedC
             }
         },
         text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
+            // 內容較高的機型會被裁掉，加上垂直捲動
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
                 if (missedCalls > 0) {
                     Row(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).background(AppColors.WorkBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
@@ -1591,7 +2026,7 @@ fun ContactDetailDialog(stat: SenderStat, hourlyData: Array<HourlyStat>, missedC
 
                 Box(modifier = Modifier.fillMaxWidth().height(110.dp).padding(top = 12.dp)) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        val yPos = size.height - (avgAct / maxAct) * size.height
+                        val yPos = size.height - (avgAct / maxAct.toFloat()) * size.height
                         drawLine(
                             color = Color.Red.copy(alpha = 0.5f), start = Offset(0f, yPos), end = Offset(size.width, yPos),
                             strokeWidth = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f))
@@ -1663,10 +2098,11 @@ fun LeaderboardView(viewModel: RelateViewModel) {
         viewModel.getLeaderboard(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter)
     }
     val availableApps = remember(records) { records.map { it.appName }.distinct().sorted() }
+    // 長條圖的基準必須跟排序基準一致，否則排第一名的人長條卻不是最長
     val maxScore = if (sort == SortType.TIME) {
         leaderboard.maxOfOrNull { it.totalDurationSeconds }?.toFloat()?.coerceAtLeast(1f) ?: 1f
     } else {
-        leaderboard.maxOfOrNull { it.incomingCount }?.toFloat()?.coerceAtLeast(1f) ?: 1f
+        leaderboard.maxOfOrNull { it.msgCount + it.callCount }?.toFloat()?.coerceAtLeast(1f) ?: 1f
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -1765,8 +2201,14 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     }
 
     if (selectedContact != null) {
-        val hourlyData = viewModel.getHourlyActivityForContact(records, aliases, selectedContact!!.unifiedName, filter)
-        val missedCalls = viewModel.getMissedCallsForContact(records, aliases, selectedContact!!.unifiedName, filter)
+        val target = selectedContact!!.unifiedName
+        // 舊版在每次重組時都對全部紀錄重跑一次 24 小時統計 → 對話框開著就一直掉frame
+        val hourlyData = remember(records, aliases, target, filter) {
+            viewModel.getHourlyActivityForContact(records, aliases, target, filter)
+        }
+        val missedCalls = remember(records, aliases, target, filter) {
+            viewModel.getMissedCallsForContact(records, aliases, target, filter)
+        }
         ContactDetailDialog(stat = selectedContact!!, hourlyData = hourlyData, missedCalls = missedCalls) {
             setSelectedContact(null)
         }
@@ -1776,8 +2218,11 @@ fun LeaderboardView(viewModel: RelateViewModel) {
 // 🏆 防跑版最佳化：為 appNames 加入 LazyRow 滾動支援
 @Composable
 fun StatCardDetailed(stat: SenderStat, maxScore: Float, sortType: SortType) {
-    val currentScore = if (sortType == SortType.TIME) stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
-    val progress by animateFloatAsState(targetValue = currentScore / maxScore, animationSpec = tween(800, easing = FastOutSlowInEasing), label = "")
+    val currentScore = if (sortType == SortType.TIME) stat.totalDurationSeconds.toFloat() else (stat.msgCount + stat.callCount).toFloat()
+    val progress by animateFloatAsState(
+        targetValue = if (maxScore > 0f) (currentScore / maxScore).coerceIn(0f, 1f) else 0f,
+        animationSpec = tween(800, easing = FastOutSlowInEasing), label = ""
+    )
 
     Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(20.dp)) {
@@ -1830,20 +2275,32 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     val sortType by viewModel.contactsSortType.collectAsState()
     val catFilter by viewModel.contactsCatFilter.collectAsState()
 
-    val uniqueRawNames = records.map { it.rawSenderName }.distinct()
-    val unifiedNamesList = aliases.values.plus(uniqueRawNames).distinct()
+    val uniqueRawNames = remember(records) { records.map { it.rawSenderName }.distinct() }
 
-    val filteredContacts = unifiedNamesList.filter { name ->
-        val matchSearch = name.contains(searchQuery, ignoreCase = true)
-        val catId = categoriesMap[name] ?: ContactCategory.OTHER.id
-        val matchCat = catFilter == null || catId == catFilter?.id
-        matchSearch && matchCat
-    }.map { name ->
-        val interactionsCount = records.count { (aliases[it.rawSenderName] ?: it.rawSenderName) == name }
-        Pair(name, interactionsCount)
-    }.let { list ->
-        if (sortType == ContactSortType.NAME) list.sortedBy { it.first } else list.sortedByDescending { it.second }
-    }.map { it.first }
+    // ⚠️ 舊版是 aliases.values + 所有原始名稱，被合併掉的舊名稱仍然會留在清單上，
+    // 於是同一個人合併後反而變成兩張卡片。改成一律先歸戶再去重。
+    val unifiedNamesList = remember(uniqueRawNames, aliases) {
+        (uniqueRawNames.map { aliases[it] ?: it } + aliases.values).distinct()
+    }
+
+    // 舊版對每一位聯絡人都掃一次完整紀錄（O(聯絡人數 x 紀錄數)），
+    // 而且沒有 remember，每次重組都重算一遍 → 聯絡人分頁滑動明顯卡頓
+    val interactionCounts = remember(records, aliases) {
+        records.groupingBy { aliases[it.rawSenderName] ?: it.rawSenderName }.eachCount()
+    }
+
+    val activeCatFilterId = catFilter?.id
+    val filteredContacts = remember(unifiedNamesList, interactionCounts, searchQuery, activeCatFilterId, categoriesMap, sortType) {
+        unifiedNamesList.filter { name ->
+            val matchSearch = searchQuery.isBlank() || name.contains(searchQuery, ignoreCase = true)
+            val catId = categoriesMap[name] ?: ContactCategory.OTHER.id
+            val matchCat = activeCatFilterId == null || catId == activeCatFilterId
+            matchSearch && matchCat
+        }.let { list ->
+            if (sortType == ContactSortType.NAME) list.sortedBy { it }
+            else list.sortedByDescending { interactionCounts[it] ?: 0 }
+        }
+    }
 
     val (showAddCategoryDialog, setShowAddCategoryDialog) = remember { mutableStateOf(false) }
     val (newCategoryName, setNewCategoryName) = remember { mutableStateOf("") }
@@ -1888,13 +2345,15 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             item { Text("沒有符合的聯絡人", color = AppColors.TextSecondary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 20.dp)) }
         }
 
-        items(filteredContacts) { unifiedName ->
+        items(filteredContacts, key = { it }) { unifiedName ->
             val catId = categoriesMap[unifiedName] ?: ContactCategory.OTHER.id
             val currentCategory = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
             val (expandedCat, setExpandedCat) = remember { mutableStateOf(false) }
             val (expandedMerge, setExpandedMerge) = remember { mutableStateOf(false) }
 
-            val rawNamesForThis = uniqueRawNames.filter { (aliases[it] ?: it) == unifiedName }
+            val rawNamesForThis = remember(uniqueRawNames, aliases, unifiedName) {
+                uniqueRawNames.filter { (aliases[it] ?: it) == unifiedName }
+            }
 
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -1927,7 +2386,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         }
                         DropdownMenu(expanded = expandedMerge, onDismissRequest = { setExpandedMerge(false) }, modifier = Modifier.background(AppColors.Surface).fillMaxWidth(0.8f)) {
                             Text("選擇要合併的對象：", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(8.dp))
-                            unifiedNamesList.filter { it != unifiedName }.forEach { targetName ->
+                            // 排除自己，並排除「對方已經合併到我身上」的名字，避免 A→B→A 循環
+                            unifiedNamesList.filter { it != unifiedName && (aliases[it] ?: it) != unifiedName }.forEach { targetName ->
                                 DropdownMenuItem(text = { Text("合併為「$targetName」", fontWeight = FontWeight.Bold) }, onClick = { viewModel.mergeContact(unifiedName, targetName); setExpandedMerge(false) })
                             }
                         }
@@ -1964,7 +2424,7 @@ fun AdvancedDataManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit)
             containerColor = AppColors.Surface, onDismissRequest = { showDatePicker = false },
             title = { Text("請選擇要清除的日期", fontWeight = FontWeight.Bold) },
             text = {
-                Box(modifier = Modifier.fillMaxWidth().height(300.dp)) {
+                Box(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     MinimalCalendar(selectedTime = System.currentTimeMillis(), onDateSelected = { timestamp ->
                         viewModel.clearInteractionsByDate(timestamp)
                         Toast.makeText(context, "已清除該日資料", Toast.LENGTH_SHORT).show()
@@ -2036,28 +2496,46 @@ fun SettingsView(viewModel: RelateViewModel) {
     val (showGuideDialog, setShowGuideDialog) = remember { mutableStateOf(false) }
     val weekStartDay by viewModel.weekStartDay.collectAsState()
 
-    LaunchedEffect(Unit) {
-        setHasNotif(isNotificationServiceEnabled(context))
-        setHasAccel(isAccessibilityServiceEnabled(context, ChatTrackerService::class.java))
-        setHasUsageStats(hasUsageStatsPermission(context))
+    // 舊版只在進入分頁那一刻檢查一次，去系統設定開完權限回來仍顯示「去設定」
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                setHasNotif(isNotificationServiceEnabled(context))
+                setHasAccel(isAccessibilityServiceEnabled(context, ChatTrackerService::class.java))
+                setHasUsageStats(hasUsageStatsPermission(context))
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    val ioScope = rememberCoroutineScope()
+
+    // 匯出／匯入原本在主執行緒讀寫檔案，資料量大時會直接 ANR 白屏
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) {
-            context.contentResolver.openOutputStream(uri)?.use { outputStream ->
-                outputStream.write(viewModel.exportBackup("").toByteArray())
+            ioScope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val payload = viewModel.exportBackup("").toByteArray()
+                        context.contentResolver.openOutputStream(uri)?.use { it.write(payload) } ?: return@runCatching false
+                        true
+                    }.getOrDefault(false)
+                }
+                Toast.makeText(context, if (ok) "已成功匯出備份檔案！" else "匯出失敗，請換個儲存位置再試", Toast.LENGTH_SHORT).show()
             }
-            Toast.makeText(context, "已成功匯出備份檔案！", Toast.LENGTH_SHORT).show()
         }
     }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            if (content != null && viewModel.importBackup(content, "")) {
-                Toast.makeText(context, "資料還原成功！", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(context, "檔案無效或格式錯誤", Toast.LENGTH_SHORT).show()
+            ioScope.launch {
+                val content = withContext(Dispatchers.IO) {
+                    runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                }
+                val ok = content != null && viewModel.importBackup(content, "")
+                Toast.makeText(context, if (ok) "資料還原成功！" else "檔案無效或格式錯誤", Toast.LENGTH_SHORT).show()
             }
         }
     }
