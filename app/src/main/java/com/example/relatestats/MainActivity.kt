@@ -112,6 +112,7 @@ object AppColors {
     val FriendBg = Color(0xFFD1FAE5); val FriendText = Color(0xFF047857)
     val OtherBg = Color(0xFFF3F4F6); val OtherText = Color(0xFF4B5563)
     val GroupBg = Color(0xFFFEF3C7); val GroupText = Color(0xFFB45309)
+    val PartnerBg = Color(0xFFFCE7F3); val PartnerText = Color(0xFFBE185D)
 
     val AppBrands = mapOf(
         "LINE" to Color(0xFF06C755), "Instagram" to Color(0xFFE1306C),
@@ -119,6 +120,12 @@ object AppColors {
         "Threads" to Color(0xFF000000), "Telegram" to Color(0xFF24A1DE),
         "電話" to Color(0xFF4ADE80)
     )
+
+    // 標籤可挑選的配色（文字色, 底色）
+    val CategoryPalette: List<Pair<Color, Color>> get() = listOf(
+        FamilyText to FamilyBg, PartnerText to PartnerBg, FriendText to FriendBg,
+        WorkText to WorkBg, GroupText to GroupBg, OtherText to OtherBg
+    ) + CustomPalette
 
     val CustomPalette = listOf(
         Pair(Color(0xFF9333EA), Color(0xFFF3E8FF)), Pair(Color(0xFFC026D3), Color(0xFFFAE8FF)),
@@ -139,7 +146,20 @@ data class ContactCategory(val id: String, val label: String, val colorInt: Int,
         val OTHER = ContactCategory("OTHER", "未分類", AppColors.OtherText.toArgb(), AppColors.OtherBg.toArgb())
         // IG 讚／追蹤者／串文推播等非真人通知統一歸到這裡，排行預設不顯示
         val SYSTEM = ContactCategory("SYSTEM", "系統通知", AppColors.GroupText.toArgb(), AppColors.GroupBg.toArgb())
-        val defaultCategories = listOf(WORK, FAMILY, FRIEND, OTHER, SYSTEM)
+        val PARTNER = ContactCategory("PARTNER", "另一半", AppColors.PartnerText.toArgb(), AppColors.PartnerBg.toArgb())
+
+        // 首次啟動的預設清單。名稱與顏色之後都可以在「標籤管理」裡改，
+        // 但 OTHER / SYSTEM 這兩個 id 程式內部會用到，不可刪除。
+        val seedCategories = listOf(FAMILY, PARTNER, FRIEND, WORK, OTHER, SYSTEM)
+        val PROTECTED_IDS = setOf(OTHER.id, SYSTEM.id)
+
+        /** 確保 OTHER / SYSTEM 一定存在 */
+        fun ensureEssential(list: List<ContactCategory>): List<ContactCategory> {
+            val out = list.distinctBy { it.id }.toMutableList()
+            if (out.none { it.id == OTHER.id }) out.add(OTHER)
+            if (out.none { it.id == SYSTEM.id }) out.add(SYSTEM)
+            return out
+        }
         fun fromCsvString(csv: String): ContactCategory? {
             try {
                 val parts = csv.split("|cat|")
@@ -368,7 +388,7 @@ object DataRepository {
     private val _aliases = MutableStateFlow<Map<String, String>>(emptyMap())
     val aliases: StateFlow<Map<String, String>> = _aliases.asStateFlow()
 
-    private val _availableCategories = MutableStateFlow(ContactCategory.defaultCategories)
+    private val _availableCategories = MutableStateFlow(ContactCategory.seedCategories)
     val availableCategories: StateFlow<List<ContactCategory>> = _availableCategories.asStateFlow()
 
     var isFirstLaunch = MutableStateFlow(true)
@@ -427,10 +447,17 @@ object DataRepository {
         _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
         _categories.value = runCatching { parsePairs(p.getStringSet("categories", emptySet())) }.getOrDefault(emptyMap())
 
-        val loadedCustomCats = runCatching {
-            (p.getStringSet("custom_categories", emptySet()) ?: emptySet()).mapNotNull { ContactCategory.fromCsvString(it) }
-        }.getOrDefault(emptyList())
-        _availableCategories.value = ContactCategory.defaultCategories + loadedCustomCats
+        _availableCategories.value = runCatching {
+            val stored = p.getString("all_categories", null)
+            if (!stored.isNullOrBlank()) {
+                ContactCategory.ensureEssential(stored.split("|;|").mapNotNull { ContactCategory.fromCsvString(it) })
+            } else {
+                // 舊版只存自訂標籤，內建是寫死的 —— 合併後改用新格式
+                val old = (p.getStringSet("custom_categories", emptySet()) ?: emptySet())
+                    .mapNotNull { ContactCategory.fromCsvString(it) }
+                ContactCategory.ensureEssential(ContactCategory.seedCategories + old)
+            }
+        }.getOrDefault(ContactCategory.seedCategories)
 
         _wordFreq.value = runCatching {
             (p.getStringSet("word_freq", emptySet()) ?: emptySet()).mapNotNull { line ->
@@ -491,15 +518,13 @@ object DataRepository {
             val records = _interactions.value.map { it.toCsvString() }.toSet()
             val aliases = _aliases.value.map { "${it.key}|=|${it.value}" }.toSet()
             val cats = _categories.value.map { "${it.key}|=|${it.value}" }.toSet()
-            val customCats = _availableCategories.value
-                .filter { it !in ContactCategory.defaultCategories }
-                .map { it.toCsvString() }.toSet()
+            val allCats = _availableCategories.value.joinToString("|;|") { it.toCsvString() }
             val words = _wordFreq.value.entries.map { "${it.key}|w|${it.value}" }.toSet()
             p.edit().apply {
                 putStringSet("interactions", records)
                 putStringSet("aliases", aliases)
                 putStringSet("categories", cats)
-                putStringSet("custom_categories", customCats)
+                putString("all_categories", allCats)
                 putStringSet("word_freq", words)
             }.apply()
         }
@@ -653,6 +678,37 @@ object DataRepository {
     }
     fun addCustomCategory(cat: ContactCategory) { _availableCategories.update { it + cat }; saveData(immediate = true) }
 
+    /** 改名並換色；id 不變，已分類的聯絡人不受影響 */
+    fun updateCategoryMeta(id: String, label: String, colorInt: Int, bgColorInt: Int) {
+        val name = label.trim()
+        if (name.isEmpty()) return
+        _availableCategories.update { list ->
+            list.map { if (it.id == id) it.copy(label = name, colorInt = colorInt, bgColorInt = bgColorInt) else it }
+        }
+        saveData(immediate = true)
+    }
+
+    /** 刪除標籤，原本屬於它的聯絡人退回「未分類」。OTHER / SYSTEM 不可刪 */
+    fun deleteCategory(id: String): Boolean {
+        if (id in ContactCategory.PROTECTED_IDS) return false
+        if (_availableCategories.value.none { it.id == id }) return false
+        _availableCategories.update { list -> list.filterNot { it.id == id } }
+        _categories.update { m -> m.mapValues { (_, v) -> if (v == id) ContactCategory.OTHER.id else v } }
+        saveData(immediate = true)
+        return true
+    }
+
+    /** 調整順序（delta = -1 上移、+1 下移） */
+    fun moveCategory(id: String, delta: Int) {
+        _availableCategories.update { list ->
+            val i = list.indexOfFirst { it.id == id }
+            val j = i + delta
+            if (i < 0 || j !in list.indices) list
+            else list.toMutableList().apply { add(j, removeAt(i)) }
+        }
+        saveData(immediate = true)
+    }
+
     fun clearInteractions(scope: String) {
         val now = System.currentTimeMillis()
         val newRecords = when (scope) {
@@ -672,7 +728,7 @@ object DataRepository {
         if (scope == "ALL") {
             _aliases.value = emptyMap()
             _categories.value = emptyMap()
-            _availableCategories.value = ContactCategory.defaultCategories
+            _availableCategories.value = ContactCategory.seedCategories
         }
         saveData(immediate = true)
     }
@@ -783,7 +839,7 @@ object DataRepository {
         val records = _interactions.value.joinToString(";") { it.toCsvString() }
         val aliases = _aliases.value.map { "${it.key}|=|${it.value}" }.joinToString(";")
         val categories = _categories.value.map { "${it.key}|=|${it.value}" }.joinToString(";")
-        val customCats = _availableCategories.value.filter { it !in ContactCategory.defaultCategories }.joinToString(";") { it.toCsvString() }
+        val customCats = _availableCategories.value.joinToString(";") { it.toCsvString() }
         val combined = "V11||$records||$aliases||$categories||$customCats"
 
         if (key.isEmpty()) return Base64.encodeToString(combined.toByteArray(), Base64.NO_WRAP)
@@ -819,7 +875,11 @@ object DataRepository {
             val newCategories = parsePairs(parts[3].split(";").filter { it.isNotBlank() }.toSet())
             val newCustomCats = parts[4].split(";").filter { it.isNotBlank() }.mapNotNull { ContactCategory.fromCsvString(it) }
             if (newRecords.isEmpty() && newAliases.isEmpty() && newCategories.isEmpty()) return false
-            _interactions.value = newRecords; _aliases.value = newAliases; _categories.value = newCategories; _availableCategories.value = ContactCategory.defaultCategories + newCustomCats
+            _interactions.value = newRecords; _aliases.value = newAliases; _categories.value = newCategories; _availableCategories.value = ContactCategory.ensureEssential(
+                // 舊備份只含自訂標籤（沒有 OTHER），要補回種子清單
+                if (newCustomCats.none { it.id == ContactCategory.OTHER.id }) ContactCategory.seedCategories + newCustomCats
+                else newCustomCats
+            )
             saveData(immediate = true)
             return true
         } catch (_: Exception) { return false }
@@ -1472,6 +1532,14 @@ class RelateViewModel : ViewModel() {
     fun clearWordFreq() = DataRepository.clearWordFreq()
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
     fun setCategories(names: Collection<String>, categoryId: String) = DataRepository.updateCategories(names, categoryId)
+    fun updateCategoryMeta(id: String, label: String, colorInt: Int, bgColorInt: Int) = DataRepository.updateCategoryMeta(id, label, colorInt, bgColorInt)
+    fun deleteCategory(id: String) = DataRepository.deleteCategory(id)
+    fun moveCategory(id: String, delta: Int) = DataRepository.moveCategory(id, delta)
+    fun addCategory(label: String, colorInt: Int, bgColorInt: Int) {
+        val name = label.trim()
+        if (name.isEmpty()) return
+        DataRepository.addCustomCategory(ContactCategory(UUID.randomUUID().toString(), name, colorInt, bgColorInt))
+    }
     fun deleteContacts(names: Set<String>) = DataRepository.deleteContacts(names)
     fun listJunkContacts() = DataRepository.listJunkContacts()
     fun findSimilarGroups(names: List<String>) = DataRepository.findSimilarGroups(names)
@@ -2653,6 +2721,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var selectionMode by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<String>() }
     var showBatchCat by remember { mutableStateOf(false) }
+    var showCategoryManager by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<Set<String>?>(null) }
     val junkContacts = remember(records, categoriesMap, aliases) { viewModel.listJunkContacts() }
 
@@ -2730,6 +2799,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                             DropdownMenu(expanded = showCatDropdown, onDismissRequest = { showCatDropdown = false }, modifier = Modifier.background(AppColors.Surface)) {
                                 DropdownMenuItem(text = { Text("全標籤", fontWeight = FontWeight.Bold) }, onClick = { viewModel.setContactsCatFilter(null); showCatDropdown = false })
                                 availableCats.forEach { cat -> DropdownMenuItem(text = { Text(cat.label, color = cat.color, fontWeight = FontWeight.Bold) }, onClick = { viewModel.setContactsCatFilter(cat); showCatDropdown = false }) }
+                                HorizontalDivider(color = AppColors.BorderLight)
+                                DropdownMenuItem(text = { Text("⚙ 管理標籤", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold) }, onClick = { showCatDropdown = false; showCategoryManager = true })
                             }
                         }
                     }
@@ -2900,6 +2971,10 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         )
     }
 
+    if (showCategoryManager) {
+        CategoryManagerDialog(viewModel, availableCats) { showCategoryManager = false }
+    }
+
     if (showAutoMerge) {
         AutoMergeDialog(
             groups = similarGroups,
@@ -3028,6 +3103,143 @@ fun AutoMergeDialog(
     )
 }
 
+/** 標籤管理：改名、換色、排序、刪除 */
+@Composable
+fun CategoryManagerDialog(viewModel: RelateViewModel, categories: List<ContactCategory>, onDismiss: () -> Unit) {
+    var editTarget by remember { mutableStateOf<ContactCategory?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<ContactCategory?>(null) }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("標籤管理", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("可改名、換色、調整順序；刪除後成員退回未分類", fontSize = 11.sp, color = AppColors.TextSecondary, lineHeight = 15.sp)
+            }
+        },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                itemsIndexed(categories, key = { _, c -> c.id }) { idx, cat ->
+                    val locked = cat.id in ContactCategory.PROTECTED_IDS
+                    Row(
+                        modifier = Modifier.fillMaxWidth().background(AppColors.Background, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.background(cat.bgColor, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+                            Text(cat.label, color = cat.color, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "上移",
+                            tint = if (idx > 0) AppColors.TextPrimary else AppColors.BorderLight,
+                            modifier = Modifier.size(22.dp).clickable(enabled = idx > 0) { viewModel.moveCategory(cat.id, -1) })
+                        Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "下移",
+                            tint = if (idx < categories.size - 1) AppColors.TextPrimary else AppColors.BorderLight,
+                            modifier = Modifier.size(22.dp).clickable(enabled = idx < categories.size - 1) { viewModel.moveCategory(cat.id, 1) })
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(Icons.Rounded.Edit, contentDescription = "編輯", tint = AppColors.ActiveBlue,
+                            modifier = Modifier.size(18.dp).clickable { editTarget = cat })
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Icon(Icons.Rounded.Delete, contentDescription = "刪除",
+                            tint = if (locked) AppColors.BorderLight else AppColors.WorkText,
+                            modifier = Modifier.size(18.dp).clickable(enabled = !locked) { pendingDelete = cat })
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { creating = true }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)) {
+                Text("新增標籤", maxLines = 1, softWrap = false)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+
+    if (creating || editTarget != null) {
+        CategoryEditDialog(
+            initial = editTarget,
+            onConfirm = { label, textColor, bgColor ->
+                val target = editTarget
+                if (target == null) viewModel.addCategory(label, textColor, bgColor)
+                else viewModel.updateCategoryMeta(target.id, label, textColor, bgColor)
+                creating = false; editTarget = null
+            },
+            onDismiss = { creating = false; editTarget = null }
+        )
+    }
+
+    pendingDelete?.let { cat ->
+        AlertDialog(
+            containerColor = AppColors.Surface,
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("刪除標籤「${cat.label}」？", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = { Text("原本使用這個標籤的聯絡人會退回「未分類」，互動紀錄不受影響。", fontSize = 13.sp, color = AppColors.TextSecondary, lineHeight = 18.sp) },
+            confirmButton = {
+                Button(onClick = { viewModel.deleteCategory(cat.id); pendingDelete = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)) { Text("刪除", maxLines = 1) }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消", color = AppColors.TextSecondary) } }
+        )
+    }
+}
+
+/** 標籤的新增／編輯：名稱 + 配色 */
+@Composable
+fun CategoryEditDialog(initial: ContactCategory?, onConfirm: (String, Int, Int) -> Unit, onDismiss: () -> Unit) {
+    val palette = remember { AppColors.CategoryPalette }
+    var label by remember { mutableStateOf(initial?.label ?: "") }
+    var pick by remember {
+        mutableStateOf(palette.indexOfFirst { it.first.toArgb() == initial?.colorInt }.takeIf { it >= 0 } ?: 0)
+    }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = { Text(if (initial == null) "新增標籤" else "編輯標籤", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = label, onValueChange = { label = it }, singleLine = true,
+                    placeholder = { Text("例：另一半、健身房…", fontSize = 13.sp) },
+                    textStyle = TextStyle(fontSize = 14.sp),
+                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("顏色", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary)
+                Spacer(modifier = Modifier.height(6.dp))
+                palette.chunked(6).forEachIndexed { rowIdx, row ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        row.forEachIndexed { colIdx, pair ->
+                            val gi = rowIdx * 6 + colIdx
+                            val on = gi == pick
+                            Box(
+                                modifier = Modifier.weight(1f).aspectRatio(1f)
+                                    .background(pair.second, RoundedCornerShape(8.dp))
+                                    .border(if (on) 2.dp else 1.dp, if (on) pair.first else AppColors.BorderLight, RoundedCornerShape(8.dp))
+                                    .clickable { pick = gi },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("A", color = pair.first, fontSize = 13.sp, fontWeight = FontWeight.Black)
+                            }
+                        }
+                        repeat(6 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(label, palette[pick].first.toArgb(), palette[pick].second.toArgb()) },
+                enabled = label.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)
+            ) { Text("儲存", maxLines = 1) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+    )
+}
+
 @Composable
 fun AdvancedDataManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -3112,6 +3324,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     val weekStartDay by viewModel.weekStartDay.collectAsState()
 
     val records by viewModel.interactions.collectAsState()
+    val availableCats by viewModel.availableCategories.collectAsState()
+    var showCategoryManager by remember { mutableStateOf(false) }
     val autoCleanedCount by viewModel.lastCleanupRemoved.collectAsState()
     var abnormalCount by remember { mutableStateOf(0) }
     LaunchedEffect(records) { abnormalCount = viewModel.countAbnormalRecords() }
@@ -3208,8 +3422,24 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
-                Column(modifier = Modifier.padding(16.dp)) {
+            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp), modifier = Modifier.clickable { showCategoryManager = true }) {
+                Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("標籤管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("改名、換色、調整順序、新增或刪除", fontSize = 11.sp, color = AppColors.TextSecondary)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        availableCats.take(4).forEach { cat ->
+                            Box(modifier = Modifier.size(14.dp).background(cat.bgColor, CircleShape).border(1.dp, cat.color, CircleShape))
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("備份與還原", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Icon(Icons.Rounded.Lock, contentDescription = null, tint = AppColors.TextSecondary)
@@ -3329,6 +3559,10 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+
+    if (showCategoryManager) {
+        CategoryManagerDialog(viewModel, availableCats) { showCategoryManager = false }
     }
 
     if (showGuideDialog) {
