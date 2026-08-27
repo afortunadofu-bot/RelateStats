@@ -3,6 +3,7 @@ package com.example.relatestats
 import android.accessibilityservice.AccessibilityService
 import android.app.AppOpsManager
 import android.app.Notification
+import com.example.relatestats.BuildConfig
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.os.SystemClock
@@ -3555,6 +3556,13 @@ fun SettingsView(viewModel: RelateViewModel) {
                     Text("☁️ Google 帳號自動備份", color = AppColors.FriendText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     Text("已啟用 Android 自動備份：資料會綁定這支手機登入的 Google 帳號，換機或重灌後重新安裝即可自動還原，不需手動操作。系統上限 25MB，超過時請改用上方的雲端備份。", fontSize = 11.sp, color = AppColors.FriendText.copy(alpha = 0.85f), lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
                 }
+            }
+        }
+
+        item {
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = 11.sp, color = AppColors.TextSecondary.copy(alpha = 0.7f), fontWeight = FontWeight.Medium)
+                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} RelateStats. All rights reserved.", fontSize = 10.sp, color = AppColors.TextSecondary.copy(alpha = 0.5f), modifier = Modifier.padding(top = 2.dp))
             }
         }
 

@@ -266,3 +266,20 @@ v1.1 修好了「產生錯誤資料」的程式碼，但**手機裡已經累積�
   會自動補回種子清單。
 - 新增 `updateCategoryMeta()` / `deleteCategory()` / `moveCategory()`；
   `ensureEssential()` 保證 OTHER 與 SYSTEM 一定存在。
+
+---
+
+## v1.5.1（2026-08-27）— Copyright 標示
+
+設定分頁最下方新增版本號與 copyright 字樣：
+
+```
+RelateStats v1.5
+© 2026 RelateStats. All rights reserved.
+```
+
+- 年份用 `Calendar.getInstance().get(Calendar.YEAR)`，每年自動跳號，不用手動改。
+- 版本號改讀 `BuildConfig.VERSION_NAME`，因此開啟了 `buildFeatures.buildConfig = true`。
+  之後只要在 `app/build.gradle.kts` 改 `versionName`，畫面上會自動同步，
+  不會再發生版號跟 CHANGELOG 對不起來的狀況（v1.1〜v1.5 這段時間就發生過一次，
+  App 內版號一路卡在 1.1 沒人記得更新）。

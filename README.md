@@ -3,7 +3,7 @@
 Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通知監聽** 與 **無障礙服務** 兩個引擎，
 統計你在通訊軟體上對每個人投入的「注意力停留時間」與「互動頻率」，並做社交人格與數位健康分析。
 
-- **目前版本**：v1.5（versionCode 5）
+- **目前版本**：v1.5.1（versionCode 5）
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -111,6 +111,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - 無障礙服務設定 `accessibility_service_config.xml` 的 `flagReportViewIds` **不可移除**，
   少了它 `findAccessibilityNodeInfosByViewId()` 永遠回傳空，會導致抓不到聊天室名稱。
 - 修改後請務必跑一次 `assembleDebug` 確認可建置，再 commit。
+- **`versionName` 現在會直接顯示在 App 設定頁最下方**（`BuildConfig.VERSION_NAME`）。改版號只需要改 `app/build.gradle.kts` 一處，App 內畫面與 CHANGELOG 版本號要盡量保持一致。
 
 ### 版控
 
@@ -122,6 +123,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.5.1 | 2026-08-27 | 設定頁新增版本號與 copyright 標示 |
 | v1.5 | 2026-08-27 | 標籤完全可自訂（改名／換色／排序／刪除／新增），預設加入「另一半」 |
 | v1.4 | 2026-08-27 | 垃圾聯絡人一鍵清除、多選批次分組 |
 | v1.3 | 2026-08-27 | 通知降噪（系統通知標籤）、合併搜尋與自動合併、活躍熱力圖、常用詞、介面瘦身、Android 自動備份 |
