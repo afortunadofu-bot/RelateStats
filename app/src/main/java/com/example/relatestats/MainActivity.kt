@@ -537,6 +537,32 @@ object DataRepository {
         saveData(immediate = true)
     }
 
+    /** 批次設定標籤，只寫一次檔 */
+    fun updateCategories(names: Collection<String>, categoryId: String) {
+        if (names.isEmpty()) return
+        _categories.update { cur -> cur + names.associateWith { categoryId } }
+        saveData(immediate = true)
+    }
+
+    /** 刪除指定聯絡人的所有紀錄，連同別名與標籤設定一起清掉。回傳刪除筆數 */
+    fun deleteContacts(names: Set<String>): Int {
+        if (names.isEmpty()) return 0
+        val before = _interactions.value.size
+        _interactions.value = _interactions.value.filterNot {
+            (_aliases.value[it.rawSenderName] ?: it.rawSenderName) in names
+        }
+        _aliases.update { m -> m.filterNot { (k, v) -> k in names || v in names } }
+        _categories.update { m -> m.filterNot { (k, _) -> k in names } }
+        saveData(immediate = true)
+        return before - _interactions.value.size
+    }
+
+    /** 目前被判定為垃圾的聯絡人（非真人通知，或已被歸到系統通知） */
+    fun listJunkContacts(): List<String> =
+        _interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName }
+            .distinct()
+            .filter { isNonPersonContact(it) || _categories.value[it] == ContactCategory.SYSTEM.id }
+
     /** 把現有聯絡人裡的非真人通知重新歸到「系統通知」，回傳筆數 */
     fun retagSystemContacts(): Int {
         val names = _interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName }.distinct()
@@ -1445,6 +1471,9 @@ class RelateViewModel : ViewModel() {
     val wordFreq = DataRepository.wordFreq
     fun clearWordFreq() = DataRepository.clearWordFreq()
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
+    fun setCategories(names: Collection<String>, categoryId: String) = DataRepository.updateCategories(names, categoryId)
+    fun deleteContacts(names: Set<String>) = DataRepository.deleteContacts(names)
+    fun listJunkContacts() = DataRepository.listJunkContacts()
     fun findSimilarGroups(names: List<String>) = DataRepository.findSimilarGroups(names)
     fun countAbnormalRecords() = DataRepository.countAbnormalRecords()
     fun removeAbnormalRecords() = DataRepository.removeAbnormalRecords()
@@ -2579,6 +2608,7 @@ fun StatCardDetailed(stat: SenderStat, maxScore: Float, sortType: SortType) {
 
 @Composable
 fun ContactsCategoryView(viewModel: RelateViewModel) {
+    val context = LocalContext.current
     val records by viewModel.interactions.collectAsState()
     val categoriesMap by viewModel.categories.collectAsState()
     val aliases by viewModel.aliases.collectAsState()
@@ -2620,91 +2650,245 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var showAutoMerge by remember { mutableStateOf(false) }
     val similarGroups = remember(unifiedNamesList) { viewModel.findSimilarGroups(unifiedNamesList) }
 
-    LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item {
-            Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("聯絡人整合", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
-                if (similarGroups.isNotEmpty()) {
-                    Surface(color = AppColors.ActiveBlue.copy(alpha = 0.12f), shape = RoundedCornerShape(10.dp), modifier = Modifier.clickable { showAutoMerge = true }) {
-                        Text("自動合併 ${similarGroups.size} 組", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+    var selectionMode by remember { mutableStateOf(false) }
+    val selected = remember { mutableStateListOf<String>() }
+    var showBatchCat by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<Set<String>?>(null) }
+    val junkContacts = remember(records, categoriesMap, aliases) { viewModel.listJunkContacts() }
+
+    fun toggleSelect(name: String) {
+        if (selected.contains(name)) selected.remove(name) else selected.add(name)
+    }
+    fun exitSelection() { selectionMode = false; selected.clear() }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 14.dp, bottom = if (selectionMode) 92.dp else 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("聯絡人整合", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (similarGroups.isNotEmpty() && !selectionMode) {
+                            Surface(color = AppColors.ActiveBlue.copy(alpha = 0.12f), shape = RoundedCornerShape(10.dp), modifier = Modifier.clickable { showAutoMerge = true }) {
+                                Text("自動合併 ${similarGroups.size} 組", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                            }
+                        }
+                        Surface(
+                            color = if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.clickable { if (selectionMode) exitSelection() else selectionMode = true }
+                        ) {
+                            Text(if (selectionMode) "完成" else "選取", fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                                color = if (selectionMode) Color.White else AppColors.TextPrimary,
+                                maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                        }
                     }
                 }
             }
-        }
 
-        item {
-            Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(16.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(16.dp)).padding(16.dp)) {
-                OutlinedTextField(
-                    value = searchQuery, onValueChange = viewModel::setContactsSearch,
-                    placeholder = { Text("搜尋名字...", fontSize = 14.sp) }, singleLine = true,
-                    textStyle = TextStyle(fontSize = 14.sp),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Row(modifier = Modifier.background(AppColors.BorderLight, RoundedCornerShape(8.dp)).padding(2.dp)) {
-                        ContactSortType.entries.forEach { type ->
-                            Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(sortType==type) AppColors.Surface else Color.Transparent).clickable{viewModel.setContactsSort(type)}.padding(horizontal=10.dp, vertical=4.dp)){ Text(type.label, fontSize=11.sp, fontWeight=if(sortType==type) FontWeight.Bold else FontWeight.Normal) }
-                        }
-                    }
-                    var showCatDropdown by remember { mutableStateOf(false) }
-                    Box {
-                        TextButton(onClick = { showCatDropdown = true }) { Text(catFilter?.label ?: "全標籤", color=AppColors.ActiveBlue, fontWeight=FontWeight.Bold, fontSize=12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                        DropdownMenu(expanded = showCatDropdown, onDismissRequest = { showCatDropdown = false }, modifier = Modifier.background(AppColors.Surface)) {
-                            DropdownMenuItem(text = { Text("全標籤", fontWeight = FontWeight.Bold) }, onClick = { viewModel.setContactsCatFilter(null); showCatDropdown = false })
-                            availableCats.forEach { cat -> DropdownMenuItem(text = { Text(cat.label, color = cat.color, fontWeight = FontWeight.Bold) }, onClick = { viewModel.setContactsCatFilter(cat); showCatDropdown = false }) }
+            if (junkContacts.isNotEmpty() && !selectionMode) {
+                item {
+                    Card(colors = CardDefaults.cardColors(containerColor = AppColors.WorkBg), shape = RoundedCornerShape(14.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("${junkContacts.size} 個垃圾聯絡人", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("讚、追蹤者、串文、推播等非真人通知", fontSize = 11.sp, color = AppColors.WorkText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Button(
+                                onClick = { pendingDelete = junkContacts.toSet() },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) { Text("一鍵清除", fontSize = 12.sp, maxLines = 1, softWrap = false) }
                         }
                     }
                 }
             }
-        }
 
-        if (filteredContacts.isEmpty()) {
-            item { Text("沒有符合的聯絡人", color = AppColors.TextSecondary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 20.dp)) }
-        }
-
-        items(filteredContacts, key = { it }) { unifiedName ->
-            val catId = categoriesMap[unifiedName] ?: ContactCategory.OTHER.id
-            val currentCategory = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
-            val (expandedCat, setExpandedCat) = remember { mutableStateOf(false) }
-
-            val rawNamesForThis = remember(uniqueRawNames, aliases, unifiedName) {
-                uniqueRawNames.filter { (aliases[it] ?: it) == unifiedName }
-            }
-
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
-                Column(modifier = Modifier.padding(16.dp)) {
+            item {
+                Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(14.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(14.dp)).padding(12.dp)) {
+                    OutlinedTextField(
+                        value = searchQuery, onValueChange = viewModel::setContactsSearch,
+                        placeholder = { Text("搜尋名字...", fontSize = 14.sp) }, singleLine = true,
+                        textStyle = TextStyle(fontSize = 14.sp),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text(unifiedName, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (rawNamesForThis.isNotEmpty() && rawNamesForThis.first() != unifiedName) {
-                                Text("包含: ${rawNamesForThis.joinToString()}", fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Row(modifier = Modifier.background(AppColors.BorderLight, RoundedCornerShape(8.dp)).padding(2.dp)) {
+                            ContactSortType.entries.forEach { type ->
+                                Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(sortType==type) AppColors.Surface else Color.Transparent).clickable{viewModel.setContactsSort(type)}.padding(horizontal=10.dp, vertical=4.dp)){ Text(type.label, fontSize=11.sp, fontWeight=if(sortType==type) FontWeight.Bold else FontWeight.Normal) }
                             }
                         }
+                        var showCatDropdown by remember { mutableStateOf(false) }
                         Box {
-                            TextButton(onClick = { setExpandedCat(true) }, modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(8.dp))) {
-                                Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            TextButton(onClick = { showCatDropdown = true }) { Text(catFilter?.label ?: "全標籤", color=AppColors.ActiveBlue, fontWeight=FontWeight.Bold, fontSize=12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            DropdownMenu(expanded = showCatDropdown, onDismissRequest = { showCatDropdown = false }, modifier = Modifier.background(AppColors.Surface)) {
+                                DropdownMenuItem(text = { Text("全標籤", fontWeight = FontWeight.Bold) }, onClick = { viewModel.setContactsCatFilter(null); showCatDropdown = false })
+                                availableCats.forEach { cat -> DropdownMenuItem(text = { Text(cat.label, color = cat.color, fontWeight = FontWeight.Bold) }, onClick = { viewModel.setContactsCatFilter(cat); showCatDropdown = false }) }
                             }
-                            DropdownMenu(expanded = expandedCat, onDismissRequest = { setExpandedCat(false) }, modifier = Modifier.background(AppColors.Surface)) {
+                        }
+                    }
+                }
+            }
+
+            if (filteredContacts.isEmpty()) {
+                item { Text("沒有符合的聯絡人", color = AppColors.TextSecondary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 20.dp)) }
+            }
+
+            items(filteredContacts, key = { it }) { unifiedName ->
+                val catId = categoriesMap[unifiedName] ?: ContactCategory.OTHER.id
+                val currentCategory = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
+                val (expandedCat, setExpandedCat) = remember { mutableStateOf(false) }
+                val isSel = selected.contains(unifiedName)
+
+                val rawNamesForThis = remember(uniqueRawNames, aliases, unifiedName) {
+                    uniqueRawNames.filter { (aliases[it] ?: it) == unifiedName }
+                }
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = if (isSel) AppColors.ActiveBlue.copy(alpha = 0.08f) else AppColors.Surface),
+                    border = BorderStroke(1.dp, if (isSel) AppColors.ActiveBlue else AppColors.BorderLight),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = if (selectionMode) Modifier.clickable { toggleSelect(unifiedName) } else Modifier
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            if (selectionMode) {
+                                Checkbox(checked = isSel, onCheckedChange = { toggleSelect(unifiedName) }, modifier = Modifier.size(22.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
+                            }
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(unifiedName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (rawNamesForThis.isNotEmpty() && rawNamesForThis.first() != unifiedName) {
+                                    Text("包含: ${rawNamesForThis.joinToString()}", fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            if (selectionMode) {
+                                Box(modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 3.dp)) {
+                                    Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, maxLines = 1, softWrap = false)
+                                }
+                            } else {
+                                Box {
+                                    TextButton(onClick = { setExpandedCat(true) }, modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(8.dp)), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                        Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    DropdownMenu(expanded = expandedCat, onDismissRequest = { setExpandedCat(false) }, modifier = Modifier.background(AppColors.Surface)) {
+                                        availableCats.forEach { category ->
+                                            DropdownMenuItem(text = { Text(category.label, color = category.color, fontWeight = FontWeight.Bold) }, onClick = { viewModel.setCategory(unifiedName, category.id); setExpandedCat(false) })
+                                        }
+                                        HorizontalDivider(color = AppColors.BorderLight)
+                                        DropdownMenuItem(text = { Text("+ 新增自訂分類", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold) }, onClick = { setExpandedCat(false); setPendingAssignName(unifiedName); setShowAddCategoryDialog(true) })
+                                    }
+                                }
+                            }
+                        }
+                        if (!selectionMode) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = AppColors.BorderLight)
+                            Row(modifier = Modifier.fillMaxWidth().clickable { mergeSource = unifiedName }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("綁定其他帳號", fontSize = 12.sp, color = AppColors.ActiveBlue, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 多選模式的底部操作列
+        if (selectionMode) {
+            Surface(
+                color = AppColors.Surface,
+                shadowElevation = 12.dp,
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (selected.isEmpty()) "點卡片選取" else "已選 ${selected.size} 位",
+                            fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false
+                        )
+                        Text(
+                            if (selected.size == filteredContacts.size && filteredContacts.isNotEmpty()) "取消全選" else "全選",
+                            fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                            modifier = Modifier.clickable {
+                                if (selected.size == filteredContacts.size) selected.clear()
+                                else { selected.clear(); selected.addAll(filteredContacts) }
+                            }.padding(6.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            Button(
+                                onClick = { showBatchCat = true },
+                                enabled = selected.isNotEmpty(),
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                                shape = RoundedCornerShape(10.dp)
+                            ) { Text("設定標籤", fontSize = 13.sp, maxLines = 1, softWrap = false) }
+                            DropdownMenu(expanded = showBatchCat, onDismissRequest = { showBatchCat = false }, modifier = Modifier.background(AppColors.Surface)) {
                                 availableCats.forEach { category ->
-                                    DropdownMenuItem(text = { Text(category.label, color = category.color, fontWeight = FontWeight.Bold) }, onClick = { viewModel.setCategory(unifiedName, category.id); setExpandedCat(false) })
+                                    DropdownMenuItem(
+                                        text = { Text(category.label, color = category.color, fontWeight = FontWeight.Bold) },
+                                        onClick = {
+                                            viewModel.setCategories(selected.toList(), category.id)
+                                            showBatchCat = false
+                                            exitSelection()
+                                        }
+                                    )
                                 }
                                 HorizontalDivider(color = AppColors.BorderLight)
-                                DropdownMenuItem(text = { Text("+ 新增自訂分類", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold) }, onClick = { setExpandedCat(false); setPendingAssignName(unifiedName); setShowAddCategoryDialog(true) })
+                                DropdownMenuItem(
+                                    text = { Text("+ 新增自訂分類", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold) },
+                                    onClick = { showBatchCat = false; setPendingAssignName(null); setShowAddCategoryDialog(true) }
+                                )
                             }
                         }
-                    }
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = AppColors.BorderLight)
-                    Row(modifier = Modifier.fillMaxWidth().clickable { mergeSource = unifiedName }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("綁定其他帳號", fontSize = 12.sp, color = AppColors.ActiveBlue, fontWeight = FontWeight.Medium)
+                        Button(
+                            onClick = { pendingDelete = selected.toSet() },
+                            enabled = selected.isNotEmpty(),
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
+                            shape = RoundedCornerShape(10.dp)
+                        ) { Text("刪除", fontSize = 13.sp, maxLines = 1, softWrap = false) }
                     }
                 }
             }
         }
+    }
+
+    pendingDelete?.let { targets ->
+        AlertDialog(
+            containerColor = AppColors.Surface,
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("刪除 ${targets.size} 位聯絡人？", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    Text("將一併刪除這些聯絡人的所有互動紀錄、標籤與合併設定，此操作無法復原。", fontSize = 13.sp, color = AppColors.TextSecondary, lineHeight = 18.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LazyColumn(modifier = Modifier.heightIn(max = 180.dp)) {
+                        items(targets.toList().take(50), key = { it }) {
+                            Text("• $it", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val removed = viewModel.deleteContacts(targets)
+                    Toast.makeText(context, "已刪除 ${targets.size} 位聯絡人（$removed 筆紀錄）", Toast.LENGTH_SHORT).show()
+                    pendingDelete = null
+                    exitSelection()
+                }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)) { Text("確認刪除", maxLines = 1) }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消", color = AppColors.TextSecondary) } }
+        )
     }
 
     mergeSource?.let { source ->
