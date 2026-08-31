@@ -3,7 +3,7 @@
 Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通知監聽** 與 **無障礙服務** 兩個引擎，
 統計你在通訊軟體上對每個人投入的「注意力停留時間」與「互動頻率」，並做社交人格與數位健康分析。
 
-- **目前版本**：v1.6（versionCode 6）
+- **目前版本**：v1.7（versionCode 7）
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -43,8 +43,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 **四大分頁**
 
-- **總覽**：社交人格解讀、平台數位健康（時長／通知／時段三種視角）、標籤互動分析、活躍熱力圖、常用詞
-- **排行**：時間／平台／標籤／個人群組 四維篩選，可依停留時間或互動頻率排序，點卡片看 24 小時活躍分析與群組發言排行
+- **總覽**：KPI 四格、人格條、平台分佈、標籤分佈、時段分佈、互動對象 Top 5、活躍熱力圖、常用詞
+- **排行**：表格式排行列，篩選器收合在「篩選」按鈕內，點列看 24 小時活躍分析與群組發言排行
 - **聯絡人**：跨平台帳號合併（可搜尋、可自動合併相似）、多選批次分組、依平台篩選、垃圾聯絡人一鍵清除
 - **設定**：權限監測、標籤管理、一週起始日、備份還原、資料管理
 
@@ -125,6 +125,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - **群組判定不可用 `conversationTitle` 是否存在來推斷** —— IG 連一對一私訊都會帶，
   會導致所有私訊被併成同一個「群組」。只能信 `android.isGroupConversation` 或多發言人。
 - 修改後請務必跑一次 `assembleDebug` 確認可建置，再 commit。
+- **UI 一律使用 `T`（字級）與 `D`（間距）代幣**，不要再寫死 sp / dp 數值，否則密度會再度失控。
+- **長列表必須用 `items` / `itemsIndexed` 逐列渲染**，不可塞進單一 `item` 的 Column ——
+  聯絡人有 700+ 位，那樣會一次組完所有節點直接卡死。
+- **任何寬度不可控的文字都要加 `overflow = TextOverflow.Ellipsis`**（聯絡人名稱、時長字串），
+  只設 `softWrap = false` 會變成硬裁切。
 - **`versionName` 現在會直接顯示在 App 設定頁最下方**（`BuildConfig.VERSION_NAME`）。改版號只需要改 `app/build.gradle.kts` 一處，App 內畫面與 CHANGELOG 版本號要盡量保持一致。
 
 ### 版控
@@ -137,6 +142,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.7 | 2026-08-27 | 資訊儀錶板改版：設計代幣、總覽頁與排行頁重新規劃 |
 | v1.6 | 2026-08-27 | 時長偵測重寫、IG 歸戶修正、刪除可復原、勾選刪除紀錄、聯絡人分軟體 |
 | v1.5.1 | 2026-08-27 | 設定頁新增版本號與 copyright 標示 |
 | v1.5 | 2026-08-27 | 標籤完全可自訂（改名／換色／排序／刪除／新增），預設加入「另一半」 |

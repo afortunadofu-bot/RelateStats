@@ -103,13 +103,22 @@ import java.util.*
 // 1. 視覺設計系統
 // ==========================================
 object AppColors {
-    val Background = Color(0xFFF9FAFB)
+    // ── 底層 ──
+    val Background = Color(0xFFF4F6F8)
     val Surface = Color(0xFFFFFFFF)
-    val TextPrimary = Color(0xFF111827)
-    val TextSecondary = Color(0xFF6B7280)
-    val BorderLight = Color(0xFFE5E7EB)
+    val SurfaceAlt = Color(0xFFF7F9FB)   // 表格斑馬紋、次級區塊
+    val BorderLight = Color(0xFFE4E8ED)
+    val BorderStrong = Color(0xFFCBD5E1)
+
+    // ── 文字階層 ──
+    val TextPrimary = Color(0xFF0F172A)
+    val TextSecondary = Color(0xFF64748B)
+    val TextTertiary = Color(0xFF94A3B8)
+
+    // ── 強調 ──
     val BrandPrimary = Color(0xFF0F172A)
-    val ActiveBlue = Color(0xFF3B82F6)
+    val ActiveBlue = Color(0xFF2563EB)
+    val Positive = Color(0xFF059669)
 
     val WorkBg = Color(0xFFFEE2E2); val WorkText = Color(0xFFB91C1C)
     val FamilyBg = Color(0xFFDBEAFE); val FamilyText = Color(0xFF1D4ED8)
@@ -137,6 +146,24 @@ object AppColors {
         Pair(Color(0xFF0284C7), Color(0xFFE0F2FE)), Pair(Color(0xFF4F46E5), Color(0xFFE0E7FF)),
         Pair(Color(0xFF059669), Color(0xFFD1FAE5))
     )
+}
+
+/** 字級與間距代幣。儀錶板風格：小字、緊湊、階層靠字重與顏色區分而非放大字體。 */
+object T {
+    val Kpi = 22.sp        // KPI 主數字
+    val KpiSm = 17.sp      // 次級數字
+    val Title = 14.sp      // 區塊標題
+    val Body = 13.sp
+    val Label = 11.sp
+    val Micro = 9.sp
+}
+
+object D {
+    val Gutter = 12.dp     // 頁面左右內距
+    val Gap = 8.dp         // 區塊間距
+    val CardPad = 12.dp    // 卡片內距
+    val Radius = 12.dp
+    val RowH = 40.dp       // 表格列高
 }
 
 data class ContactCategory(val id: String, val label: String, val colorInt: Int, val bgColorInt: Int) {
@@ -1970,8 +1997,8 @@ fun MainAppContent(viewModel: RelateViewModel) {
         containerColor = AppColors.Background,
         topBar = {
             Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface).statusBarsPadding().padding(top = 8.dp)) {
-                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("RelateStats", color = AppColors.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
+                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = D.Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("RelateStats", color = AppColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.4).sp)
                 }
                 HorizontalDivider(color = AppColors.BorderLight)
             }
@@ -2074,29 +2101,29 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
     val (showCalendar, setShowCalendar) = remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth().background(AppColors.BorderLight.copy(alpha=0.5f), RoundedCornerShape(12.dp)).padding(4.dp)) {
+        Row(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(10.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp)).padding(3.dp)) {
             val types = listOf(FilterType.SPECIFIC_DAY to "單日", FilterType.WEEK to "單週", FilterType.ALL to "全部")
             types.forEach { (type, label) ->
                 val isSelected = currentFilter.type == type
-                Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).background(if (isSelected) AppColors.Surface else Color.Transparent)
+                Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(7.dp)).background(if (isSelected) AppColors.BrandPrimary else Color.Transparent)
                     .clickable {
                         onFilterChange(DateFilter(type, System.currentTimeMillis()))
                         setShowCalendar(false)
-                    }.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                    Text(label, color = if (isSelected) AppColors.TextPrimary else AppColors.TextSecondary, fontSize = 14.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
+                    }.padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+                    Text(label, color = if (isSelected) Color.White else AppColors.TextSecondary, fontSize = T.Body, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
                 }
             }
         }
 
         if (currentFilter.type != FilterType.ALL) {
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = {
                     val days = if (currentFilter.type == FilterType.SPECIFIC_DAY) -1 else -7
                     val shifted = Calendar.getInstance().apply { timeInMillis = currentFilter.timestamp; add(Calendar.DATE, days) }.timeInMillis
                     onFilterChange(currentFilter.copy(timestamp = shifted))
-                }, modifier = Modifier.background(AppColors.Surface, CircleShape).size(36.dp).border(1.dp, AppColors.BorderLight, CircleShape)) {
-                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, contentDescription = "上一筆", tint = AppColors.TextPrimary)
+                }, modifier = Modifier.background(AppColors.Surface, CircleShape).size(30.dp).border(1.dp, AppColors.BorderLight, CircleShape)) {
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, contentDescription = "上一筆", tint = AppColors.TextPrimary, modifier = Modifier.size(18.dp))
                 }
 
                 Row(modifier = Modifier.clickable { setShowCalendar(!showCalendar) }.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2119,7 +2146,7 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
                         if (startMs == currentStartMs) "本週 $range" else range
                     }
 
-                    Text(dateText, color = AppColors.ActiveBlue, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text(dateText, color = AppColors.ActiveBlue, fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                     Icon(Icons.Rounded.ArrowDropDown, contentDescription = null, tint = AppColors.ActiveBlue)
                 }
 
@@ -2127,8 +2154,8 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
                     val days = if (currentFilter.type == FilterType.SPECIFIC_DAY) 1 else 7
                     val shifted = Calendar.getInstance().apply { timeInMillis = currentFilter.timestamp; add(Calendar.DATE, days) }.timeInMillis
                     onFilterChange(currentFilter.copy(timestamp = shifted))
-                }, modifier = Modifier.background(AppColors.Surface, CircleShape).size(36.dp).border(1.dp, AppColors.BorderLight, CircleShape)) {
-                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = "下一筆", tint = AppColors.TextPrimary)
+                }, modifier = Modifier.background(AppColors.Surface, CircleShape).size(30.dp).border(1.dp, AppColors.BorderLight, CircleShape)) {
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = "下一筆", tint = AppColors.TextPrimary, modifier = Modifier.size(18.dp))
                 }
             }
         }
@@ -2195,6 +2222,121 @@ fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -
     )
 }
 
+// ══════════════════════════════════════════
+//  儀錶板共用元件
+// ══════════════════════════════════════════
+
+/** 區塊外框：白底、細框、小圓角 */
+@Composable
+fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = modifier.fillMaxWidth()
+            .background(AppColors.Surface, RoundedCornerShape(D.Radius))
+            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(D.Radius))
+            .padding(D.CardPad),
+        content = content
+    )
+}
+
+/** 區塊標題列：左標題、右可放切換器或說明 */
+@Composable
+fun SectionHead(title: String, trailing: (@Composable RowScope.() -> Unit)? = null) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        trailing?.let { Row(verticalAlignment = Alignment.CenterVertically, content = it) }
+    }
+}
+
+/** 小型分段切換器 */
+@Composable
+fun SegBar(options: List<Pair<String, String>>, current: String, onSelect: (String) -> Unit) {
+    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(7.dp)).padding(2.dp)) {
+        options.forEach { (key, label) ->
+            val on = key == current
+            Box(
+                modifier = Modifier.clip(RoundedCornerShape(5.dp))
+                    .background(if (on) AppColors.Surface else Color.Transparent)
+                    .clickable { onSelect(key) }
+                    .padding(horizontal = 9.dp, vertical = 3.dp)
+            ) {
+                Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                    color = if (on) AppColors.TextPrimary else AppColors.TextSecondary)
+            }
+        }
+    }
+}
+
+/** KPI 方塊 */
+@Composable
+fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .background(AppColors.Surface, RoundedCornerShape(D.Radius))
+            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(D.Radius))
+            .padding(horizontal = 10.dp, vertical = 9.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(accent))
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(modifier = Modifier.height(3.dp))
+        // 這裡的值可能是聯絡人名稱，長度不可控，必須省略而不是溢出裁切
+        Text(value, fontSize = T.Kpi, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        if (sub != null) {
+            Text(sub, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** 表格資料列：色點 + 名稱 + 迷你長條 + 右側數值 */
+@Composable
+fun DataRow(
+    name: String,
+    dotColor: Color,
+    progress: Float,
+    primary: String,
+    secondary: String? = null,
+    badge: (@Composable () -> Unit)? = null,
+    onClick: (() -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .let { if (onClick != null) it.clickable { onClick() } else it }
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dotColor))
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                badge?.let { it(); Spacer(modifier = Modifier.width(5.dp)) }
+                Text(name, fontSize = T.Body, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Box(modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(AppColors.Background)) {
+                Box(modifier = Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(dotColor))
+            }
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(primary, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+            if (secondary != null) {
+                Text(secondary, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════
+//  總覽（儀錶板）
+// ══════════════════════════════════════════
+
 @Composable
 fun OverviewView(viewModel: RelateViewModel) {
     val records by viewModel.interactions.collectAsState()
@@ -2203,19 +2345,29 @@ fun OverviewView(viewModel: RelateViewModel) {
     val availableCats by viewModel.availableCategories.collectAsState()
     val filter by viewModel.timeFilter.collectAsState()
     val weekStartDay by viewModel.weekStartDay.collectAsState()
+    val context = LocalContext.current
 
     val filteredRecords = remember(records, filter, weekStartDay) { viewModel.getFilteredRecords(records, filter) }
     val appStats = remember(filteredRecords) { viewModel.getAppUsageStats(filteredRecords, DateFilter(FilterType.ALL)) }
     val timeStats = remember(filteredRecords) { viewModel.getTimeOfDayStats(filteredRecords, DateFilter(FilterType.ALL)) }
     val persona = remember(filteredRecords) { viewModel.getSocialPersona(filteredRecords, DateFilter(FilterType.ALL)) }
-
-    val leaderboard = remember(filteredRecords, categoriesMap, aliases, availableCats) { viewModel.getDynamicLeaderboard(filteredRecords, categoriesMap, aliases, availableCats) }
+    val leaderboard = remember(filteredRecords, categoriesMap, aliases, availableCats) {
+        viewModel.getDynamicLeaderboard(filteredRecords, categoriesMap, aliases, availableCats)
+    }
     val catStats = remember(filteredRecords, categoriesMap, aliases, availableCats) {
         viewModel.getCategoryStats(filteredRecords, DateFilter(FilterType.ALL), categoriesMap, aliases, availableCats)
     }
     val heatmap = remember(filteredRecords) { viewModel.getWeekHourHeatmap(filteredRecords, DateFilter(FilterType.ALL)) }
     val wordFreq by viewModel.wordFreq.collectAsState()
-    val topTimeDrainer = leaderboard.maxByOrNull { it.totalDurationSeconds }
+
+    val totalTimeSec = appStats.sumOf { it.totalDurationSeconds }
+    val totalNotifs = appStats.sumOf { it.incomingCount }
+    val allRangeStart = remember(records) { records.minOfOrNull { it.timestamp } ?: 0L }
+    val deviceTotalSecs = remember(filter, weekStartDay, allRangeStart) {
+        getDeviceUsageTimeSec(context, filter, weekStartDay, allRangeStart)
+    }
+    val screenPct = if (deviceTotalSecs > 0L && totalTimeSec > 0L)
+        ((totalTimeSec.toFloat() / deviceTotalSecs.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
 
     val (showPersonaInfo, setShowPersonaInfo) = remember { mutableStateOf(false) }
     val (activeDetailDialog, setActiveDetailDialog) = remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
@@ -2228,243 +2380,203 @@ fun OverviewView(viewModel: RelateViewModel) {
         return
     }
 
-    LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val isEmpty = appStats.isEmpty() && leaderboard.isEmpty()
 
+    LazyColumn(
+        contentPadding = PaddingValues(D.Gutter),
+        verticalArrangement = Arrangement.spacedBy(D.Gap)
+    ) {
         item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
 
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.BrandPrimary), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("你的社交人格解讀", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                        Icon(Icons.Rounded.Info, contentDescription = "查看圖鑑", tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(16.dp).clickable { setShowPersonaInfo(true) })
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(persona.emoji, fontSize = 22.sp, modifier = Modifier.padding(end=8.dp))
-                        Text(persona.title, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Black)
-                    }
-                    Text(persona.description.split("\n")[0], color = Color.White.copy(alpha=0.9f), fontSize = 12.sp, modifier = Modifier.padding(top=6.dp), lineHeight = 16.sp)
-                }
-            }
-        }
-
-        if (appStats.isEmpty() && timeStats.isEmpty() && topTimeDrainer == null) {
+        if (isEmpty) {
             item {
-                Column(modifier = Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Rounded.DateRange, contentDescription = null, modifier = Modifier.size(64.dp), tint = AppColors.BorderLight)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("這段期間沒有任何社交紀錄", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, textAlign = TextAlign.Center)
-                    Text("你可以保持背景執行以開始紀錄", fontSize = 13.sp, color = AppColors.TextSecondary, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp, bottom = 24.dp), lineHeight = 20.sp)
-
-                    Button(onClick = { setShowDemoUI(true) }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue), shape = RoundedCornerShape(12.dp)) {
-                        Text("觀看版面與功能範例", fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                Column(modifier = Modifier.fillMaxWidth().padding(top = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Rounded.DateRange, contentDescription = null, modifier = Modifier.size(48.dp), tint = AppColors.BorderStrong)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("這段期間沒有社交紀錄", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                    Text("保持背景執行即可開始記錄", fontSize = T.Label, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
+                    Button(onClick = { setShowDemoUI(true) }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue), shape = RoundedCornerShape(10.dp)) {
+                        Text("觀看版面範例", fontSize = T.Body, fontWeight = FontWeight.Bold)
                     }
                 }
             }
-        } else {
-            if (appStats.isNotEmpty()) {
-                item {
-                    val (viewMode, setViewMode) = remember { mutableStateOf("TIME") }
-                    val context = LocalContext.current
-                    val totalTimeSec = appStats.sumOf { it.totalDurationSeconds }
-                    val totalNotifs = appStats.sumOf { it.incomingCount }
-                    val allRangeStart = remember(records) { records.minOfOrNull { it.timestamp } ?: 0L }
-                    val deviceTotalSecs = remember(filter, weekStartDay, allRangeStart) {
-                        getDeviceUsageTimeSec(context, filter, weekStartDay, allRangeStart)
-                    }
-                    val screenPct = if (deviceTotalSecs > 0L && totalTimeSec > 0L)
-                        ((totalTimeSec.toFloat() / deviceTotalSecs.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
-
-                    Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text("📱 平台數位健康", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                                Row(modifier = Modifier.background(AppColors.BorderLight, RoundedCornerShape(8.dp)).padding(2.dp)) {
-                                    Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(viewMode=="TIME") AppColors.Surface else Color.Transparent).clickable{setViewMode("TIME")}.padding(horizontal=10.dp, vertical=4.dp)){ Text("時長", fontSize=11.sp, fontWeight=if(viewMode=="TIME") FontWeight.Bold else FontWeight.Normal) }
-                                    Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(viewMode=="NOTIF") AppColors.Surface else Color.Transparent).clickable{setViewMode("NOTIF")}.padding(horizontal=10.dp, vertical=4.dp)){ Text("通知", fontSize=11.sp, fontWeight=if(viewMode=="NOTIF") FontWeight.Bold else FontWeight.Normal) }
-                                    Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(viewMode=="PERIOD") AppColors.Surface else Color.Transparent).clickable{setViewMode("PERIOD")}.padding(horizontal=10.dp, vertical=4.dp)){ Text("時段", fontSize=11.sp, fontWeight=if(viewMode=="PERIOD") FontWeight.Bold else FontWeight.Normal) }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(20.dp))
-
-                            if (viewMode == "TIME") {
-                                val hrs = totalTimeSec / 3600
-                                val mins = (totalTimeSec % 3600) / 60
-                                val secs = totalTimeSec % 60
-                                // 單行 + 橫向捲動，數字過大不會擠到換行
-                                Row(
-                                    verticalAlignment = Alignment.Bottom,
-                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                                ) {
-                                    if (hrs > 0) {
-                                        Text("$hrs", fontSize = 28.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
-                                        Text("小時", fontSize = 14.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(start=2.dp, end=6.dp, bottom=6.dp))
-                                    }
-                                    if (mins > 0 || hrs > 0) {
-                                        Text("$mins", fontSize = 28.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
-                                        Text("分鐘", fontSize = 14.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(start=2.dp, end=6.dp, bottom=6.dp))
-                                    }
-                                    Text("$secs", fontSize = 28.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
-                                    Text("秒", fontSize = 14.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(start=2.dp, bottom=6.dp))
-                                }
-                                if (screenPct > 0) {
-                                    Text("通訊軟體佔據您本期手機總使用的 $screenPct%", fontSize = 12.sp, color = AppColors.ActiveBlue, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top=2.dp))
-                                } else if (!hasUsageStatsPermission(context)) {
-                                    Text("前往「設定」開啟權限即可查看佔比分析", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top=2.dp).clickable { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) })
-                                }
-                            } else if (viewMode == "NOTIF") {
-                                Row(verticalAlignment = Alignment.Bottom) {
-                                    Text("$totalNotifs", fontSize = 28.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary)
-                                    Text("則通知", fontSize = 14.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(start=4.dp, bottom=6.dp))
-                                }
-                            } else {
-                                Text("社交活躍分佈", fontSize = 24.sp, fontWeight = FontWeight.Black, color = AppColors.BrandPrimary)
-                            }
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            if (viewMode == "PERIOD" && timeStats.isNotEmpty()) {
-                                Row(modifier = Modifier.fillMaxWidth().height(14.dp).clip(RoundedCornerShape(7.dp))) {
-                                    timeStats.forEach { stat ->
-                                        val weight = stat.percentage.coerceAtLeast(0.01f)
-                                        Box(modifier = Modifier.weight(weight).fillMaxHeight().background(stat.color).border(0.5.dp, AppColors.Surface).clickable {
-                                            val periodName = stat.period.split(" ")[0]
-                                            val periodRecords = filteredRecords.filter {
-                                                val h = Calendar.getInstance().apply{timeInMillis=it.timestamp}.get(Calendar.HOUR_OF_DAY)
-                                                when(periodName) { "早晨"-> h in 5..11; "下午"-> h in 12..17; else -> h !in 5..17 }
-                                            }
-                                            setActiveDetailDialog(Pair("📅 $periodName 活躍對象排行", viewModel.getDynamicLeaderboard(periodRecords, categoriesMap, aliases, availableCats)))
-                                        })
-                                    }
-                                }
-                            } else {
-                                val totalValue = if (viewMode == "TIME") totalTimeSec.toFloat() else totalNotifs.toFloat()
-                                if (totalValue > 0) {
-                                    Row(modifier = Modifier.fillMaxWidth().height(14.dp).clip(RoundedCornerShape(7.dp))) {
-                                        appStats.forEach { stat ->
-                                            val value = if (viewMode == "TIME") stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
-                                            val weight = (value / totalValue).coerceAtLeast(0.001f)
-                                            val brandColor = AppColors.AppBrands[stat.appName] ?: AppColors.TextSecondary
-                                            Box(modifier = Modifier.weight(weight).fillMaxHeight().background(brandColor).border(0.5.dp, AppColors.Surface).clickable {
-                                                val appRecords = filteredRecords.filter { it.appName == stat.appName }
-                                                setActiveDetailDialog(Pair("📱 ${stat.appName} 互動對象排行", viewModel.getDynamicLeaderboard(appRecords, categoriesMap, aliases, availableCats)))
-                                            })
-                                        }
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            if (viewMode == "PERIOD" && timeStats.isNotEmpty()) {
-                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    timeStats.forEach { stat ->
-                                        val progress by animateFloatAsState(targetValue = stat.percentage, animationSpec = tween(1000, easing = FastOutSlowInEasing), label = "")
-                                        val periodName = stat.period.split(" ")[0]
-                                        Row(modifier = Modifier.fillMaxWidth().clickable {
-                                            val periodRecords = filteredRecords.filter {
-                                                val h = Calendar.getInstance().apply{timeInMillis=it.timestamp}.get(Calendar.HOUR_OF_DAY)
-                                                when(periodName) { "早晨"-> h in 5..11; "下午"-> h in 12..17; else -> h !in 5..17 }
-                                            }
-                                            setActiveDetailDialog(Pair("📅 $periodName 活躍對象排行", viewModel.getDynamicLeaderboard(periodRecords, categoriesMap, aliases, availableCats)))
-                                        }, verticalAlignment = Alignment.CenterVertically) {
-                                            Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(stat.color))
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Column(modifier = Modifier.width(70.dp)) {
-                                                Text(periodName, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                                                Text(stat.explicitTimeRange, fontSize = 9.sp, color = AppColors.TextSecondary)
-                                            }
-                                            Box(modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
-                                                Box(modifier = Modifier.fillMaxWidth(progress).fillMaxHeight().background(stat.color))
-                                            }
-                                            Text("${(stat.percentage * 100).toInt()}%", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary,
-                                                maxLines = 1, softWrap = false,
-                                                modifier = Modifier.widthIn(min = 44.dp).padding(start = 8.dp), textAlign = TextAlign.End)
-                                        }
-                                    }
-                                }
-                            } else {
-                                val totalValue = if (viewMode == "TIME") totalTimeSec.toFloat() else totalNotifs.toFloat()
-                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    appStats.forEach { stat ->
-                                        val value = if (viewMode == "TIME") stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
-                                        val targetProgress = if(totalValue > 0) value / totalValue else 0f
-                                        val progress by animateFloatAsState(targetValue = targetProgress, animationSpec = tween(1000, easing = FastOutSlowInEasing), label = "")
-                                        val brandColor = AppColors.AppBrands[stat.appName] ?: AppColors.TextSecondary
-                                        val valText = if (viewMode == "TIME") formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount} 則"
-
-                                        Row(modifier = Modifier.fillMaxWidth().clickable {
-                                            val appRecords = filteredRecords.filter { it.appName == stat.appName }
-                                            setActiveDetailDialog(Pair("📱 ${stat.appName} 互動對象排行", viewModel.getDynamicLeaderboard(appRecords, categoriesMap, aliases, availableCats)))
-                                        }, verticalAlignment = Alignment.CenterVertically) {
-                                            Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(brandColor))
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(stat.appName, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, modifier = Modifier.weight(1f).padding(end = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-
-                                            Box(modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
-                                                Box(modifier = Modifier.fillMaxWidth(progress).fillMaxHeight().background(brandColor))
-                                            }
-                                            // 需鎖單行，否則長字串會被折行破版
-                                            Text(valText, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary,
-                                                maxLines = 1, softWrap = false, overflow = TextOverflow.Visible,
-                                                modifier = Modifier.widthIn(min = 60.dp).padding(start = 8.dp), textAlign = TextAlign.End)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (catStats.isNotEmpty()) {
-                item {
-                    val (showTime, setShowTime) = remember { mutableStateOf(true) }
-                    Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("標籤互動分析", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                        Row(modifier = Modifier.background(AppColors.BorderLight, RoundedCornerShape(8.dp)).padding(2.dp)) {
-                            Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(showTime) AppColors.Surface else Color.Transparent).clickable{setShowTime(true)}.padding(horizontal=10.dp, vertical=4.dp)){ Text("投入時間", fontSize=11.sp, fontWeight=if(showTime) FontWeight.Bold else FontWeight.Normal) }
-                            Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(!showTime) AppColors.Surface else Color.Transparent).clickable{setShowTime(false)}.padding(horizontal=10.dp, vertical=4.dp)){ Text("接收訊息", fontSize=11.sp, fontWeight=if(!showTime) FontWeight.Bold else FontWeight.Normal) }
-                        }
-                    }
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        val sortedStats = if(showTime) catStats.sortedByDescending { it.totalDurationSeconds } else catStats.sortedByDescending { it.incomingCount }
-                        items(sortedStats) { stat ->
-                            Box(modifier = Modifier.clickable {
-                                val catRecords = filteredRecords.filter { r ->
-                                    val uName = aliases[r.rawSenderName] ?: r.rawSenderName
-                                    val cId = categoriesMap[uName] ?: ContactCategory.OTHER.id
-                                    cId == stat.category.id
-                                }
-                                setActiveDetailDialog(Pair("🏷️ ${stat.category.label} 標籤內排行", viewModel.getDynamicLeaderboard(catRecords, categoriesMap, aliases, availableCats)))
-                            }) {
-                                CatStatCard(stat, showTime)
-                            }
-                        }
-                    }
-                }
-            }
-
-            item { WeekHourHeatmapCard(heatmap) }
-            item { TopWordsCard(wordFreq) }
+            return@LazyColumn
         }
+
+        // ── KPI 兩列四格 ──
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(D.Gap)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
+                    KpiTile("停留時間", formatDuration(totalTimeSec), if (screenPct > 0) "佔手機 $screenPct%" else null,
+                        AppColors.ActiveBlue, Modifier.weight(1f))
+                    KpiTile("接收訊息", "$totalNotifs", "則", AppColors.Positive, Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
+                    KpiTile("互動對象", "${leaderboard.size}", "位", AppColors.FamilyText, Modifier.weight(1f))
+                    val topName = leaderboard.firstOrNull()?.unifiedName ?: "—"
+                    KpiTile("時間最多", topName, leaderboard.firstOrNull()?.let { formatDuration(it.totalDurationSeconds) },
+                        AppColors.WorkText, Modifier.weight(1f))
+                }
+            }
+        }
+
+        // ── 人格：壓成一條 ──
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .background(AppColors.BrandPrimary, RoundedCornerShape(D.Radius))
+                    .clickable { setShowPersonaInfo(true) }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(persona.emoji, fontSize = 18.sp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(persona.title, color = Color.White, fontSize = T.Title, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(persona.description.split("\n")[0], color = Color.White.copy(alpha = 0.75f), fontSize = T.Micro, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Icon(Icons.Rounded.Info, contentDescription = "社交人格圖鑑", tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size(15.dp))
+            }
+        }
+
+        // ── 平台分佈（表格） ──
+        if (appStats.isNotEmpty()) {
+            item {
+                val (mode, setMode) = remember { mutableStateOf("TIME") }
+                Panel {
+                    SectionHead("平台分佈") {
+                        SegBar(listOf("TIME" to "時長", "NOTIF" to "訊息"), mode, setMode)
+                    }
+                    val total = if (mode == "TIME") totalTimeSec.toFloat() else totalNotifs.toFloat()
+                    appStats.forEach { stat ->
+                        val v = if (mode == "TIME") stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
+                        DataRow(
+                            name = stat.appName,
+                            dotColor = AppColors.AppBrands[stat.appName] ?: AppColors.TextSecondary,
+                            progress = if (total > 0f) v / total else 0f,
+                            primary = if (mode == "TIME") formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount}",
+                            secondary = if (mode == "TIME") "${stat.incomingCount} 則" else formatDuration(stat.totalDurationSeconds),
+                            onClick = {
+                                val rs = filteredRecords.filter { it.appName == stat.appName }
+                                setActiveDetailDialog("${stat.appName} 互動對象" to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats))
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── 標籤分佈（表格，取代原本的橫向卡片） ──
+        if (catStats.isNotEmpty()) {
+            item {
+                val (showTime, setShowTime) = remember { mutableStateOf(true) }
+                Panel {
+                    SectionHead("標籤分佈") {
+                        SegBar(listOf("T" to "時長", "M" to "訊息"), if (showTime) "T" else "M") { setShowTime(it == "T") }
+                    }
+                    val maxV = catStats.maxOfOrNull { if (showTime) it.totalDurationSeconds.toFloat() else it.incomingCount.toFloat() }?.coerceAtLeast(1f) ?: 1f
+                    val sorted = if (showTime) catStats.sortedByDescending { it.totalDurationSeconds } else catStats.sortedByDescending { it.incomingCount }
+                    sorted.forEach { stat ->
+                        val v = if (showTime) stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
+                        DataRow(
+                            name = stat.category.label,
+                            dotColor = stat.category.color,
+                            progress = v / maxV,
+                            primary = if (showTime) formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount}",
+                            secondary = if (showTime) "${stat.incomingCount} 則" else formatDuration(stat.totalDurationSeconds),
+                            onClick = {
+                                val rs = filteredRecords.filter { r ->
+                                    val u = aliases[r.rawSenderName] ?: r.rawSenderName
+                                    (categoriesMap[u] ?: ContactCategory.OTHER.id) == stat.category.id
+                                }
+                                setActiveDetailDialog("${stat.category.label} 標籤內排行" to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats))
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── 時段分佈 ──
+        if (timeStats.isNotEmpty()) {
+            item {
+                Panel {
+                    SectionHead("時段分佈")
+                    Row(modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
+                        timeStats.forEach { s ->
+                            Box(modifier = Modifier.weight(s.percentage.coerceAtLeast(0.01f)).fillMaxHeight().background(s.color))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        timeStats.forEach { s ->
+                            val periodName = s.period.split(" ")[0]
+                            Column(
+                                modifier = Modifier.weight(1f)
+                                    .background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        val rs = filteredRecords.filter {
+                                            val h = Calendar.getInstance().apply { timeInMillis = it.timestamp }.get(Calendar.HOUR_OF_DAY)
+                                            when (periodName) { "早晨" -> h in 5..11; "下午" -> h in 12..17; else -> h !in 5..17 }
+                                        }
+                                        setActiveDetailDialog("$periodName 活躍對象" to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats))
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 7.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(s.color))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(periodName, fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                                }
+                                Text("${(s.percentage * 100).toInt()}%", fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                                Text(s.explicitTimeRange, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 互動對象 Top 5（直接放總覽，不用切到排行） ──
+        if (leaderboard.isNotEmpty()) {
+            item {
+                Panel {
+                    SectionHead("互動對象 Top 5")
+                    val maxD = leaderboard.maxOfOrNull { it.totalDurationSeconds }?.toFloat()?.coerceAtLeast(1f) ?: 1f
+                    leaderboard.take(5).forEachIndexed { i, stat ->
+                        DataRow(
+                            name = stat.unifiedName,
+                            dotColor = if (stat.isGroup) AppColors.GroupText else stat.category.color,
+                            progress = stat.totalDurationSeconds / maxD,
+                            primary = formatDuration(stat.totalDurationSeconds),
+                            secondary = "${stat.msgCount} 則",
+                            badge = {
+                                Text("${i + 1}", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextTertiary,
+                                    modifier = Modifier.width(12.dp), textAlign = TextAlign.Center)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        item { WeekHourHeatmapCard(heatmap) }
+        item { TopWordsCard(wordFreq) }
     }
 
     if (showPersonaInfo) {
         AlertDialog(
             containerColor = AppColors.Surface, onDismissRequest = { setShowPersonaInfo(false) },
-            title = { Text("社交人格全圖鑑", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = AppColors.TextPrimary) },
+            title = { Text("社交人格全圖鑑", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColors.TextPrimary) },
             text = {
-                LazyColumn(modifier = Modifier.heightIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                LazyColumn(modifier = Modifier.heightIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(SocialPersona.ALL_TYPES) { type ->
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(type.emoji, fontSize = 20.sp, modifier = Modifier.padding(end=8.dp))
-                                Text(type.title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColors.TextPrimary)
+                                Text(type.emoji, fontSize = 16.sp, modifier = Modifier.padding(end = 6.dp))
+                                Text(type.title, fontWeight = FontWeight.Bold, fontSize = T.Body, color = AppColors.TextPrimary)
                             }
-                            Text(type.description, fontSize = 13.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top=4.dp), lineHeight = 18.sp)
+                            Text(type.description, fontSize = T.Label, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 2.dp), lineHeight = 16.sp)
                         }
                     }
                 }
@@ -2482,27 +2594,25 @@ fun OverviewView(viewModel: RelateViewModel) {
     }
 }
 
-/** 星期 x 小時 活躍熱力圖 */
 @Composable
 fun WeekHourHeatmapCard(grid: Array<IntArray>) {
     val max = (grid.maxOfOrNull { row -> row.maxOrNull() ?: 0 } ?: 0).coerceAtLeast(1)
     val days = listOf("日", "一", "二", "三", "四", "五", "六")
     val total = grid.sumOf { row -> row.sum() }
 
-    Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("🔥 活躍熱力圖", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                Text("共 $total 次互動", fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-            }
+    Panel {
+        SectionHead("活躍熱力圖") {
+            Text("共 $total 次", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+        }
+        run {
             if (total == 0) {
-                Text("這段期間沒有互動紀錄", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 10.dp))
-                return@Column
+                Text("這段期間沒有互動紀錄", fontSize = T.Label, color = AppColors.TextSecondary)
+                return@Panel
             }
             Spacer(modifier = Modifier.height(10.dp))
             grid.forEachIndexed { d, row ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
-                    Text(days[d], fontSize = 9.sp, color = AppColors.TextSecondary, modifier = Modifier.width(14.dp), textAlign = TextAlign.Center)
+                    Text(days[d], fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.width(14.dp), textAlign = TextAlign.Center)
                     row.forEach { v ->
                         val alpha = if (v == 0) 0f else 0.2f + 0.8f * (v.toFloat() / max)
                         Box(
@@ -2517,7 +2627,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
             }
             Row(modifier = Modifier.fillMaxWidth().padding(start = 14.dp, top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 listOf("0", "6", "12", "18", "23").forEach {
-                    Text(it, fontSize = 8.sp, color = AppColors.TextSecondary)
+                    Text(it, fontSize = T.Micro, color = AppColors.TextTertiary)
                 }
             }
         }
@@ -2529,17 +2639,15 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
 fun TopWordsCard(wordFreq: Map<String, Int>) {
     val top = remember(wordFreq) { wordFreq.entries.sortedByDescending { it.value }.take(12).map { it.key to it.value } }
 
-    Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("💬 常用詞", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                Text("累計", fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-            }
+    Panel {
+        SectionHead("常用詞") {
+            Text("累計", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+        }
+        run {
             if (top.isEmpty()) {
-                Text("接收訊息後會在這裡累積常用詞（只統計詞頻，不保留訊息內容）", fontSize = 12.sp, color = AppColors.TextSecondary, lineHeight = 17.sp, modifier = Modifier.padding(top = 10.dp))
-                return@Column
+                Text("接收訊息後會在這裡累積常用詞（只統計詞頻，不保留訊息內容）", fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
+                return@Panel
             }
-            Spacer(modifier = Modifier.height(10.dp))
             val maxCount = top.first().second.coerceAtLeast(1)
             top.chunked(3).forEach { rowWords ->
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2550,27 +2658,13 @@ fun TopWordsCard(wordFreq: Map<String, Int>) {
                                 .background(AppColors.ActiveBlue.copy(alpha = 0.08f + 0.22f * ratio), RoundedCornerShape(8.dp))
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                         ) {
-                            Text(word, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("$count 次", fontSize = 10.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                            Text(word, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("$count 次", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                         }
                     }
                     repeat(3 - rowWords.size) { Spacer(modifier = Modifier.weight(1f)) }
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun CatStatCard(stat: CategoryStat, showTime: Boolean) {
-    val valText = if (showTime) formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount} 則"
-
-    Card(colors = CardDefaults.cardColors(containerColor = stat.category.bgColor), border = BorderStroke(1.dp, stat.category.color.copy(alpha=0.3f)), shape = RoundedCornerShape(14.dp), modifier = Modifier.width(112.dp)) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(stat.category.label, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = stat.category.color, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(valText, fontSize = 18.sp, fontWeight = FontWeight.Black, color = AppColors.TextPrimary)
-            Text(if(showTime) "總計投入時間" else "總接收訊息量", fontSize = 11.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 2.dp))
         }
     }
 }
@@ -2678,6 +2772,52 @@ fun ContactDetailDialog(stat: SenderStat, hourlyData: Array<HourlyStat>, missedC
     )
 }
 
+/** 排行列：名次 + 名稱 + 標籤 + 迷你長條 + 雙欄數值。高度約為舊版卡片的三分之一。 */
+@Composable
+fun RankRow(rank: Int, stat: SenderStat, maxScore: Float, sortType: SortType, onClick: () -> Unit) {
+    val score = if (sortType == SortType.TIME) stat.totalDurationSeconds.toFloat() else (stat.msgCount + stat.callCount).toFloat()
+    val progress = if (maxScore > 0f) (score / maxScore).coerceIn(0f, 1f) else 0f
+    val accent = if (stat.isGroup) AppColors.GroupText else stat.category.color
+
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("$rank", fontSize = T.Label, fontWeight = FontWeight.Black,
+            color = if (rank <= 3) AppColors.ActiveBlue else AppColors.TextTertiary,
+            modifier = Modifier.width(18.dp), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
+
+        Column(modifier = Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.background(if (stat.isGroup) AppColors.GroupBg else stat.category.bgColor, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp)) {
+                    Text(if (stat.isGroup) "群" else stat.category.label,
+                        color = accent, fontSize = T.Micro, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                }
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(stat.unifiedName, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Box(modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(AppColors.Background)) {
+                Box(modifier = Modifier.fillMaxWidth(progress).fillMaxHeight().background(accent))
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(min = 56.dp)) {
+            Text(formatDuration(stat.totalDurationSeconds), fontSize = T.Body, fontWeight = FontWeight.Black,
+                color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+            Text(
+                buildString {
+                    append("${stat.msgCount} 則")
+                    if (stat.callCount > 0) append(" · ${stat.callCount} 通")
+                },
+                fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false
+            )
+        }
+    }
+}
+
 @Composable
 fun LeaderboardView(viewModel: RelateViewModel) {
     val records by viewModel.interactions.collectAsState()
@@ -2691,121 +2831,156 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     val groupFilter by viewModel.groupFilter.collectAsState()
     val weekStartDay by viewModel.weekStartDay.collectAsState()
 
-    val (isRefreshing, setIsRefreshing) = remember { mutableStateOf(false) }
     val (selectedContact, setSelectedContact) = remember { mutableStateOf<SenderStat?>(null) }
-    val coroutineScope = rememberCoroutineScope()
+    var showFilters by remember { mutableStateOf(false) }
 
     val leaderboard = remember(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter, weekStartDay) {
         viewModel.getLeaderboard(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter)
     }
     val availableApps = remember(records) { records.map { it.appName }.distinct().sorted() }
-    // 長條圖基準需與排序基準一致
     val maxScore = if (sort == SortType.TIME) {
         leaderboard.maxOfOrNull { it.totalDurationSeconds }?.toFloat()?.coerceAtLeast(1f) ?: 1f
     } else {
         leaderboard.maxOfOrNull { it.msgCount + it.callCount }?.toFloat()?.coerceAtLeast(1f) ?: 1f
     }
+    val activeFilterCount = listOfNotNull(appFilter, catFilter?.label).size + (if (groupFilter != GroupFilter.ALL) 1 else 0)
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
+    // 排行列彼此相連成一張表，間距由各 item 自行控制
+    LazyColumn(
+        contentPadding = PaddingValues(D.Gutter),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        item {
+            Column {
+                TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay)
+                Spacer(modifier = Modifier.height(D.Gap))
+            }
+        }
 
-            item {
-                Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface).padding(bottom = 8.dp)) {
-                    TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay)
+        // ── 控制列：排序 + 篩選收合，只佔一行 ──
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                SegBar(
+                    listOf(SortType.TIME.name to "時長", SortType.MESSAGES.name to "訊息"),
+                    sort.name
+                ) { viewModel.setSortType(SortType.valueOf(it)) }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                Text("${leaderboard.size} 位", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+
+                Surface(
+                    color = if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.Surface,
+                    border = BorderStroke(1.dp, if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.BorderLight),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.clickable { showFilters = !showFilters }
+                ) {
+                    Text(
+                        if (activeFilterCount > 0) "篩選 $activeFilterCount" else "篩選",
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                        color = if (activeFilterCount > 0) Color.White else AppColors.TextPrimary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
                 }
             }
+            Spacer(modifier = Modifier.height(D.Gap))
+        }
 
+        // ── 篩選面板（預設收合，不再佔滿三行） ──
+        if (showFilters) {
             item {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item {
-                        val isSelected = appFilter == null
-                        Box(modifier = Modifier.background(if (isSelected) AppColors.BrandPrimary else AppColors.Background, RoundedCornerShape(20.dp)).clickable { viewModel.setAppFilter(null) }.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Text("全平台", color = if (isSelected) Color.White else AppColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                    items(availableApps) { app ->
-                        val isSelected = appFilter == app
-                        val brandColor = AppColors.AppBrands[app] ?: AppColors.BrandPrimary
-                        Box(modifier = Modifier.background(if (isSelected) brandColor else AppColors.Background, RoundedCornerShape(20.dp)).clickable { viewModel.setAppFilter(app) }.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Text(app, color = if (isSelected) Color.White else AppColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-
-            item {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item {
-                        val isSelected = catFilter == null
-                        Box(modifier = Modifier.border(1.dp, if (isSelected) AppColors.BrandPrimary else AppColors.BorderLight, RoundedCornerShape(20.dp)).background(if (isSelected) AppColors.BrandPrimary else Color.Transparent, RoundedCornerShape(20.dp)).clickable { viewModel.setCategoryFilter(null) }.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Text("全標籤", color = if (isSelected) Color.White else AppColors.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                    items(availableCats) { cat ->
-                        val isSelected = catFilter?.id == cat.id
-                        Box(modifier = Modifier.border(1.dp, if (isSelected) cat.color else AppColors.BorderLight, RoundedCornerShape(20.dp)).background(if (isSelected) cat.color else Color.Transparent, RoundedCornerShape(20.dp)).clickable { viewModel.setCategoryFilter(cat) }.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Text(cat.label, color = if (isSelected) Color.White else cat.color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-
-            item {
-                Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Row(modifier = Modifier.background(AppColors.BorderLight.copy(alpha = 0.6f), RoundedCornerShape(8.dp)).padding(2.dp)) {
+                Column {
+                Panel {
+                    Text("類型", fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         GroupFilter.entries.forEach { g ->
                             val on = groupFilter == g
-                            Box(modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                .background(if (on) AppColors.Surface else Color.Transparent)
+                            Box(modifier = Modifier
+                                .background(if (on) AppColors.BrandPrimary else AppColors.Background, RoundedCornerShape(14.dp))
                                 .clickable { viewModel.setGroupFilter(g) }
-                                .padding(horizontal = 10.dp, vertical = 5.dp)) {
-                                Text(g.label, fontSize = 11.sp, color = if (on) AppColors.TextPrimary else AppColors.TextSecondary, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal, maxLines = 1, softWrap = false)
+                                .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                                Text(g.label, color = if (on) Color.White else AppColors.TextSecondary, fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                             }
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.wrapContentWidth()) {
-                        Surface(color = AppColors.Surface, border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(12.dp), modifier = Modifier.clickable {
-                            coroutineScope.launch { setIsRefreshing(true); viewModel.forceRefresh(); delay(500); setIsRefreshing(false) }
-                        }) {
-                            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = if (isRefreshing) AppColors.ActiveBlue else AppColors.TextPrimary)
-                            }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("平台", fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val allOn = appFilter == null
+                        Box(modifier = Modifier
+                            .background(if (allOn) AppColors.BrandPrimary else AppColors.Background, RoundedCornerShape(14.dp))
+                            .clickable { viewModel.setAppFilter(null) }
+                            .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                            Text("全平台", color = if (allOn) Color.White else AppColors.TextSecondary, fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                         }
-                        Surface(color = AppColors.BorderLight, shape = RoundedCornerShape(12.dp), modifier = Modifier.clickable { viewModel.setSortType(if (sort == SortType.TIME) SortType.MESSAGES else SortType.TIME) }) {
-                            Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.AutoMirrored.Filled.List, contentDescription = null, modifier = Modifier.size(16.dp), tint = AppColors.TextPrimary)
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("依${sort.label}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        availableApps.forEach { app ->
+                            val on = appFilter == app
+                            val brand = AppColors.AppBrands[app] ?: AppColors.BrandPrimary
+                            Box(modifier = Modifier
+                                .background(if (on) brand else AppColors.Background, RoundedCornerShape(14.dp))
+                                .clickable { viewModel.setAppFilter(app) }
+                                .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                                Text(app, color = if (on) Color.White else AppColors.TextSecondary, fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("標籤", fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val allOn = catFilter == null
+                        Box(modifier = Modifier
+                            .background(if (allOn) AppColors.BrandPrimary else AppColors.Background, RoundedCornerShape(14.dp))
+                            .clickable { viewModel.setCategoryFilter(null) }
+                            .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                            Text("全標籤", color = if (allOn) Color.White else AppColors.TextSecondary, fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                        }
+                        availableCats.forEach { cat ->
+                            val on = catFilter?.id == cat.id
+                            Box(modifier = Modifier
+                                .background(if (on) cat.color else AppColors.Background, RoundedCornerShape(14.dp))
+                                .clickable { viewModel.setCategoryFilter(cat) }
+                                .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                                Text(cat.label, color = if (on) Color.White else cat.color, fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(D.Gap))
                 }
             }
+        }
 
-            if (leaderboard.isEmpty()) {
-                item {
-                    Column(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Rounded.DateRange, contentDescription = null, modifier = Modifier.size(48.dp), tint = AppColors.BorderLight)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("沒有符合條件的排行數據", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary, textAlign = TextAlign.Center)
-
-                        val (showDemoUI, setShowDemoUI) = remember { mutableStateOf(false) }
-                        if (showDemoUI) {
-                            Dialog(onDismissRequest = { setShowDemoUI(false) }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-                                DemoDashboardScreen(onClose = { setShowDemoUI(false) })
-                            }
-                        }
-
-                        Button(onClick = { setShowDemoUI(true) }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue), shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(top = 16.dp)) {
-                            Text("觀看排版範例", fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-                        }
-                    }
+        if (leaderboard.isEmpty()) {
+            item {
+                Column(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Rounded.DateRange, contentDescription = null, modifier = Modifier.size(40.dp), tint = AppColors.BorderStrong)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("沒有符合條件的資料", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary)
                 }
-            } else {
-                items(leaderboard, key = { it.unifiedName }) { stat ->
-                    Box(modifier = Modifier.clickable { setSelectedContact(stat) }) {
-                        StatCardDetailed(stat, maxScore, sort)
-                    }
+            }
+        } else {
+            // 逐列 item，維持惰性渲染。聯絡人可能有數百位，
+            // 全部塞進單一 item 會一次組完所有節點，捲動直接卡死。
+            itemsIndexed(leaderboard, key = { _, s -> s.unifiedName }) { i, stat ->
+                val first = i == 0
+                val last = i == leaderboard.size - 1
+                val shape = RoundedCornerShape(
+                    topStart = if (first) D.Radius else 0.dp, topEnd = if (first) D.Radius else 0.dp,
+                    bottomStart = if (last) D.Radius else 0.dp, bottomEnd = if (last) D.Radius else 0.dp
+                )
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(AppColors.Surface, shape)
+                        .border(1.dp, AppColors.BorderLight, shape)
+                        .padding(horizontal = D.CardPad)
+                ) {
+                    RankRow(i + 1, stat, maxScore, sort) { setSelectedContact(stat) }
+                    if (!last) HorizontalDivider(color = AppColors.BorderLight.copy(alpha = 0.6f))
                 }
             }
         }
@@ -2813,7 +2988,6 @@ fun LeaderboardView(viewModel: RelateViewModel) {
 
     if (selectedContact != null) {
         val target = selectedContact!!.unifiedName
-        // 避免對話框開著時每次重組都重算
         val hourlyData = remember(records, aliases, target, filter) {
             viewModel.getHourlyActivityForContact(records, aliases, target, filter)
         }
@@ -2822,55 +2996,6 @@ fun LeaderboardView(viewModel: RelateViewModel) {
         }
         ContactDetailDialog(stat = selectedContact!!, hourlyData = hourlyData, missedCalls = missedCalls) {
             setSelectedContact(null)
-        }
-    }
-}
-
-// 🏆 防跑版最佳化：為 appNames 加入 LazyRow 滾動支援
-@Composable
-fun StatCardDetailed(stat: SenderStat, maxScore: Float, sortType: SortType) {
-    val currentScore = if (sortType == SortType.TIME) stat.totalDurationSeconds.toFloat() else (stat.msgCount + stat.callCount).toFloat()
-    val progress by animateFloatAsState(
-        targetValue = if (maxScore > 0f) (currentScore / maxScore).coerceIn(0f, 1f) else 0f,
-        animationSpec = tween(800, easing = FastOutSlowInEasing), label = ""
-    )
-
-    Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp)) {
-                    Box(modifier = Modifier.background(if(stat.isGroup) AppColors.GroupBg else stat.category.bgColor, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 3.dp)) {
-                        Text(if (stat.isGroup) "群組" else stat.category.label, color = if(stat.isGroup) AppColors.GroupText else stat.category.color, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(stat.unifiedName, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Column(horizontalAlignment = Alignment.End, modifier = Modifier.wrapContentWidth()) {
-                    Text(formatDuration(stat.totalDurationSeconds), fontSize = 16.sp, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                    Text("總停留時間", fontSize = 10.sp, color = AppColors.TextSecondary)
-                }
-            }
-            Box(modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.BorderLight)) {
-                Box(modifier = Modifier.fillMaxWidth(progress).fillMaxHeight().background(AppColors.ActiveBlue))
-            }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    if (stat.msgCount > 0 || stat.callCount == 0) {
-                        Text("💬 ${stat.msgCount} 則訊息 | 共 ${stat.incomingWords} 字 (平均 ${stat.avgWordsPerMessage} 字)", fontSize = 12.sp, color = AppColors.TextPrimary, modifier = Modifier.padding(bottom = 4.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    if (stat.callCount > 0) {
-                        Text("📞 ${stat.callCount} 通電話 | 總時長 ${formatDuration(stat.callDurationSeconds)}", fontSize = 12.sp, color = AppColors.WorkText, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 4.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Text("點擊卡片查看活躍時段", fontSize = 11.sp, color = AppColors.ActiveBlue)
-                }
-
-                // 🏆 橫向滾動保護機制：避免多個 App 標籤擠爆螢幕
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.wrapContentWidth(Alignment.End).horizontalScroll(rememberScrollState())) {
-                    stat.appNames.forEach { app ->
-                        Text(app, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary, maxLines = 1, softWrap = false, modifier = Modifier.border(1.dp, AppColors.BorderLight, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
-                    }
-                }
-            }
         }
     }
 }
