@@ -6,6 +6,9 @@ import android.app.Notification
 import com.example.relatestats.BuildConfig
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
+import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -408,6 +411,8 @@ object DataRepository {
 
     @Volatile
     private var prefs: SharedPreferences? = null
+    @Volatile
+    private var appContext: Context? = null
 
     // 存檔一律在背景執行
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -420,6 +425,7 @@ object DataRepository {
         if (prefs != null) return
         synchronized(this) {
             if (prefs != null) return
+            appContext = context.applicationContext
             prefs = context.getSharedPreferences("RelateStatsData", Context.MODE_PRIVATE)
         }
         loadData()
@@ -563,6 +569,61 @@ object DataRepository {
         saveData(immediate = true)
     }
 
+    // 任何破壞性操作前先存一份完整快照到 App 內部空間，
+    // 存檔案而不是 SharedPreferences —— 快照可達十幾 MB，塞進 prefs 會讓主檔案膨脹一倍
+    private const val UNDO_FILE = "RelateStats_Undo.txt"
+
+    val undoAvailable = MutableStateFlow(false)
+    val undoLabel = MutableStateFlow("")
+
+    /**
+     * ⚠️ 狀態必須「同步」擷取。呼叫端會在這個函式回傳後立刻修改資料，
+     * 若把讀取也丟進背景協程，快照可能拍到已經刪除後的狀態，復原就失效了。
+     * 因此這裡先抓住不可變的引用，序列化與寫檔才交給背景。
+     */
+    fun snapshotForUndo(label: String) {
+        val ctx = appContext ?: return
+        val snapRecords = _interactions.value
+        val snapAliases = _aliases.value
+        val snapCats = _categories.value
+        val snapAvail = _availableCategories.value
+        undoLabel.value = label
+        undoAvailable.value = true
+        ioScope.launch {
+            runCatching {
+                val payload = buildBackupString(snapRecords, snapAliases, snapCats, snapAvail, "")
+                File(ctx.filesDir, UNDO_FILE).writeText(payload)
+            }.onFailure { undoAvailable.value = false }
+        }
+    }
+
+    /** 復原上一次破壞性操作 */
+    fun undoLastDestructive(): Boolean {
+        val ctx = appContext ?: return false
+        return runCatching {
+            val f = File(ctx.filesDir, UNDO_FILE)
+            if (!f.exists()) return false
+            val ok = importBackupString(f.readText(), "")
+            if (ok) { f.delete(); undoAvailable.value = false; undoLabel.value = "" }
+            ok
+        }.getOrDefault(false)
+    }
+
+    fun refreshUndoState() {
+        val ctx = appContext ?: return
+        undoAvailable.value = runCatching { File(ctx.filesDir, UNDO_FILE).exists() }.getOrDefault(false)
+    }
+
+    /** 依 id 刪除指定紀錄 */
+    fun deleteRecordsByIds(ids: Set<String>): Int {
+        if (ids.isEmpty()) return 0
+        snapshotForUndo("刪除 ${ids.size} 筆紀錄")
+        val before = _interactions.value.size
+        _interactions.value = _interactions.value.filterNot { it.id in ids }
+        saveData(immediate = true)
+        return before - _interactions.value.size
+    }
+
     /** 批次設定標籤，只寫一次檔 */
     fun updateCategories(names: Collection<String>, categoryId: String) {
         if (names.isEmpty()) return
@@ -573,6 +634,7 @@ object DataRepository {
     /** 刪除指定聯絡人的所有紀錄，連同別名與標籤設定一起清掉。回傳刪除筆數 */
     fun deleteContacts(names: Set<String>): Int {
         if (names.isEmpty()) return 0
+        snapshotForUndo("刪除 ${names.size} 位聯絡人")
         val before = _interactions.value.size
         _interactions.value = _interactions.value.filterNot {
             (_aliases.value[it.rawSenderName] ?: it.rawSenderName) in names
@@ -711,6 +773,7 @@ object DataRepository {
     }
 
     fun clearInteractions(scope: String) {
+        snapshotForUndo(when (scope) { "TODAY" -> "清除今日資料"; "WEEK" -> "清除本週資料"; else -> "清除所有資料" })
         val now = System.currentTimeMillis()
         val newRecords = when (scope) {
             "TODAY" -> {
@@ -735,6 +798,7 @@ object DataRepository {
     }
 
     fun clearInteractionsByDate(timestamp: Long) {
+        snapshotForUndo("清除指定日期資料")
         val targetCal = Calendar.getInstance().apply { timeInMillis = timestamp }
         val targetYear = targetCal.get(Calendar.YEAR)
         val targetDay = targetCal.get(Calendar.DAY_OF_YEAR)
@@ -759,6 +823,7 @@ object DataRepository {
     fun countAbnormalRecords(): Int = _interactions.value.count { isAbnormal(it) }
 
     fun removeAbnormalRecords(): Int {
+        snapshotForUndo("清理異常紀錄")
         val before = _interactions.value.size
         _interactions.value = _interactions.value.filterNot { isAbnormal(it) }
         val removed = before - _interactions.value.size
@@ -836,11 +901,21 @@ object DataRepository {
         }
     }
 
-    fun exportBackupString(key: String): String {
-        val records = _interactions.value.joinToString(";") { it.toCsvString() }
-        val aliases = _aliases.value.map { "${it.key}|=|${it.value}" }.joinToString(";")
-        val categories = _categories.value.map { "${it.key}|=|${it.value}" }.joinToString(";")
-        val customCats = _availableCategories.value.joinToString(";") { it.toCsvString() }
+    fun exportBackupString(key: String): String = buildBackupString(
+        _interactions.value, _aliases.value, _categories.value, _availableCategories.value, key
+    )
+
+    private fun buildBackupString(
+        recordList: List<InteractionRecord>,
+        aliasMap: Map<String, String>,
+        catMap: Map<String, String>,
+        availCats: List<ContactCategory>,
+        key: String
+    ): String {
+        val records = recordList.joinToString(";") { it.toCsvString() }
+        val aliases = aliasMap.map { "${it.key}|=|${it.value}" }.joinToString(";")
+        val categories = catMap.map { "${it.key}|=|${it.value}" }.joinToString(";")
+        val customCats = availCats.joinToString(";") { it.toCsvString() }
         val combined = "V11||$records||$aliases||$categories||$customCats"
 
         if (key.isEmpty()) return Base64.encodeToString(combined.toByteArray(), Base64.NO_WRAP)
@@ -972,31 +1047,44 @@ class RelateNotificationService : NotificationListenerService() {
         // 一次多則訊息只會 post 一則通知，逐則計入才不會短少。
         // extractMessagingStyleFromNotification() 在公開 SDK 已隱藏，只能走 extras。
         val parsed = extractMessages(extras)
-        val isGroupFlag = extras.getBoolean("android.isGroupConversation", false) ||
-                extras.getBoolean("android.isGroup", false) ||
-                !convTitle.isNullOrBlank()
+        // MessagingStyle 規格：sender 為 null 代表「這則是使用者本人發的」。
+        // selfDisplayName 是本人在這個對話裡的顯示名稱，同樣要排除。
+        val selfName = extras.getCharSequence("android.selfDisplayName")?.toString()?.trim()
+        val incoming = parsed.filter { m ->
+            val s = m.sender?.trim()
+            !s.isNullOrBlank() && (selfName == null || !s.equals(selfName, ignoreCase = true))
+        }
 
-        if (parsed.isNotEmpty()) {
-            val convName = convTitle?.trim()
+        // ⚠️ 群組判定只能信官方旗標或「多位不同發言人」。
+        // 不能用 conversationTitle 是否存在來判斷 —— IG 連一對一私訊都會帶
+        // conversationTitle，那會讓所有 IG 私訊被當成同一個群組，
+        // 對話對象全部被塞進 subSender、併成同一個人。
+        val distinctSenders = incoming.mapNotNull { it.sender?.trim() }.filter { it.isNotBlank() }.distinct()
+        val isGroupFlag = extras.getBoolean("android.isGroupConversation", false) || distinctSenders.size >= 2
+
+        if (incoming.isNotEmpty()) {
+            val convName = convTitle?.trim()?.takeIf { it.isNotBlank() }
             val convKey = sbn.key + "|" + (convName ?: baseTitle)
             val since = lastHandledTime[convKey] ?: 0L
             var newest = since
             var handled = 0
-            parsed.forEach { msg ->
+            incoming.forEach { msg ->
                 if (msg.time <= since) return@forEach
                 if (msg.time > newest) newest = msg.time
                 if (isNoise(msg.text)) return@forEach
-                val isGroup = isGroupFlag || !convName.isNullOrBlank()
                 val speaker = msg.sender?.trim()?.takeIf { it.isNotBlank() }
-                val senderName = if (isGroup && !convName.isNullOrBlank()) convName else (speaker ?: baseTitle)
-                val subSender = if (isGroup) speaker else null
-                addMessage(appName, senderName, subSender, msg.text, isGroup, msg.time)
+                // 群組才用對話名當歸戶對象；一對一一律用實際發話者
+                val senderName = if (isGroupFlag && convName != null) convName else (speaker ?: convName ?: baseTitle)
+                val subSender = if (isGroupFlag) speaker else null
+                addMessage(appName, senderName, subSender, msg.text, isGroupFlag, msg.time)
                 handled++
             }
             lastHandledTime[convKey] = newest
             if (handled > 0) return
-            // 這則通知裡沒有新訊息（只是被重新 post）就不要再重複計算一次
             if (since > 0L) return
+        } else if (parsed.isNotEmpty()) {
+            // 整則通知都是自己發的訊息，不計入
+            return
         }
 
         // ---- 沒有 MessagingStyle 的後備路徑 ----
@@ -1005,7 +1093,8 @@ class RelateNotificationService : NotificationListenerService() {
         var isGroup = isGroupFlag
         var content = fallbackContent
 
-        if (isGroup && !convTitle.isNullOrBlank()) {
+        // 只有官方旗標說是群組時，才用對話名歸戶、把標題當發話者
+        if (isGroup && !convTitle.isNullOrBlank() && convTitle.trim() != baseTitle.trim()) {
             senderName = convTitle.trim()
             subSender = baseTitle.trim()
         }
@@ -1138,16 +1227,29 @@ class ChatTrackerService : AccessibilityService() {
 
     private companion object {
         const val MAX_SESSION_SECONDS = MAX_STAY_SECONDS
-        const val CONTENT_THROTTLE_MS = 1200L
-        const val MAX_TREE_DEPTH = 12
-        const val MAX_TREE_NODES = 400
+        const val CONTENT_THROTTLE_MS = 800L
+        const val MAX_TREE_NODES = 800
+        const val MAX_TREE_DEPTH = 16
+        // 連續幾次抓不到標題才算真的離開。單次抓不到多半只是畫面重繪，
+        // 立刻結算會把一段連續停留切成無數碎片，每片不足 1 秒就被丟掉。
+        const val MISS_TOLERANCE = 3
+        // 這段時間內回到同一個聊天室視為同一段停留，接續累加而不是重開一段
+        const val RESUME_WINDOW_MS = 25_000L
     }
 
     private var currentChatName: String? = null
     private var currentAppName: String? = null
     private var chatStartTime: Long = 0
     private var lastContentScan: Long = 0
+    private var missStreak = 0
     private var screenReceiver: BroadcastReceiver? = null
+
+    // 暫存的一段停留，等確定不會回來才寫入
+    private var pendingName: String? = null
+    private var pendingApp: String? = null
+    private var pendingSeconds: Long = 0
+    private val handler = Handler(Looper.getMainLooper())
+    private val flushRunnable = Runnable { flushPending() }
 
     private val targetApps = mapOf(
         "jp.naver.line.android" to "LINE", "com.facebook.orca" to "Messenger",
@@ -1156,10 +1258,21 @@ class ChatTrackerService : AccessibilityService() {
         "com.google.android.dialer" to "電話", "com.samsung.android.incallui" to "電話"
     )
 
+    // 用「view id 的後綴」比對，不寫死完整 id。
+    // IG / Threads 幾乎每次改版都會換 id 前綴，寫死等於下次改版就失效。
+    private val titleIdSuffixes = setOf(
+        "header_title", "chathistory_title", "chat_title", "chat_ui_header_title",
+        "thread_title", "thread_title_name", "thread_title_textview", "direct_thread_title",
+        "action_bar_title", "action_bar_textview_title", "toolbar_title",
+        "conversation_contact_name", "contactgrid_contact_name",
+        "igds_headline_headline", "title", "name"
+    )
+
     private val ignoreTitles = setOf(
         "LINE", "主頁", "聊天", "通話", "Instagram", "Messenger", "Threads", "WhatsApp", "Telegram",
         "搜尋", "設定", "動態", "貼文", "留言", "分享", "限時動態", "觀看完整 Reel",
-        "更多選項", "應用程式圖示", "查看洞察報告", "新增", "相機", "通知"
+        "更多選項", "應用程式圖示", "查看洞察報告", "新增", "相機", "通知", "訊息", "收件匣",
+        "Direct", "Chats", "Search", "Home"
     )
 
     override fun onServiceConnected() {
@@ -1171,7 +1284,7 @@ class ChatTrackerService : AccessibilityService() {
             addAction(Intent.ACTION_USER_PRESENT)
         }
         val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) { leaveChat() }
+            override fun onReceive(context: Context?, intent: Intent?) { endTrackingNow() }
         }
         screenReceiver = receiver
         runCatching { ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED) }
@@ -1181,16 +1294,15 @@ class ChatTrackerService : AccessibilityService() {
         if (event == null) return
         val appName = targetApps[event.packageName?.toString()]
 
-        // 非目標 App 一律先結算，否則碼錶永遠不會停
+        // 離開目標 App：先暫停並排程結算，短時間內切回來還能接續同一段
         if (appName == null) {
-            leaveChat()
+            pauseTracking()
             return
         }
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> Unit
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                // 滑動時每秒可觸發數十次，需節流否則會一直走訪節點樹
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastContentScan < CONTENT_THROTTLE_MS) return
                 lastContentScan = now
@@ -1199,71 +1311,150 @@ class ChatTrackerService : AccessibilityService() {
         }
 
         val root = rootInActiveWindow ?: return
-        val rawTitle = extractChatName(root)
+        val hit = scanScreen(root)
 
-        // 不用 event.text 當備援，那通常是訊息內容，會產生假聯絡人
-        if (rawTitle == null) { leaveChat(); return }
+        val name = hit?.title?.trim()
+        val valid = name != null && name.isNotEmpty() && name.length <= 60 &&
+                name !in ignoreTitles &&
+                (appName == "電話" || hit.hasEditText)
 
-        val chatName = rawTitle.trim()
-        if (chatName.isEmpty() || chatName.length > 60 || chatName in ignoreTitles) { leaveChat(); return }
+        if (!valid) {
+            missStreak++
+            if (missStreak >= MISS_TOLERANCE) pauseTracking()
+            return
+        }
 
-        // 通話畫面沒有輸入框，其餘 App 必須看到輸入框才算真的在聊天室
-        if (appName != "電話" && !hasEditText(root, 0, intArrayOf(0))) { leaveChat(); return }
-
-        enterChat(chatName, appName)
+        missStreak = 0
+        enterChat(name!!, appName)
     }
 
-    private fun hasEditText(node: AccessibilityNodeInfo?, depth: Int, visited: IntArray): Boolean {
-        if (node == null || depth > MAX_TREE_DEPTH || visited[0] > MAX_TREE_NODES) return false
-        visited[0]++
-        if (node.isEditable || node.className?.toString()?.contains("EditText") == true) return true
-        for (i in 0 until node.childCount) {
-            if (hasEditText(node.getChild(i), depth + 1, visited)) return true
+    private class ScanResult(val title: String?, val hasEditText: Boolean)
+
+    /**
+     * 一次走訪就同時找出「聊天室標題」與「是否有輸入框」。
+     * 標題優先用 view id 後綴比對；找不到就退而取畫面頂端 20% 內最上方的文字，
+     * 這樣即使 App 改版換掉 id 仍然抓得到。
+     */
+    private fun scanScreen(root: AccessibilityNodeInfo): ScanResult {
+        val screen = Rect()
+        root.getBoundsInScreen(screen)
+        val topLimit = screen.top + (screen.height() * 0.20f).toInt()
+
+        var byId: String? = null
+        var fallback: String? = null
+        var fallbackTop = Int.MAX_VALUE
+        var hasEdit = false
+        var visited = 0
+
+        val bounds = Rect()
+        val stack = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        stack.addLast(root to 0)
+
+        while (stack.isNotEmpty() && visited < MAX_TREE_NODES) {
+            val (node, depth) = stack.removeLast()
+            visited++
+            if (depth > MAX_TREE_DEPTH) continue
+
+            if (!hasEdit && (node.isEditable || node.className?.toString()?.contains("EditText") == true)) {
+                hasEdit = true
+            }
+
+            val text = node.text?.toString()?.trim()
+            if (!text.isNullOrBlank() && text.length <= 60) {
+                if (byId == null) {
+                    val suffix = node.viewIdResourceName?.substringAfterLast('/')
+                    if (suffix != null && suffix in titleIdSuffixes) byId = text
+                }
+                if (byId == null && looksLikeTitle(text)) {
+                    node.getBoundsInScreen(bounds)
+                    if (bounds.top in screen.top..topLimit && bounds.height() > 0 && bounds.top < fallbackTop) {
+                        fallbackTop = bounds.top
+                        fallback = text
+                    }
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { stack.addLast(it to depth + 1) }
+            }
+            if (byId != null && hasEdit) break
         }
-        return false
+
+        return ScanResult(byId ?: fallback, hasEdit)
     }
 
-    private fun extractChatName(root: AccessibilityNodeInfo): String? {
-        val ids = listOf(
-            "jp.naver.line.android:id/header_title",
-            "com.facebook.orca:id/thread_title_name",
-            "com.instagram.android:id/thread_title",
-            "com.instagram.android:id/action_bar_title",
-            "com.instagram.android:id/thread_title_textview",
-            "com.instagram.android:id/action_bar_textview_title",
-            "org.telegram.messenger:id/action_bar_title",
-            "com.whatsapp:id/conversation_contact_name",
-            "com.samsung.android.incallui:id/name",
-            "com.google.android.dialer:id/contactgrid_contact_name"
-        )
-        for (id in ids) {
-            val nodes = runCatching { root.findAccessibilityNodeInfosByViewId(id) }.getOrNull() ?: continue
-            val text = nodes.firstOrNull { it.text != null }?.text?.toString()
-            if (!text.isNullOrBlank()) return text
-        }
-        return null
+    /** 排除時鐘、純數字、單一符號等明顯不是聊天室名稱的文字 */
+    private fun looksLikeTitle(text: String): Boolean {
+        if (text.length < 2) return false
+        if (text in ignoreTitles) return false
+        if (Regex("^\\d{1,2}:\\d{2}").containsMatchIn(text)) return false
+        if (Regex("^[\\d\\s%+\\-.,]+$").matches(text)) return false
+        return true
     }
 
     private fun enterChat(chatName: String, appName: String) {
         if (currentChatName == chatName && currentAppName == appName) return
-        leaveChat()
+
+        stashCurrent()
+        handler.removeCallbacks(flushRunnable)
+
+        if (pendingName == chatName && pendingApp == appName) {
+            // 短時間內回到同一個聊天室：接續先前累積的秒數
+            chatStartTime = System.currentTimeMillis() - pendingSeconds * 1000L
+            pendingName = null; pendingApp = null; pendingSeconds = 0
+        } else {
+            flushPending()
+            chatStartTime = System.currentTimeMillis()
+        }
         currentChatName = chatName
         currentAppName = appName
-        chatStartTime = System.currentTimeMillis()
     }
 
-    private fun leaveChat() {
-        val name = currentChatName
+    /** 把目前這段移到暫存區（還不寫入） */
+    private fun stashCurrent() {
+        val name = currentChatName ?: return
         val app = currentAppName
         val start = chatStartTime
-        currentChatName = null
-        currentAppName = null
-        chatStartTime = 0
-        if (name == null || start <= 0L) return
+        currentChatName = null; currentAppName = null; chatStartTime = 0
+        if (start <= 0L) return
 
         val elapsed = (System.currentTimeMillis() - start) / 1000L
+        if (elapsed < 0L) return
+
+        if (pendingName == name && pendingApp == app) {
+            pendingSeconds += elapsed
+        } else {
+            flushPending()
+            pendingName = name; pendingApp = app; pendingSeconds = elapsed
+        }
+    }
+
+    /** 暫停：移到暫存並排程結算，期間切回同一個聊天室可接續 */
+    private fun pauseTracking() {
+        stashCurrent()
+        missStreak = 0
+        if (pendingName != null) {
+            handler.removeCallbacks(flushRunnable)
+            handler.postDelayed(flushRunnable, RESUME_WINDOW_MS)
+        }
+    }
+
+    /** 立即結束並寫入（關螢幕、服務停止） */
+    private fun endTrackingNow() {
+        stashCurrent()
+        handler.removeCallbacks(flushRunnable)
+        flushPending()
+        missStreak = 0
+    }
+
+    private fun flushPending() {
+        val name = pendingName
+        val app = pendingApp
+        val secs = pendingSeconds
+        pendingName = null; pendingApp = null; pendingSeconds = 0
+        if (name == null || secs < 1L) return
         // 超過上限視為背景掛機，直接丟棄（記成上限值一樣會虛胖）
-        if (elapsed <= 0L || elapsed > MAX_SESSION_SECONDS) return
+        if (secs > MAX_SESSION_SECONDS) return
 
         DataRepository.addInteraction(
             InteractionRecord(
@@ -1271,22 +1462,22 @@ class ChatTrackerService : AccessibilityService() {
                 appName = app ?: "Unknown",
                 isIncoming = false,
                 wordCount = 0,
-                durationSeconds = elapsed.toInt()
+                durationSeconds = secs.toInt()
             )
         )
     }
 
-    override fun onInterrupt() { leaveChat() }
+    override fun onInterrupt() { endTrackingNow() }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        leaveChat()
+        endTrackingNow()
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         screenReceiver = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        leaveChat()
+        endTrackingNow()
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         screenReceiver = null
         super.onDestroy()
@@ -1313,6 +1504,7 @@ class RelateViewModel : ViewModel() {
     var contactsSearchQuery = MutableStateFlow("")
     var contactsSortType = MutableStateFlow(ContactSortType.INTERACTIONS)
     var contactsCatFilter = MutableStateFlow<ContactCategory?>(null)
+    var contactsAppFilter = MutableStateFlow<String?>(null)
 
     val autoBackupEnabled = DataRepository.autoBackupEnabled
     val lastAutoBackupTime = DataRepository.lastAutoBackupTime
@@ -1524,6 +1716,7 @@ class RelateViewModel : ViewModel() {
     fun setContactsSearch(q: String) { contactsSearchQuery.value = q }
     fun setContactsSort(type: ContactSortType) { contactsSortType.value = type }
     fun setContactsCatFilter(cat: ContactCategory?) { contactsCatFilter.value = cat }
+    fun setContactsAppFilter(app: String?) { contactsAppFilter.value = app }
     fun forceRefresh() { DataRepository.loadData() }
     fun clearInteractions(scope: String) { DataRepository.clearInteractions(scope) }
     fun clearInteractionsByDate(timestamp: Long) { DataRepository.clearInteractionsByDate(timestamp) }
@@ -1543,6 +1736,11 @@ class RelateViewModel : ViewModel() {
     }
     fun deleteContacts(names: Set<String>) = DataRepository.deleteContacts(names)
     fun listJunkContacts() = DataRepository.listJunkContacts()
+    val undoAvailable = DataRepository.undoAvailable
+    val undoLabel = DataRepository.undoLabel
+    fun undoLastDestructive() = DataRepository.undoLastDestructive()
+    fun refreshUndoState() = DataRepository.refreshUndoState()
+    fun deleteRecordsByIds(ids: Set<String>) = DataRepository.deleteRecordsByIds(ids)
     fun findSimilarGroups(names: List<String>) = DataRepository.findSimilarGroups(names)
     fun countAbnormalRecords() = DataRepository.countAbnormalRecords()
     fun removeAbnormalRecords() = DataRepository.removeAbnormalRecords()
@@ -1916,7 +2114,9 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
                         val endCal = Calendar.getInstance().apply { timeInMillis = endMs }
 
                         val currentStartMs = getStartOfWeekTimestamp(System.currentTimeMillis(), weekStartDay)
-                        if (startMs == currentStartMs) "本週" else "${startCal.get(Calendar.MONTH) + 1}/${startCal.get(Calendar.DAY_OF_MONTH)} - ${endCal.get(Calendar.MONTH) + 1}/${endCal.get(Calendar.DAY_OF_MONTH)}"
+                        // 一律顯示實際區間，才看得出「一週起始日」設定有沒有生效
+                        val range = "${startCal.get(Calendar.MONTH) + 1}/${startCal.get(Calendar.DAY_OF_MONTH)} - ${endCal.get(Calendar.MONTH) + 1}/${endCal.get(Calendar.DAY_OF_MONTH)}"
+                        if (startMs == currentStartMs) "本週 $range" else range
                     }
 
                     Text(dateText, color = AppColors.ActiveBlue, fontSize = 15.sp, fontWeight = FontWeight.Bold)
@@ -2686,6 +2886,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     val searchQuery by viewModel.contactsSearchQuery.collectAsState()
     val sortType by viewModel.contactsSortType.collectAsState()
     val catFilter by viewModel.contactsCatFilter.collectAsState()
+    val appFilter by viewModel.contactsAppFilter.collectAsState()
 
     val uniqueRawNames = remember(records) { records.map { it.rawSenderName }.distinct() }
 
@@ -2699,13 +2900,24 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         records.groupingBy { aliases[it.rawSenderName] ?: it.rawSenderName }.eachCount()
     }
 
+    // 每位聯絡人出現過哪些 App，用來做「分軟體」篩選與卡片上的來源標示
+    val contactApps = remember(records, aliases) {
+        val m = HashMap<String, MutableSet<String>>()
+        records.forEach { r ->
+            m.getOrPut(aliases[r.rawSenderName] ?: r.rawSenderName) { mutableSetOf() }.add(r.appName)
+        }
+        m
+    }
+    val availableApps = remember(records) { records.map { it.appName }.distinct().sorted() }
+
     val activeCatFilterId = catFilter?.id
-    val filteredContacts = remember(unifiedNamesList, interactionCounts, searchQuery, activeCatFilterId, categoriesMap, sortType) {
+    val filteredContacts = remember(unifiedNamesList, interactionCounts, searchQuery, activeCatFilterId, appFilter, contactApps, categoriesMap, sortType) {
         unifiedNamesList.filter { name ->
             val matchSearch = searchQuery.isBlank() || name.contains(searchQuery, ignoreCase = true)
             val catId = categoriesMap[name] ?: ContactCategory.OTHER.id
             val matchCat = activeCatFilterId == null || catId == activeCatFilterId
-            matchSearch && matchCat
+            val matchApp = appFilter == null || contactApps[name]?.contains(appFilter) == true
+            matchSearch && matchCat && matchApp
         }.let { list ->
             if (sortType == ContactSortType.NAME) list.sortedBy { it }
             else list.sortedByDescending { interactionCounts[it] ?: 0 }
@@ -2788,6 +3000,26 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
+                    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val allOn = appFilter == null
+                        Box(modifier = Modifier
+                            .background(if (allOn) AppColors.BrandPrimary else AppColors.Background, RoundedCornerShape(16.dp))
+                            .clickable { viewModel.setContactsAppFilter(null) }
+                            .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                            Text("全平台", color = if (allOn) Color.White else AppColors.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                        }
+                        availableApps.forEach { app ->
+                            val on = appFilter == app
+                            val brand = AppColors.AppBrands[app] ?: AppColors.BrandPrimary
+                            Box(modifier = Modifier
+                                .background(if (on) brand else AppColors.Background, RoundedCornerShape(16.dp))
+                                .clickable { viewModel.setContactsAppFilter(app) }
+                                .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                                Text(app, color = if (on) Color.White else AppColors.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Row(modifier = Modifier.background(AppColors.BorderLight, RoundedCornerShape(8.dp)).padding(2.dp)) {
                             ContactSortType.entries.forEach { type ->
@@ -2838,6 +3070,15 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                 Text(unifiedName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (rawNamesForThis.isNotEmpty() && rawNamesForThis.first() != unifiedName) {
                                     Text("包含: ${rawNamesForThis.joinToString()}", fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                contactApps[unifiedName]?.takeIf { it.isNotEmpty() }?.let { apps ->
+                                    Row(modifier = Modifier.padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        apps.take(4).forEach { a ->
+                                            val brand = AppColors.AppBrands[a] ?: AppColors.TextSecondary
+                                            Text(a, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = brand, maxLines = 1, softWrap = false,
+                                                modifier = Modifier.background(brand.copy(alpha = 0.10f), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 1.dp))
+                                        }
+                                    }
                                 }
                             }
                             if (selectionMode) {
@@ -3104,6 +3345,106 @@ fun AutoMergeDialog(
     )
 }
 
+/** 逐筆檢視與勾選刪除互動紀錄 */
+@Composable
+fun RecordManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val records by viewModel.interactions.collectAsState()
+    val aliases by viewModel.aliases.collectAsState()
+    var query by remember { mutableStateOf("") }
+    val selected = remember { mutableStateListOf<String>() }
+    val fmt = remember { SimpleDateFormat("MM/dd HH:mm", Locale.US) }
+
+    // 資料量可能上萬筆，只呈現最新的 400 筆並提供搜尋
+    val shown = remember(records, query, aliases) {
+        val base = records.asReversed()
+        val filtered = if (query.isBlank()) base else base.filter {
+            val name = aliases[it.rawSenderName] ?: it.rawSenderName
+            name.contains(query, ignoreCase = true) || it.appName.contains(query, ignoreCase = true)
+        }
+        filtered.take(400)
+    }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("紀錄管理", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("共 ${records.size} 筆，顯示最新 ${shown.size} 筆", fontSize = 11.sp, color = AppColors.TextSecondary)
+            }
+        },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it }, singleLine = true,
+                    placeholder = { Text("搜尋對象或平台…", fontSize = 13.sp) },
+                    textStyle = TextStyle(fontSize = 13.sp),
+                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("已選 ${selected.size} 筆", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    Text(
+                        if (selected.size == shown.size && shown.isNotEmpty()) "取消全選" else "全選顯示中",
+                        fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clickable {
+                            if (selected.size == shown.size) selected.clear()
+                            else { selected.clear(); selected.addAll(shown.map { it.id }) }
+                        }.padding(4.dp)
+                    )
+                }
+                HorizontalDivider(color = AppColors.BorderLight)
+                LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                    items(shown, key = { it.id }) { rec ->
+                        val name = aliases[rec.rawSenderName] ?: rec.rawSenderName
+                        val isSel = selected.contains(rec.id)
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { if (isSel) selected.remove(rec.id) else selected.add(rec.id) }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = isSel, onCheckedChange = { if (isSel) selected.remove(rec.id) else selected.add(rec.id) }, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                                Text(name, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    buildString {
+                                        append(rec.appName)
+                                        append(" · ")
+                                        append(fmt.format(Date(rec.timestamp)))
+                                        if (rec.durationSeconds > 0) append(" · 停留 ${formatDuration(rec.durationSeconds)}")
+                                        if (rec.wordCount > 0) append(" · ${rec.wordCount} 字")
+                                        if (rec.isMissedCall) append(" · 未接")
+                                        else if (rec.isCall) append(" · 通話")
+                                        rec.subSender?.let { append(" · $it") }
+                                    },
+                                    fontSize = 10.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        HorizontalDivider(color = AppColors.BorderLight.copy(alpha = 0.5f))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val n = viewModel.deleteRecordsByIds(selected.toSet())
+                    Toast.makeText(context, "已刪除 $n 筆（可在設定頁復原）", Toast.LENGTH_SHORT).show()
+                    selected.clear()
+                },
+                enabled = selected.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)
+            ) { Text("刪除選取", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+}
+
 /** 標籤管理：改名、換色、排序、刪除 */
 @Composable
 fun CategoryManagerDialog(viewModel: RelateViewModel, categories: List<ContactCategory>, onDismiss: () -> Unit) {
@@ -3244,6 +3585,7 @@ fun CategoryEditDialog(initial: ContactCategory?, onConfirm: (String, Int, Int) 
 @Composable
 fun AdvancedDataManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val weekStartDay by viewModel.weekStartDay.collectAsState()
     var pendingClearScope by remember { mutableStateOf<String?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
 
@@ -3253,7 +3595,7 @@ fun AdvancedDataManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit)
             title = { Text("請選擇要清除的日期", fontWeight = FontWeight.Bold) },
             text = {
                 Box(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                    MinimalCalendar(selectedTime = System.currentTimeMillis(), onDateSelected = { timestamp ->
+                    MinimalCalendar(weekStartDay = weekStartDay, selectedTime = System.currentTimeMillis(), onDateSelected = { timestamp ->
                         viewModel.clearInteractionsByDate(timestamp)
                         Toast.makeText(context, "已清除該日資料", Toast.LENGTH_SHORT).show()
                         showDatePicker = false
@@ -3327,6 +3669,10 @@ fun SettingsView(viewModel: RelateViewModel) {
     val records by viewModel.interactions.collectAsState()
     val availableCats by viewModel.availableCategories.collectAsState()
     var showCategoryManager by remember { mutableStateOf(false) }
+    var showRecordManager by remember { mutableStateOf(false) }
+    val undoAvailable by viewModel.undoAvailable.collectAsState()
+    val undoLabel by viewModel.undoLabel.collectAsState()
+    LaunchedEffect(Unit) { viewModel.refreshUndoState() }
     val autoCleanedCount by viewModel.lastCleanupRemoved.collectAsState()
     var abnormalCount by remember { mutableStateOf(0) }
     LaunchedEffect(records) { abnormalCount = viewModel.countAbnormalRecords() }
@@ -3546,6 +3892,36 @@ fun SettingsView(viewModel: RelateViewModel) {
                             modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)
                         ) { Text("清除常用詞", fontSize = 11.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = { showRecordManager = true },
+                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
+                    ) { Text("逐筆檢視／勾選刪除紀錄", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+
+                    if (undoAvailable) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(AppColors.FamilyBg, RoundedCornerShape(10.dp)).padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("可復原上一次刪除", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.FamilyText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (undoLabel.isNotBlank()) {
+                                    Text(undoLabel, fontSize = 11.sp, color = AppColors.FamilyText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            Button(
+                                onClick = {
+                                    val ok = viewModel.undoLastDestructive()
+                                    Toast.makeText(context, if (ok) "已復原" else "復原失敗，快照可能已失效", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.FamilyText),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) { Text("復原", fontSize = 12.sp, maxLines = 1, softWrap = false) }
+                        }
+                    }
                 }
             }
         }
@@ -3571,6 +3947,10 @@ fun SettingsView(viewModel: RelateViewModel) {
 
     if (showCategoryManager) {
         CategoryManagerDialog(viewModel, availableCats) { showCategoryManager = false }
+    }
+
+    if (showRecordManager) {
+        RecordManagerDialog(viewModel) { showRecordManager = false }
     }
 
     if (showGuideDialog) {

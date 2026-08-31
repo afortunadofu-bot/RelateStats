@@ -3,7 +3,7 @@
 Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通知監聽** 與 **無障礙服務** 兩個引擎，
 統計你在通訊軟體上對每個人投入的「注意力停留時間」與「互動頻率」，並做社交人格與數位健康分析。
 
-- **目前版本**：v1.5.1（versionCode 5）
+- **目前版本**：v1.6（versionCode 6）
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -45,12 +45,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 - **總覽**：社交人格解讀、平台數位健康（時長／通知／時段三種視角）、標籤互動分析、活躍熱力圖、常用詞
 - **排行**：時間／平台／標籤／個人群組 四維篩選，可依停留時間或互動頻率排序，點卡片看 24 小時活躍分析與群組發言排行
-- **聯絡人**：跨平台帳號合併（可搜尋、可自動合併相似）、多選批次分組、垃圾聯絡人一鍵清除
+- **聯絡人**：跨平台帳號合併（可搜尋、可自動合併相似）、多選批次分組、依平台篩選、垃圾聯絡人一鍵清除
 - **設定**：權限監測、標籤管理、一週起始日、備份還原、資料管理
 
 **資料管理**
 
 - 一鍵清除垃圾聯絡人（讚／追蹤者／串文推播等非真人通知）
+- 逐筆檢視／勾選刪除紀錄
+- **所有刪除操作皆可復原**（設定頁「資料管理」）
 - 多選批次設定標籤與刪除
 - 清除今日／本週／指定日期／全部
 - 自動清理異常紀錄（升級時執行一次）
@@ -110,6 +112,18 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   這個 bug 曾讓畫面顯示 742,246 小時。
 - 無障礙服務設定 `accessibility_service_config.xml` 的 `flagReportViewIds` **不可移除**，
   少了它 `findAccessibilityNodeInfosByViewId()` 永遠回傳空，會導致抓不到聊天室名稱。
+- **聊天室標題不可用寫死的完整 view id 比對**。IG / Threads 幾乎每次改版都會換 id 前綴，
+  寫死等於下次改版就失效（v1.6 前 Threads 完全偵測不到時長就是這個原因）。
+  現在是「view id 後綴比對 + 畫面頂端文字」兩層策略。
+- **停留時間偵測需要容錯**。單次抓不到標題多半只是畫面重繪，立刻結算會把連續停留
+  切成大量不足 1 秒的碎片而被丟棄。現在是連續 3 次抓不到才算離開，且 25 秒內回到
+  同一聊天室會接續累加。
+- **`snapshotForUndo()` 的狀態必須同步擷取**，不能整段丟進背景協程 ——
+  呼叫端會在回傳後立刻改資料，否則快照會拍到已刪除後的狀態。
+- `Notification.MessagingStyle` 規格：**`sender` 為 null 代表訊息由使用者本人發出**，
+  必須排除，否則自己發的訊息會被算成收到的。
+- **群組判定不可用 `conversationTitle` 是否存在來推斷** —— IG 連一對一私訊都會帶，
+  會導致所有私訊被併成同一個「群組」。只能信 `android.isGroupConversation` 或多發言人。
 - 修改後請務必跑一次 `assembleDebug` 確認可建置，再 commit。
 - **`versionName` 現在會直接顯示在 App 設定頁最下方**（`BuildConfig.VERSION_NAME`）。改版號只需要改 `app/build.gradle.kts` 一處，App 內畫面與 CHANGELOG 版本號要盡量保持一致。
 
@@ -123,6 +137,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.6 | 2026-08-27 | 時長偵測重寫、IG 歸戶修正、刪除可復原、勾選刪除紀錄、聯絡人分軟體 |
 | v1.5.1 | 2026-08-27 | 設定頁新增版本號與 copyright 標示 |
 | v1.5 | 2026-08-27 | 標籤完全可自訂（改名／換色／排序／刪除／新增），預設加入「另一半」 |
 | v1.4 | 2026-08-27 | 垃圾聯絡人一鍵清除、多選批次分組 |
