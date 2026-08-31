@@ -48,7 +48,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -387,6 +391,25 @@ data class SenderStat(
     val isGroup: Boolean,
     val subSenders: Map<String, Int> = emptyMap()
 )
+
+// ── 深度分析用的模型 ──
+data class TrendPoint(val label: String, val dayStart: Long, val durationSeconds: Long, val msgCount: Int)
+
+data class PeriodDelta(val current: Long, val previous: Long) {
+    /** 與上一個同長度區間相比的變化百分比；上期為 0 時無法計算成長率 */
+    val deltaPct: Int? get() = if (previous <= 0L) null else (((current - previous) * 100.0) / previous).toInt()
+}
+
+data class ConcentrationStat(val activeContacts: Int, val top1Pct: Int, val top3Pct: Int, val gini: Int)
+data class ChurnStat(val newcomers: List<String>, val dormant: List<Pair<String, Int>>)
+data class CallSummary(val total: Int, val answered: Int, val missed: Int, val totalSeconds: Long) {
+    val avgSeconds: Long get() = if (answered > 0) totalSeconds / answered else 0L
+    val missRate: Int get() = if (total > 0) (missed * 100) / total else 0
+}
+data class CoverageStat(val activeDays: Int, val totalDays: Int, val longestStreak: Int, val currentStreak: Int) {
+    val pct: Int get() = if (totalDays > 0) (activeDays * 100) / totalDays else 0
+}
+data class GroupSplit(val groupDuration: Long, val personDuration: Long, val groupMsgs: Int, val personMsgs: Int)
 
 data class AppUsageStat(val appName: String, val totalDurationSeconds: Long, val incomingCount: Int)
 data class CategoryStat(val category: ContactCategory, val totalDurationSeconds: Long, val incomingCount: Int)
@@ -1255,8 +1278,8 @@ class ChatTrackerService : AccessibilityService() {
     private companion object {
         const val MAX_SESSION_SECONDS = MAX_STAY_SECONDS
         const val CONTENT_THROTTLE_MS = 800L
-        const val MAX_TREE_NODES = 800
-        const val MAX_TREE_DEPTH = 16
+        const val MAX_TREE_NODES = 1500
+        const val MAX_TREE_DEPTH = 20
         // 連續幾次抓不到標題才算真的離開。單次抓不到多半只是畫面重繪，
         // 立刻結算會把一段連續停留切成無數碎片，每片不足 1 秒就被丟掉。
         const val MISS_TOLERANCE = 3
@@ -1340,10 +1363,12 @@ class ChatTrackerService : AccessibilityService() {
         val root = rootInActiveWindow ?: return
         val hit = scanScreen(root)
 
-        val name = hit?.title?.trim()
-        val valid = name != null && name.isNotEmpty() && name.length <= 60 &&
-                name !in ignoreTitles &&
-                (appName == "電話" || hit.hasEditText)
+        val name = hit.title?.trim()
+        // 標題若是從已知的 view id 抓到，本身就足以證明在聊天室，不必再要求看到輸入框。
+        // IG / Threads 的輸入框常包在摺疊容器裡或未取得焦點時不回報 isEditable，
+        // 硬性要求輸入框會讓這些 App 永遠判定為「不在聊天室」→ 時長恆為 0。
+        val trustworthy = hit.fromViewId || appName == "電話" || hit.hasEditText
+        val valid = !name.isNullOrEmpty() && name.length <= 60 && name !in ignoreTitles && trustworthy
 
         if (!valid) {
             missStreak++
@@ -1355,7 +1380,7 @@ class ChatTrackerService : AccessibilityService() {
         enterChat(name!!, appName)
     }
 
-    private class ScanResult(val title: String?, val hasEditText: Boolean)
+    private class ScanResult(val title: String?, val hasEditText: Boolean, val fromViewId: Boolean)
 
     /**
      * 一次走訪就同時找出「聊天室標題」與「是否有輸入框」。
@@ -1363,6 +1388,7 @@ class ChatTrackerService : AccessibilityService() {
      * 這樣即使 App 改版換掉 id 仍然抓得到。
      */
     private fun scanScreen(root: AccessibilityNodeInfo): ScanResult {
+        @Suppress("NAME_SHADOWING")
         val screen = Rect()
         root.getBoundsInScreen(screen)
         val topLimit = screen.top + (screen.height() * 0.20f).toInt()
@@ -1374,11 +1400,13 @@ class ChatTrackerService : AccessibilityService() {
         var visited = 0
 
         val bounds = Rect()
-        val stack = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
-        stack.addLast(root to 0)
+        // ⚠️ 必須用 BFS（removeFirst）。標題列在節點樹的淺層，訊息列表則又深又寬；
+        // 用 DFS 會先鑽進訊息列表，節點預算在碰到標題前就耗盡 → 抓不到聊天室名稱。
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.addLast(root to 0)
 
-        while (stack.isNotEmpty() && visited < MAX_TREE_NODES) {
-            val (node, depth) = stack.removeLast()
+        while (queue.isNotEmpty() && visited < MAX_TREE_NODES) {
+            val (node, depth) = queue.removeFirst()
             visited++
             if (depth > MAX_TREE_DEPTH) continue
 
@@ -1386,11 +1414,12 @@ class ChatTrackerService : AccessibilityService() {
                 hasEdit = true
             }
 
-            val text = node.text?.toString()?.trim()
+            // 有些 App 的標題只放在 contentDescription
+            val text = (node.text?.toString() ?: node.contentDescription?.toString())?.trim()
             if (!text.isNullOrBlank() && text.length <= 60) {
                 if (byId == null) {
                     val suffix = node.viewIdResourceName?.substringAfterLast('/')
-                    if (suffix != null && suffix in titleIdSuffixes) byId = text
+                    if (suffix != null && suffix in titleIdSuffixes && looksLikeTitle(text)) byId = text
                 }
                 if (byId == null && looksLikeTitle(text)) {
                     node.getBoundsInScreen(bounds)
@@ -1402,12 +1431,12 @@ class ChatTrackerService : AccessibilityService() {
             }
 
             for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { stack.addLast(it to depth + 1) }
+                node.getChild(i)?.let { queue.addLast(it to depth + 1) }
             }
             if (byId != null && hasEdit) break
         }
 
-        return ScanResult(byId ?: fallback, hasEdit)
+        return ScanResult(byId ?: fallback, hasEdit, byId != null)
     }
 
     /** 排除時鐘、純數字、單一符號等明顯不是聊天室名稱的文字 */
@@ -1522,7 +1551,9 @@ class RelateViewModel : ViewModel() {
     val availableCategories = DataRepository.availableCategories
     val weekStartDay = DataRepository.weekStartDay
 
-    var timeFilter = MutableStateFlow(DateFilter(FilterType.SPECIFIC_DAY, System.currentTimeMillis()))
+    // 預設看「單週」。預設單日的話，只要今天還沒互動就整片空白，
+    // 一開 App 什麼都看不到。
+    var timeFilter = MutableStateFlow(DateFilter(FilterType.WEEK, System.currentTimeMillis()))
     var sortType = MutableStateFlow(SortType.TIME)
     var categoryFilter = MutableStateFlow<ContactCategory?>(null)
     var appFilter = MutableStateFlow<String?>(null)
@@ -1710,6 +1741,221 @@ class RelateViewModel : ViewModel() {
             if (d in 0..6 && h in 0..23) grid[d][h]++
         }
         return grid
+    }
+
+    // ══════════════ 深度分析 ══════════════
+
+    /** 目前篩選對應的時間範圍；「全部」回 null */
+    fun rangeOf(filter: DateFilter, weekStart: Int): Pair<Long, Long>? = when (filter.type) {
+        FilterType.SPECIFIC_DAY -> startOfDay(filter.timestamp).let { it to it + 86_399_999L }
+        FilterType.WEEK -> getStartOfWeekTimestamp(filter.timestamp, weekStart) to getEndOfWeekTimestamp(filter.timestamp, weekStart)
+        FilterType.ALL -> null
+    }
+
+    /** 逐日趨勢。「全部」時取最近 30 天，避免圖表被拉到看不清。 */
+    fun getDailyTrend(records: List<InteractionRecord>, filter: DateFilter, weekStart: Int): List<TrendPoint> {
+        if (records.isEmpty()) return emptyList()
+        val range = rangeOf(filter, weekStart)
+        val end = range?.second ?: (records.maxOf { it.timestamp })
+        val start = range?.first ?: maxOf(records.minOf { it.timestamp }, end - 29L * 86_400_000L)
+        val dayStart = startOfDay(start)
+        val days = (((startOfDay(end) - dayStart) / 86_400_000L) + 1).toInt().coerceIn(1, 92)
+
+        val dur = LongArray(days)
+        val msg = IntArray(days)
+        records.forEach { r ->
+            val idx = ((startOfDay(r.timestamp) - dayStart) / 86_400_000L).toInt()
+            if (idx in 0 until days) {
+                dur[idx] += r.durationSeconds.toLong()
+                if (r.isIncoming) msg[idx]++
+            }
+        }
+        val cal = Calendar.getInstance()
+        return (0 until days).map { i ->
+            val ts = dayStart + i * 86_400_000L
+            cal.timeInMillis = ts
+            TrendPoint("${cal.get(Calendar.MONTH) + 1}/${cal.get(Calendar.DAY_OF_MONTH)}", ts, dur[i], msg[i])
+        }
+    }
+
+    /** 本期與「上一個同長度區間」的對比 */
+    fun getPeriodDeltas(records: List<InteractionRecord>, filter: DateFilter, weekStart: Int, aliasMap: Map<String, String>): Triple<PeriodDelta, PeriodDelta, PeriodDelta>? {
+        val range = rangeOf(filter, weekStart) ?: return null
+        val span = range.second - range.first + 1
+        val prevStart = range.first - span
+        val prevEnd = range.first - 1
+
+        var curDur = 0L; var curMsg = 0L
+        var prevDur = 0L; var prevMsg = 0L
+        val curPeople = HashSet<String>(); val prevPeople = HashSet<String>()
+        records.forEach { r ->
+            val name = aliasMap[r.rawSenderName] ?: r.rawSenderName
+            when (r.timestamp) {
+                in range.first..range.second -> { curDur += r.durationSeconds; if (r.isIncoming) curMsg++; curPeople.add(name) }
+                in prevStart..prevEnd -> { prevDur += r.durationSeconds; if (r.isIncoming) prevMsg++; prevPeople.add(name) }
+            }
+        }
+        return Triple(
+            PeriodDelta(curDur, prevDur),
+            PeriodDelta(curMsg, prevMsg),
+            PeriodDelta(curPeople.size.toLong(), prevPeople.size.toLong())
+        )
+    }
+
+    /**
+     * 社交集中度。gini 為基尼係數 x100：0 = 時間平均分給每個人，
+     * 100 = 全部集中在一個人身上。
+     */
+    fun getConcentration(stats: List<SenderStat>): ConcentrationStat {
+        val vals = stats.map { it.totalDurationSeconds + it.msgCount * 60L }.filter { it > 0 }.sorted()
+        val n = vals.size
+        if (n == 0) return ConcentrationStat(0, 0, 0, 0)
+        val total = vals.sum().toDouble()
+        val desc = vals.reversed()
+        val top1 = ((desc[0] / total) * 100).toInt()
+        val top3 = ((desc.take(3).sum() / total) * 100).toInt()
+        var cum = 0.0
+        vals.forEachIndexed { i, v -> cum += (2.0 * (i + 1) - n - 1) * v }
+        val gini = if (n > 1 && total > 0) ((cum / (n * total)) * 100).toInt().coerceIn(0, 100) else 0
+        return ConcentrationStat(n, top1, top3, gini)
+    }
+
+    /** 本期新出現的人，以及已沉寂（超過 14 天沒互動）的人 */
+    fun getChurn(records: List<InteractionRecord>, aliasMap: Map<String, String>, filter: DateFilter, weekStart: Int): ChurnStat {
+        if (records.isEmpty()) return ChurnStat(emptyList(), emptyList())
+        val range = rangeOf(filter, weekStart)
+        val now = System.currentTimeMillis()
+
+        val firstSeen = HashMap<String, Long>()
+        val lastSeen = HashMap<String, Long>()
+        records.forEach { r ->
+            val name = aliasMap[r.rawSenderName] ?: r.rawSenderName
+            firstSeen[name] = minOf(firstSeen[name] ?: Long.MAX_VALUE, r.timestamp)
+            lastSeen[name] = maxOf(lastSeen[name] ?: 0L, r.timestamp)
+        }
+
+        val newcomers = if (range == null) emptyList() else
+            firstSeen.filter { it.value in range.first..range.second }.keys.sortedBy { firstSeen[it] }.takeLast(20).reversed()
+
+        val dormant = lastSeen
+            .mapNotNull { (name, ts) ->
+                val days = ((now - ts) / 86_400_000L).toInt()
+                if (days in 14..365) name to days else null
+            }
+            .sortedByDescending { it.second }
+            .take(20)
+
+        return ChurnStat(newcomers, dormant)
+    }
+
+    /** 深夜社交佔比（22:00–04:59） */
+    fun getNightOwlPct(records: List<InteractionRecord>, filter: DateFilter): Int {
+        val f = getFilteredRecords(records, filter)
+        if (f.isEmpty()) return 0
+        val cal = Calendar.getInstance()
+        val night = f.count { cal.timeInMillis = it.timestamp; cal.get(Calendar.HOUR_OF_DAY).let { h -> h >= 22 || h < 5 } }
+        return (night * 100) / f.size
+    }
+
+    /** 每位聯絡人的連續互動天數（到今天為止） */
+    fun getStreaks(records: List<InteractionRecord>, aliasMap: Map<String, String>): List<Pair<String, Int>> {
+        if (records.isEmpty()) return emptyList()
+        val byPerson = HashMap<String, MutableSet<Long>>()
+        records.forEach { r ->
+            byPerson.getOrPut(aliasMap[r.rawSenderName] ?: r.rawSenderName) { HashSet() }.add(startOfDay(r.timestamp))
+        }
+        val today = startOfDay(System.currentTimeMillis())
+        return byPerson.mapNotNull { (name, days) ->
+            if (!days.contains(today) && !days.contains(today - 86_400_000L)) return@mapNotNull null
+            var streak = 0
+            var cursor = if (days.contains(today)) today else today - 86_400_000L
+            while (days.contains(cursor)) { streak++; cursor -= 86_400_000L }
+            if (streak >= 2) name to streak else null
+        }.sortedByDescending { it.second }.take(10)
+    }
+
+    /** 近 N 週的每日活躍度，用於貢獻圖 */
+    fun getContributionMap(records: List<InteractionRecord>, weeks: Int = 17): List<Pair<Long, Int>> {
+        val today = startOfDay(System.currentTimeMillis())
+        val days = weeks * 7
+        val start = today - (days - 1L) * 86_400_000L
+        val counts = IntArray(days)
+        records.forEach { r ->
+            val idx = ((startOfDay(r.timestamp) - start) / 86_400_000L).toInt()
+            if (idx in 0 until days) counts[idx]++
+        }
+        return (0 until days).map { (start + it * 86_400_000L) to counts[it] }
+    }
+
+    fun getCallSummary(records: List<InteractionRecord>, filter: DateFilter): CallSummary {
+        val calls = getFilteredRecords(records, filter).filter { it.isCall || it.isMissedCall || it.appName == "電話" }
+        val missed = calls.count { it.isMissedCall }
+        val answered = calls.size - missed
+        return CallSummary(calls.size, answered, missed, calls.sumOf { it.durationSeconds.toLong() })
+    }
+
+    /** 收到訊息的字數分佈 */
+    fun getLengthBuckets(records: List<InteractionRecord>, filter: DateFilter): List<Triple<String, Int, Float>> {
+        val msgs = getFilteredRecords(records, filter).filter { it.isIncoming && !it.isCall && it.wordCount > 0 }
+        if (msgs.isEmpty()) return emptyList()
+        val buckets = intArrayOf(0, 0, 0, 0, 0)
+        msgs.forEach {
+            val i = when {
+                it.wordCount <= 5 -> 0
+                it.wordCount <= 15 -> 1
+                it.wordCount <= 40 -> 2
+                it.wordCount <= 100 -> 3
+                else -> 4
+            }
+            buckets[i]++
+        }
+        val labels = listOf("1-5 字", "6-15 字", "16-40 字", "41-100 字", "100+ 字")
+        val total = msgs.size.toFloat()
+        return labels.mapIndexed { i, l -> Triple(l, buckets[i], buckets[i] / total) }
+    }
+
+    /** 同時使用多個平台聯絡的人 */
+    fun getCrossPlatform(records: List<InteractionRecord>, aliasMap: Map<String, String>): List<Pair<String, Int>> {
+        val m = HashMap<String, MutableSet<String>>()
+        records.forEach { r ->
+            m.getOrPut(aliasMap[r.rawSenderName] ?: r.rawSenderName) { mutableSetOf() }.add(r.appName)
+        }
+        return m.filter { it.value.size >= 2 }.map { it.key to it.value.size }
+            .sortedByDescending { it.second }.take(10)
+    }
+
+    /** 本期有互動的天數、最長與目前連續天數 */
+    fun getCoverage(records: List<InteractionRecord>, filter: DateFilter, weekStart: Int): CoverageStat {
+        if (records.isEmpty()) return CoverageStat(0, 0, 0, 0)
+        val range = rangeOf(filter, weekStart)
+        val scoped = if (range == null) records else records.filter { it.timestamp in range.first..range.second }
+        val activeDays = scoped.map { startOfDay(it.timestamp) }.toSortedSet()
+        val totalDays = if (range != null)
+            (((startOfDay(range.second) - startOfDay(range.first)) / 86_400_000L) + 1).toInt()
+        else if (records.isEmpty()) 0
+        else (((startOfDay(records.maxOf { it.timestamp }) - startOfDay(records.minOf { it.timestamp })) / 86_400_000L) + 1).toInt()
+
+        var longest = 0; var run = 0; var prev = -1L
+        activeDays.forEach { d ->
+            run = if (prev >= 0 && d - prev == 86_400_000L) run + 1 else 1
+            if (run > longest) longest = run
+            prev = d
+        }
+        val today = startOfDay(System.currentTimeMillis())
+        var current = 0
+        var cursor = if (activeDays.contains(today)) today else today - 86_400_000L
+        while (activeDays.contains(cursor)) { current++; cursor -= 86_400_000L }
+        return CoverageStat(activeDays.size, totalDays.coerceAtLeast(activeDays.size), longest, current)
+    }
+
+    fun getGroupSplit(records: List<InteractionRecord>, filter: DateFilter): GroupSplit {
+        val f = getFilteredRecords(records, filter)
+        var gd = 0L; var pd = 0L; var gm = 0; var pm = 0
+        f.forEach {
+            if (it.isGroup) { gd += it.durationSeconds; if (it.isIncoming) gm++ }
+            else { pd += it.durationSeconds; if (it.isIncoming) pm++ }
+        }
+        return GroupSplit(gd, pd, gm, pm)
     }
 
     fun getHourlyActivityForContact(records: List<InteractionRecord>, aliases: Map<String, String>, unifiedName: String, filter: DateFilter): Array<HourlyStat> {
@@ -2005,10 +2251,11 @@ fun MainAppContent(viewModel: RelateViewModel) {
         },
         bottomBar = {
             NavigationBar(containerColor = AppColors.Surface, tonalElevation = 8.dp) {
-                NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, "總覽") }, label = { Text("總覽") }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "leaderboard", onClick = { setActiveTab("leaderboard") }, icon = { Icon(Icons.AutoMirrored.Rounded.List, "排行") }, label = { Text("排行") }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "contacts", onClick = { setActiveTab("contacts") }, icon = { Icon(Icons.Rounded.Person, "聯絡人") }, label = { Text("聯絡人") }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "settings", onClick = { setActiveTab("settings") }, icon = { Icon(Icons.Rounded.Settings, "設定") }, label = { Text("設定") }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, "總覽") }, label = { Text("總覽", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "leaderboard", onClick = { setActiveTab("leaderboard") }, icon = { Icon(Icons.AutoMirrored.Rounded.List, "排行") }, label = { Text("排行", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "insights", onClick = { setActiveTab("insights") }, icon = { Icon(Icons.Rounded.Star, "洞察") }, label = { Text("洞察", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "contacts", onClick = { setActiveTab("contacts") }, icon = { Icon(Icons.Rounded.Person, "聯絡人") }, label = { Text("聯絡人", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "settings", onClick = { setActiveTab("settings") }, icon = { Icon(Icons.Rounded.Settings, "設定") }, label = { Text("設定", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
             }
         }
     ) { paddingValues ->
@@ -2016,6 +2263,7 @@ fun MainAppContent(viewModel: RelateViewModel) {
             when (activeTab) {
                 "overview" -> OverviewView(viewModel)
                 "leaderboard" -> LeaderboardView(viewModel)
+                "insights" -> InsightsView(viewModel)
                 "contacts" -> ContactsCategoryView(viewModel)
                 "settings" -> SettingsView(viewModel)
             }
@@ -2226,6 +2474,117 @@ fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -
 //  儀錶板共用元件
 // ══════════════════════════════════════════
 
+/** 捲動一段距離後浮出的回頂端按鈕 */
+@Composable
+fun BoxScope.ScrollTopButton(listState: LazyListState) {
+    val show by remember { derivedStateOf { listState.firstVisibleItemIndex > 2 } }
+    val scope = rememberCoroutineScope()
+    AnimatedVisibility(
+        visible = show,
+        enter = fadeIn(), exit = fadeOut(),
+        modifier = Modifier.align(Alignment.BottomEnd).padding(end = D.Gutter, bottom = 16.dp)
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = AppColors.BrandPrimary,
+            shadowElevation = 6.dp,
+            modifier = Modifier.size(40.dp).clickable { scope.launch { listState.animateScrollToItem(0) } }
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "回到頂端", tint = Color.White, modifier = Modifier.size(22.dp))
+            }
+        }
+    }
+}
+
+/** 單一聯絡人的快速標籤選擇 */
+@Composable
+fun QuickTagDialog(name: String, categories: List<ContactCategory>, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("設定標籤", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text(name, fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                categories.forEach { cat ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(cat.bgColor, RoundedCornerShape(8.dp))
+                            .clickable { onPick(cat.id) }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(cat.color))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(cat.label, color = cat.color, fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+    )
+}
+
+/** 多選時的底部操作列：批次設定標籤 */
+@Composable
+fun BoxScope.BatchTagBar(
+    selectedCount: Int,
+    totalCount: Int,
+    categories: List<ContactCategory>,
+    onSelectAll: () -> Unit,
+    onApply: (String) -> Unit,
+    onExit: () -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    Surface(
+        color = AppColors.Surface,
+        shadowElevation = 12.dp,
+        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = D.Gutter, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                if (selectedCount == 0) "點列選取" else "已選 $selectedCount",
+                fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false
+            )
+            Text(
+                if (selectedCount == totalCount && totalCount > 0) "取消全選" else "全選",
+                fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                modifier = Modifier.clickable { onSelectAll() }.padding(4.dp)
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            Box {
+                Button(
+                    onClick = { open = true },
+                    enabled = selectedCount > 0,
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) { Text("設定標籤", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.background(AppColors.Surface)) {
+                    categories.forEach { cat ->
+                        DropdownMenuItem(
+                            text = { Text(cat.label, color = cat.color, fontWeight = FontWeight.Bold) },
+                            onClick = { open = false; onApply(cat.id) }
+                        )
+                    }
+                }
+            }
+            TextButton(onClick = onExit, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text("完成", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+            }
+        }
+    }
+}
+
 /** 區塊外框：白底、細框、小圓角 */
 @Composable
 fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
@@ -2333,6 +2692,359 @@ fun DataRow(
     }
 }
 
+/** 變化幅度徽章 */
+@Composable
+fun DeltaBadge(pct: Int?) {
+    if (pct == null) {
+        Text("—", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+        return
+    }
+    val up = pct >= 0
+    val c = if (up) AppColors.Positive else AppColors.WorkText
+    Text(
+        (if (up) "▲" else "▼") + "${kotlin.math.abs(pct)}%",
+        fontSize = T.Micro, fontWeight = FontWeight.Bold, color = c, maxLines = 1, softWrap = false,
+        modifier = Modifier.background(c.copy(alpha = 0.10f), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp)
+    )
+}
+
+/** 兩欄小統計 */
+@Composable
+fun StatPair(label: String, value: String, sub: String? = null, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 7.dp)) {
+        Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(value, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        if (sub != null) Text(sub, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** 逐日趨勢長條圖 */
+@Composable
+fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
+    if (points.isEmpty()) {
+        Text("尚無資料", fontSize = T.Label, color = AppColors.TextSecondary)
+        return
+    }
+    val max = points.maxOf { if (showDuration) it.durationSeconds else it.msgCount.toLong() }.coerceAtLeast(1L)
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(84.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            points.forEach { pt ->
+                val v = if (showDuration) pt.durationSeconds else pt.msgCount.toLong()
+                val frac = (v.toFloat() / max).coerceIn(if (v > 0) 0.04f else 0.02f, 1f)
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxHeight(frac)
+                        .background(
+                            if (v > 0) AppColors.ActiveBlue else AppColors.BorderLight,
+                            RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp)
+                        )
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(points.first().label, fontSize = T.Micro, color = AppColors.TextTertiary)
+            Text("最高 " + (if (showDuration) formatDuration(max) else "$max 則"), fontSize = T.Micro, color = AppColors.TextTertiary)
+            Text(points.last().label, fontSize = T.Micro, color = AppColors.TextTertiary)
+        }
+    }
+}
+
+/** 近數週每日活躍密度圖 */
+@Composable
+fun ContributionGrid(data: List<Pair<Long, Int>>) {
+    if (data.isEmpty()) return
+    val max = data.maxOf { it.second }.coerceAtLeast(1)
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        data.chunked(7).forEach { week ->
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                week.forEach { (_, c) ->
+                    val alpha = if (c == 0) 0f else 0.22f + 0.78f * (c.toFloat() / max)
+                    Box(
+                        modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                            .background(
+                                if (c == 0) AppColors.BorderLight.copy(alpha = 0.55f) else AppColors.Positive.copy(alpha = alpha),
+                                RoundedCornerShape(2.dp)
+                            )
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 水平比例條（群組 vs 個人之類的二分佔比） */
+@Composable
+fun SplitBar(leftLabel: String, leftValue: Long, rightLabel: String, rightValue: Long, leftColor: Color, rightColor: Color, fmt: (Long) -> String) {
+    val total = (leftValue + rightValue).coerceAtLeast(1L)
+    Column {
+        Row(modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
+            Box(modifier = Modifier.weight(leftValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight().background(leftColor))
+            Box(modifier = Modifier.weight(rightValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight().background(rightColor))
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(leftColor))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("$leftLabel ${fmt(leftValue)} · ${(leftValue * 100 / total)}%", fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(rightColor))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("$rightLabel ${fmt(rightValue)} · ${(rightValue * 100 / total)}%", fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════
+//  洞察（深度分析）
+// ══════════════════════════════════════════
+
+@Composable
+fun InsightsView(viewModel: RelateViewModel) {
+    val records by viewModel.interactions.collectAsState()
+    val aliases by viewModel.aliases.collectAsState()
+    val categoriesMap by viewModel.categories.collectAsState()
+    val availableCats by viewModel.availableCategories.collectAsState()
+    val filter by viewModel.timeFilter.collectAsState()
+    val weekStartDay by viewModel.weekStartDay.collectAsState()
+    val listState = rememberLazyListState()
+
+    val scoped = remember(records, filter, weekStartDay) { viewModel.getFilteredRecords(records, filter) }
+    val stats = remember(scoped, categoriesMap, aliases, availableCats) {
+        viewModel.getDynamicLeaderboard(scoped, categoriesMap, aliases, availableCats)
+    }
+    val trend = remember(records, filter, weekStartDay) { viewModel.getDailyTrend(records, filter, weekStartDay) }
+    val deltas = remember(records, filter, weekStartDay, aliases) { viewModel.getPeriodDeltas(records, filter, weekStartDay, aliases) }
+    val conc = remember(stats) { viewModel.getConcentration(stats) }
+    val churn = remember(records, aliases, filter, weekStartDay) { viewModel.getChurn(records, aliases, filter, weekStartDay) }
+    val nightPct = remember(records, filter) { viewModel.getNightOwlPct(records, filter) }
+    val streaks = remember(records, aliases) { viewModel.getStreaks(records, aliases) }
+    val contrib = remember(records) { viewModel.getContributionMap(records) }
+    val calls = remember(records, filter) { viewModel.getCallSummary(records, filter) }
+    val lengths = remember(records, filter) { viewModel.getLengthBuckets(records, filter) }
+    val cross = remember(records, aliases) { viewModel.getCrossPlatform(records, aliases) }
+    val coverage = remember(records, filter, weekStartDay) { viewModel.getCoverage(records, filter, weekStartDay) }
+    val split = remember(records, filter) { viewModel.getGroupSplit(records, filter) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            contentPadding = PaddingValues(D.Gutter),
+            verticalArrangement = Arrangement.spacedBy(D.Gap)
+        ) {
+            item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
+
+            if (records.isEmpty()) {
+                item {
+                    Column(modifier = Modifier.fillMaxWidth().padding(top = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("還沒有資料可以分析", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("開始記錄後，這裡會出現趨勢、集中度、活躍度等分析", fontSize = T.Label, color = AppColors.TextSecondary,
+                            textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
+                return@LazyColumn
+            }
+
+            // 1. 期間對比
+            deltas?.let { (dur, msg, ppl) ->
+                item {
+                    Panel {
+                        SectionHead("與上期比較")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(
+                                Triple("停留時間", formatDuration(dur.current), dur.deltaPct),
+                                Triple("訊息", "${msg.current}", msg.deltaPct),
+                                Triple("互動對象", "${ppl.current}", ppl.deltaPct)
+                            ).forEach { (l, v, d) ->
+                                Column(modifier = Modifier.weight(1f).background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 7.dp)) {
+                                    Text(l, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(v, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    DeltaBadge(d)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. 逐日趨勢
+            item {
+                val (mode, setMode) = remember { mutableStateOf("D") }
+                Panel {
+                    SectionHead("逐日趨勢") {
+                        SegBar(listOf("D" to "時長", "M" to "訊息"), mode, setMode)
+                    }
+                    TrendChart(trend, mode == "D")
+                }
+            }
+
+            // 3. 活躍度貢獻圖
+            item {
+                Panel {
+                    SectionHead("活躍密度") {
+                        Text("近 17 週", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                    }
+                    ContributionGrid(contrib)
+                }
+            }
+
+            // 4. 覆蓋率與連續天數
+            item {
+                Panel {
+                    SectionHead("活躍天數")
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("本期活躍", "${coverage.activeDays} 天", "共 ${coverage.totalDays} 天", Modifier.weight(1f))
+                        StatPair("覆蓋率", "${coverage.pct}%", null, Modifier.weight(1f))
+                        StatPair("目前連續", "${coverage.currentStreak} 天", null, Modifier.weight(1f))
+                        StatPair("最長連續", "${coverage.longestStreak} 天", null, Modifier.weight(1f))
+                    }
+                }
+            }
+
+            // 5. 社交集中度
+            item {
+                Panel {
+                    SectionHead("社交集中度")
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("互動對象", "${conc.activeContacts}", "位", Modifier.weight(1f))
+                        StatPair("第一名佔比", "${conc.top1Pct}%", null, Modifier.weight(1f))
+                        StatPair("前三名佔比", "${conc.top3Pct}%", null, Modifier.weight(1f))
+                        StatPair("集中指數", "${conc.gini}", "0 均勻 / 100 集中", Modifier.weight(1f))
+                    }
+                }
+            }
+
+            // 6. 群組 vs 個人
+            item {
+                Panel {
+                    SectionHead("群組 vs 個人")
+                    SplitBar("群組", split.groupDuration, "個人", split.personDuration,
+                        AppColors.GroupText, AppColors.ActiveBlue) { formatDuration(it) }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    SplitBar("群組訊息", split.groupMsgs.toLong(), "個人訊息", split.personMsgs.toLong(),
+                        AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f)) { "$it 則" }
+                }
+            }
+
+            // 7. 深夜社交
+            item {
+                Panel {
+                    SectionHead("深夜社交指數") {
+                        Text("22:00 – 04:59", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("$nightPct%", fontSize = T.Kpi, fontWeight = FontWeight.Black, color = AppColors.TextPrimary)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            when {
+                                nightPct >= 40 -> "深夜是你的主場，注意作息"
+                                nightPct >= 20 -> "有一定比例的深夜互動"
+                                else -> "作息規律，深夜互動不多"
+                            },
+                            fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // 8. 通話統計
+            if (calls.total > 0) {
+                item {
+                    Panel {
+                        SectionHead("通話統計")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            StatPair("總通話", "${calls.total}", "通", Modifier.weight(1f))
+                            StatPair("接通", "${calls.answered}", null, Modifier.weight(1f))
+                            StatPair("未接", "${calls.missed}", "${calls.missRate}%", Modifier.weight(1f))
+                            StatPair("平均時長", formatDuration(calls.avgSeconds), null, Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+
+            // 9. 訊息長度分佈
+            if (lengths.isNotEmpty()) {
+                item {
+                    Panel {
+                        SectionHead("訊息長度分佈")
+                        lengths.forEach { (label, count, pct) ->
+                            DataRow(
+                                name = label,
+                                dotColor = AppColors.ActiveBlue,
+                                progress = pct,
+                                primary = "$count",
+                                secondary = "${(pct * 100).toInt()}%"
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 10. 連續互動排行
+            if (streaks.isNotEmpty()) {
+                item {
+                    Panel {
+                        SectionHead("連續互動天數") {
+                            Text("到今天為止", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                        }
+                        val maxS = streaks.first().second.toFloat().coerceAtLeast(1f)
+                        streaks.forEach { (name, days) ->
+                            DataRow(name = name, dotColor = AppColors.Positive, progress = days / maxS, primary = "$days 天")
+                        }
+                    }
+                }
+            }
+
+            // 11. 跨平台聯絡人
+            if (cross.isNotEmpty()) {
+                item {
+                    Panel {
+                        SectionHead("跨平台聯絡") {
+                            Text("同時用多個 App", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                        }
+                        cross.forEach { (name, n) ->
+                            DataRow(name = name, dotColor = AppColors.FamilyText, progress = n / 4f, primary = "$n 個平台")
+                        }
+                    }
+                }
+            }
+
+            // 12. 新加入與沉寂
+            if (churn.newcomers.isNotEmpty() || churn.dormant.isNotEmpty()) {
+                item {
+                    Panel {
+                        SectionHead("關係變化")
+                        if (churn.newcomers.isNotEmpty()) {
+                            Text("本期新出現 ${churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Positive)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(churn.newcomers.take(10).joinToString("、"), fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
+                        if (churn.dormant.isNotEmpty()) {
+                            Text("已沉寂（14 天以上沒互動）", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            churn.dormant.take(8).forEach { (name, days) ->
+                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(name, fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp))
+                                    Text("$days 天前", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ScrollTopButton(listState)
+    }
+}
+
 // ══════════════════════════════════════════
 //  總覽（儀錶板）
 // ══════════════════════════════════════════
@@ -2372,6 +3084,8 @@ fun OverviewView(viewModel: RelateViewModel) {
     val (showPersonaInfo, setShowPersonaInfo) = remember { mutableStateOf(false) }
     val (activeDetailDialog, setActiveDetailDialog) = remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
     val (showDemoUI, setShowDemoUI) = remember { mutableStateOf(false) }
+    var quickTagTarget by remember { mutableStateOf<String?>(null) }
+    val listState = rememberLazyListState()
 
     if (showDemoUI) {
         Dialog(onDismissRequest = { setShowDemoUI(false) }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -2382,7 +3096,9 @@ fun OverviewView(viewModel: RelateViewModel) {
 
     val isEmpty = appStats.isEmpty() && leaderboard.isEmpty()
 
+    Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
+        state = listState,
         contentPadding = PaddingValues(D.Gutter),
         verticalArrangement = Arrangement.spacedBy(D.Gap)
     ) {
@@ -2394,9 +3110,21 @@ fun OverviewView(viewModel: RelateViewModel) {
                     Icon(Icons.Rounded.DateRange, contentDescription = null, modifier = Modifier.size(48.dp), tint = AppColors.BorderStrong)
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("這段期間沒有社交紀錄", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                    Text("保持背景執行即可開始記錄", fontSize = T.Label, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
-                    Button(onClick = { setShowDemoUI(true) }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue), shape = RoundedCornerShape(10.dp)) {
-                        Text("觀看版面範例", fontSize = T.Body, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (records.isEmpty()) "保持背景執行即可開始記錄" else "換個區間看看，或確認權限是否開啟",
+                        fontSize = T.Label, color = AppColors.TextSecondary,
+                        textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (records.isNotEmpty()) {
+                            Button(
+                                onClick = { viewModel.setTimeFilter(DateFilter(FilterType.ALL, System.currentTimeMillis())) },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary), shape = RoundedCornerShape(10.dp)
+                            ) { Text("看全部 ${records.size} 筆", fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
+                        }
+                        OutlinedButton(onClick = { setShowDemoUI(true) }, shape = RoundedCornerShape(10.dp)) {
+                            Text("版面範例", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                        }
                     }
                 }
             }
@@ -2417,25 +3145,6 @@ fun OverviewView(viewModel: RelateViewModel) {
                     KpiTile("時間最多", topName, leaderboard.firstOrNull()?.let { formatDuration(it.totalDurationSeconds) },
                         AppColors.WorkText, Modifier.weight(1f))
                 }
-            }
-        }
-
-        // ── 人格：壓成一條 ──
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth()
-                    .background(AppColors.BrandPrimary, RoundedCornerShape(D.Radius))
-                    .clickable { setShowPersonaInfo(true) }
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(persona.emoji, fontSize = 18.sp)
-                Spacer(modifier = Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text(persona.title, color = Color.White, fontSize = T.Title, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(persona.description.split("\n")[0], color = Color.White.copy(alpha = 0.75f), fontSize = T.Micro, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Icon(Icons.Rounded.Info, contentDescription = "社交人格圖鑑", tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size(15.dp))
             }
         }
 
@@ -2553,7 +3262,8 @@ fun OverviewView(viewModel: RelateViewModel) {
                             badge = {
                                 Text("${i + 1}", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextTertiary,
                                     modifier = Modifier.width(12.dp), textAlign = TextAlign.Center)
-                            }
+                            },
+                            onClick = { quickTagTarget = stat.unifiedName }
                         )
                     }
                 }
@@ -2562,6 +3272,31 @@ fun OverviewView(viewModel: RelateViewModel) {
 
         item { WeekHourHeatmapCard(heatmap) }
         item { TopWordsCard(wordFreq) }
+
+        // 人格降級為頁尾一行：資訊價值不高，不該長期佔據首屏
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { setShowPersonaInfo(true) }.padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(persona.emoji, fontSize = 13.sp)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("社交人格 · ${persona.title}", fontSize = T.Label, color = AppColors.TextSecondary,
+                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text("查看圖鑑", fontSize = T.Micro, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+            }
+        }
+    }
+        ScrollTopButton(listState)
+    }
+
+    quickTagTarget?.let { target ->
+        QuickTagDialog(
+            name = target,
+            categories = availableCats,
+            onPick = { catId -> viewModel.setCategory(target, catId); quickTagTarget = null },
+            onDismiss = { quickTagTarget = null }
+        )
     }
 
     if (showPersonaInfo) {
@@ -2833,6 +3568,10 @@ fun LeaderboardView(viewModel: RelateViewModel) {
 
     val (selectedContact, setSelectedContact) = remember { mutableStateOf<SenderStat?>(null) }
     var showFilters by remember { mutableStateOf(false) }
+    var selectionMode by remember { mutableStateOf(false) }
+    val picked = remember { mutableStateListOf<String>() }
+    val listState = rememberLazyListState()
+    fun exitSelection() { selectionMode = false; picked.clear() }
 
     val leaderboard = remember(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter, weekStartDay) {
         viewModel.getLeaderboard(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter)
@@ -2846,8 +3585,10 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     val activeFilterCount = listOfNotNull(appFilter, catFilter?.label).size + (if (groupFilter != GroupFilter.ALL) 1 else 0)
 
     // 排行列彼此相連成一張表，間距由各 item 自行控制
+    Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
-        contentPadding = PaddingValues(D.Gutter),
+        state = listState,
+        contentPadding = PaddingValues(start = D.Gutter, end = D.Gutter, top = D.Gutter, bottom = if (selectionMode) 76.dp else D.Gutter),
         modifier = Modifier.fillMaxSize()
     ) {
         item {
@@ -2868,6 +3609,17 @@ fun LeaderboardView(viewModel: RelateViewModel) {
                 Spacer(modifier = Modifier.weight(1f))
 
                 Text("${leaderboard.size} 位", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+
+                Surface(
+                    color = if (selectionMode) AppColors.BrandPrimary else AppColors.Surface,
+                    border = BorderStroke(1.dp, if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.clickable { if (selectionMode) exitSelection() else selectionMode = true }
+                ) {
+                    Text(if (selectionMode) "完成" else "選取", fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                        color = if (selectionMode) Color.White else AppColors.TextPrimary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                }
 
                 Surface(
                     color = if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.Surface,
@@ -2973,16 +3725,50 @@ fun LeaderboardView(viewModel: RelateViewModel) {
                     topStart = if (first) D.Radius else 0.dp, topEnd = if (first) D.Radius else 0.dp,
                     bottomStart = if (last) D.Radius else 0.dp, bottomEnd = if (last) D.Radius else 0.dp
                 )
+                val isSel = picked.contains(stat.unifiedName)
                 Column(
                     modifier = Modifier.fillMaxWidth()
-                        .background(AppColors.Surface, shape)
-                        .border(1.dp, AppColors.BorderLight, shape)
+                        .background(if (isSel) AppColors.ActiveBlue.copy(alpha = 0.07f) else AppColors.Surface, shape)
+                        .border(1.dp, if (isSel) AppColors.ActiveBlue else AppColors.BorderLight, shape)
                         .padding(horizontal = D.CardPad)
                 ) {
-                    RankRow(i + 1, stat, maxScore, sort) { setSelectedContact(stat) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (selectionMode) {
+                            Checkbox(
+                                checked = isSel,
+                                onCheckedChange = { if (isSel) picked.remove(stat.unifiedName) else picked.add(stat.unifiedName) },
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            RankRow(i + 1, stat, maxScore, sort) {
+                                if (selectionMode) {
+                                    if (isSel) picked.remove(stat.unifiedName) else picked.add(stat.unifiedName)
+                                } else setSelectedContact(stat)
+                            }
+                        }
+                    }
                     if (!last) HorizontalDivider(color = AppColors.BorderLight.copy(alpha = 0.6f))
                 }
             }
+        }
+    }
+
+        ScrollTopButton(listState)
+
+        if (selectionMode) {
+            BatchTagBar(
+                selectedCount = picked.size,
+                totalCount = leaderboard.size,
+                categories = availableCats,
+                onSelectAll = {
+                    if (picked.size == leaderboard.size) picked.clear()
+                    else { picked.clear(); picked.addAll(leaderboard.map { it.unifiedName }) }
+                },
+                onApply = { catId -> viewModel.setCategories(picked.toList(), catId); exitSelection() },
+                onExit = { exitSelection() }
+            )
         }
     }
 
