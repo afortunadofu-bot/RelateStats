@@ -69,6 +69,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -455,6 +456,20 @@ object DataRepository {
     // 自動清理掉的異常紀錄數（設定頁顯示用）
     val lastCleanupRemoved = MutableStateFlow(0)
 
+    // 偵測診斷用的環狀日誌。無法在開發機上重現使用者的 App 版本時，
+    // 這是唯一能問出「服務到底看到什麼」的方法。
+    val debugLog = MutableStateFlow<List<String>>(emptyList())
+    private var lastLogLine = ""
+
+    fun logDetect(line: String) {
+        if (line == lastLogLine) return
+        lastLogLine = line
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        debugLog.update { (it + "$stamp  $line").takeLast(60) }
+    }
+
+    fun clearDetectLog() { debugLog.value = emptyList(); lastLogLine = "" }
+
     private val _wordFreq = MutableStateFlow<Map<String, Int>>(emptyMap())
     val wordFreq: StateFlow<Map<String, Int>> = _wordFreq.asStateFlow()
     private const val MAX_WORDS = 3000
@@ -700,6 +715,11 @@ object DataRepository {
         _interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName }
             .distinct()
             .filter { isNonPersonContact(it) || _categories.value[it] == ContactCategory.SYSTEM.id }
+
+    /** 預覽「整理系統通知」會影響哪些聯絡人（尚未歸類的） */
+    fun previewRetagTargets(): List<String> =
+        _interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName }.distinct()
+            .filter { isNonPersonContact(it) && _categories.value[it] != ContactCategory.SYSTEM.id }
 
     /** 把現有聯絡人裡的非真人通知重新歸到「系統通知」，回傳筆數 */
     fun retagSystemContacts(): Int {
@@ -1292,6 +1312,7 @@ class ChatTrackerService : AccessibilityService() {
     private var chatStartTime: Long = 0
     private var lastContentScan: Long = 0
     private var missStreak = 0
+    private var lastCandidate: String? = null
     private var screenReceiver: BroadcastReceiver? = null
 
     // 暫存的一段停留，等確定不會回來才寫入
@@ -1364,19 +1385,29 @@ class ChatTrackerService : AccessibilityService() {
         val hit = scanScreen(root)
 
         val name = hit.title?.trim()
-        // 標題若是從已知的 view id 抓到，本身就足以證明在聊天室，不必再要求看到輸入框。
-        // IG / Threads 的輸入框常包在摺疊容器裡或未取得焦點時不回報 isEditable，
-        // 硬性要求輸入框會讓這些 App 永遠判定為「不在聊天室」→ 時長恆為 0。
-        val trustworthy = hit.fromViewId || appName == "電話" || hit.hasEditText
+
+        // 採信條件（任一成立）：
+        //  1. 標題來自已知的 view id —— 高信賴，直接採信
+        //  2. 畫面上有輸入框 —— 典型的聊天室特徵
+        //  3. 連續兩次掃到同一個標題 —— 動態瀏覽（動態牆、探索）的頂端文字會一直變，
+        //     穩定不變才可能是聊天室標題。這條是為了 IG/Threads：它們的輸入框常包在
+        //     摺疊容器裡或未取得焦點時不回報 isEditable，只靠前兩條會永遠判定不在聊天室。
+        val stable = name != null && name == lastCandidate
+        val trustworthy = hit.fromViewId || appName == "電話" || hit.hasEditText || stable
         val valid = !name.isNullOrEmpty() && name.length <= 60 && name !in ignoreTitles && trustworthy
+        lastCandidate = name
 
         if (!valid) {
             missStreak++
+            DataRepository.logDetect(
+                "$appName 未採用 · 標題=${name ?: "(抓不到)"} · viewId=${hit.fromViewId} · 輸入框=${hit.hasEditText}"
+            )
             if (missStreak >= MISS_TOLERANCE) pauseTracking()
             return
         }
 
         missStreak = 0
+        DataRepository.logDetect("$appName 記錄中 · $name · viewId=${hit.fromViewId} · 輸入框=${hit.hasEditText}")
         enterChat(name!!, appName)
     }
 
@@ -1510,7 +1541,11 @@ class ChatTrackerService : AccessibilityService() {
         pendingName = null; pendingApp = null; pendingSeconds = 0
         if (name == null || secs < 1L) return
         // 超過上限視為背景掛機，直接丟棄（記成上限值一樣會虛胖）
-        if (secs > MAX_SESSION_SECONDS) return
+        if (secs > MAX_SESSION_SECONDS) {
+            DataRepository.logDetect("丟棄 · $name 累積 ${secs}s 超過上限")
+            return
+        }
+        DataRepository.logDetect("寫入 · $name ${secs}s（$app）")
 
         DataRepository.addInteraction(
             InteractionRecord(
@@ -1998,6 +2033,9 @@ class RelateViewModel : ViewModel() {
     val wordFreq = DataRepository.wordFreq
     fun clearWordFreq() = DataRepository.clearWordFreq()
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
+    fun previewRetagTargets() = DataRepository.previewRetagTargets()
+    val debugLog = DataRepository.debugLog
+    fun clearDetectLog() = DataRepository.clearDetectLog()
     fun setCategories(names: Collection<String>, categoryId: String) = DataRepository.updateCategories(names, categoryId)
     fun updateCategoryMeta(id: String, label: String, colorInt: Int, bgColorInt: Int) = DataRepository.updateCategoryMeta(id, label, colorInt, bgColorInt)
     fun deleteCategory(id: String) = DataRepository.deleteCategory(id)
@@ -2474,6 +2512,117 @@ fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -
 //  儀錶板共用元件
 // ══════════════════════════════════════════
 
+/** 通用的破壞性操作確認框，會列出實際會被影響的項目 */
+@Composable
+fun ConfirmDialog(
+    title: String,
+    message: String,
+    details: List<String> = emptyList(),
+    confirmLabel: String = "確認",
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = { Text(title, fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column {
+                Text(message, fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 18.sp)
+                if (details.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                        items(details.take(60)) {
+                            Text("• $it", fontSize = T.Label, color = AppColors.TextPrimary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                    }
+                    if (details.size > 60) {
+                        Text("…等共 ${details.size} 項", fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm, colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)) {
+                Text(confirmLabel, maxLines = 1, softWrap = false)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+    )
+}
+
+/**
+ * 服務關閉警示。
+ * ⚠️ 每次重新安裝 App，Android 都會自動停用無障礙服務與通知存取權限，
+ * 這是系統行為不是 bug。沒有明顯提示的話，使用者會誤以為是統計壞掉。
+ */
+@Composable
+fun ServiceAlertBanner() {
+    val context = LocalContext.current
+    var accOn by remember { mutableStateOf(true) }
+    var notifOn by remember { mutableStateOf(true) }
+    val owner = LocalLifecycleOwner.current
+
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) {
+                accOn = isAccessibilityServiceEnabled(context, ChatTrackerService::class.java)
+                notifOn = isNotificationServiceEnabled(context)
+            }
+        }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+
+    if (accOn && notifOn) return
+
+    Column(
+        modifier = Modifier.fillMaxWidth()
+            .background(AppColors.WorkBg, RoundedCornerShape(D.Radius))
+            .border(1.dp, AppColors.WorkText.copy(alpha = 0.25f), RoundedCornerShape(D.Radius))
+            .padding(D.CardPad)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(15.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("目前沒有在記錄新資料", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        val lines = buildList {
+            if (!accOn) add("「無障礙服務」已關閉 → 停留時間不會被記錄")
+            if (!notifOn) add("「通知存取」已關閉 → 訊息不會被記錄")
+        }
+        lines.forEach {
+            Text(it, fontSize = T.Label, color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 17.sp)
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("每次重新安裝 App，Android 都會自動關掉這些服務，需要手動重開。",
+            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.75f), lineHeight = 15.sp)
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (!accOn) {
+                Button(
+                    onClick = { runCatching { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
+                    shape = RoundedCornerShape(9.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) { Text("開啟無障礙服務", fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+            if (!notifOn) {
+                Button(
+                    onClick = { runCatching { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
+                    shape = RoundedCornerShape(9.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) { Text("開啟通知存取", fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+        }
+    }
+}
+
 /** 捲動一段距離後浮出的回頂端按鈕 */
 @Composable
 fun BoxScope.ScrollTopButton(listState: LazyListState) {
@@ -2484,11 +2633,11 @@ fun BoxScope.ScrollTopButton(listState: LazyListState) {
         enter = fadeIn(), exit = fadeOut(),
         modifier = Modifier.align(Alignment.BottomEnd).padding(end = D.Gutter, bottom = 16.dp)
     ) {
-        Surface(
-            shape = CircleShape,
-            color = AppColors.BrandPrimary,
-            shadowElevation = 6.dp,
-            modifier = Modifier.size(40.dp).clickable { scope.launch { listState.animateScrollToItem(0) } }
+        Box(
+            modifier = Modifier.size(42.dp).shadow(6.dp, CircleShape).clip(CircleShape)
+                .background(AppColors.BrandPrimary)
+                .clickable { scope.launch { listState.animateScrollToItem(0) } },
+            contentAlignment = Alignment.Center
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "回到頂端", tint = Color.White, modifier = Modifier.size(22.dp))
@@ -2633,24 +2782,24 @@ fun SegBar(options: List<Pair<String, String>>, current: String, onSelect: (Stri
 /** KPI 方塊 */
 @Composable
 fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier: Modifier = Modifier) {
+    // 固定高度：同一列的方塊若因為有沒有副標而高度不同，看起來就是跑版
     Column(
         modifier = modifier
+            .height(64.dp)
             .background(AppColors.Surface, RoundedCornerShape(D.Radius))
             .border(1.dp, AppColors.BorderLight, RoundedCornerShape(D.Radius))
-            .padding(horizontal = 10.dp, vertical = 9.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(accent))
             Spacer(modifier = Modifier.width(5.dp))
             Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Spacer(modifier = Modifier.height(3.dp))
+        Spacer(modifier = Modifier.weight(1f))
         // 這裡的值可能是聯絡人名稱，長度不可控，必須省略而不是溢出裁切
-        Text(value, fontSize = T.Kpi, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
+        Text(value, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-        if (sub != null) {
-            Text(sub, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        Text(sub ?: "", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -2665,25 +2814,27 @@ fun DataRow(
     badge: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)? = null
 ) {
+    // 名稱靠左、長條置中、數值靠右的單列表格。
+    // 舊版把長條放在名稱底下、數值另起一欄，中間留下大片空白，看起來像破版。
     Row(
         modifier = Modifier.fillMaxWidth()
             .let { if (onClick != null) it.clickable { onClick() } else it }
-            .padding(vertical = 6.dp),
+            .padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-        Spacer(modifier = Modifier.width(8.dp))
-        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                badge?.let { it(); Spacer(modifier = Modifier.width(5.dp)) }
-                Text(name, fontSize = T.Body, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Box(modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(AppColors.Background)) {
-                Box(modifier = Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(dotColor))
-            }
+        Spacer(modifier = Modifier.width(7.dp))
+        badge?.let { it(); Spacer(modifier = Modifier.width(4.dp)) }
+        Text(
+            name, fontSize = T.Body, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(end = 8.dp)
+        )
+        Box(modifier = Modifier.width(46.dp).height(5.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
+            Box(modifier = Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(dotColor))
         }
-        Column(horizontalAlignment = Alignment.End) {
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(min = 56.dp)) {
             Text(primary, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
             if (secondary != null) {
                 Text(secondary, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
@@ -2838,6 +2989,7 @@ fun InsightsView(viewModel: RelateViewModel) {
             contentPadding = PaddingValues(D.Gutter),
             verticalArrangement = Arrangement.spacedBy(D.Gap)
         ) {
+            item { ServiceAlertBanner() }
             item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
 
             if (records.isEmpty()) {
@@ -3102,6 +3254,7 @@ fun OverviewView(viewModel: RelateViewModel) {
         contentPadding = PaddingValues(D.Gutter),
         verticalArrangement = Arrangement.spacedBy(D.Gap)
     ) {
+        item { ServiceAlertBanner() }
         item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
 
         if (isEmpty) {
@@ -3610,28 +3763,28 @@ fun LeaderboardView(viewModel: RelateViewModel) {
 
                 Text("${leaderboard.size} 位", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
 
-                Surface(
-                    color = if (selectionMode) AppColors.BrandPrimary else AppColors.Surface,
-                    border = BorderStroke(1.dp, if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.clickable { if (selectionMode) exitSelection() else selectionMode = true }
+                Box(
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                        .background(if (selectionMode) AppColors.BrandPrimary else AppColors.Surface)
+                        .border(1.dp, if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight, RoundedCornerShape(8.dp))
+                        .clickable { if (selectionMode) exitSelection() else selectionMode = true }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text(if (selectionMode) "完成" else "選取", fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
-                        color = if (selectionMode) Color.White else AppColors.TextPrimary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                        color = if (selectionMode) Color.White else AppColors.TextPrimary)
                 }
 
-                Surface(
-                    color = if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.Surface,
-                    border = BorderStroke(1.dp, if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.BorderLight),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.clickable { showFilters = !showFilters }
+                Box(
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                        .background(if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.Surface)
+                        .border(1.dp, if (activeFilterCount > 0) AppColors.ActiveBlue else AppColors.BorderLight, RoundedCornerShape(8.dp))
+                        .clickable { showFilters = !showFilters }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text(
                         if (activeFilterCount > 0) "篩選 $activeFilterCount" else "篩選",
                         fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
-                        color = if (activeFilterCount > 0) Color.White else AppColors.TextPrimary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        color = if (activeFilterCount > 0) Color.White else AppColors.TextPrimary
                     )
                 }
             }
@@ -3864,18 +4017,24 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                     Text("聯絡人整合", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (similarGroups.isNotEmpty() && !selectionMode) {
-                            Surface(color = AppColors.ActiveBlue.copy(alpha = 0.12f), shape = RoundedCornerShape(10.dp), modifier = Modifier.clickable { showAutoMerge = true }) {
-                                Text("自動合併 ${similarGroups.size} 組", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                                    .background(AppColors.ActiveBlue.copy(alpha = 0.12f))
+                                    .clickable { showAutoMerge = true }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("自動合併 ${similarGroups.size} 組", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
                             }
                         }
-                        Surface(
-                            color = if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight,
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.clickable { if (selectionMode) exitSelection() else selectionMode = true }
+                        Box(
+                            modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                                .background(if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight)
+                                .clickable { if (selectionMode) exitSelection() else selectionMode = true }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
-                            Text(if (selectionMode) "完成" else "選取", fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                            Text(if (selectionMode) "完成" else "選取", fontSize = T.Label, fontWeight = FontWeight.Bold,
                                 color = if (selectionMode) Color.White else AppColors.TextPrimary,
-                                maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                                maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -4256,6 +4415,72 @@ fun AutoMergeDialog(
     )
 }
 
+/**
+ * 停留時間偵測診斷。
+ * 顯示無障礙服務對每個畫面的判定結果，用來釐清某個 App 抓不到時長的原因：
+ * 是服務沒開、抓不到標題、還是標題被判定為非聊天室。
+ */
+@Composable
+fun DetectionDiagnosticsDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val log by viewModel.debugLog.collectAsState()
+    val accOn = remember { isAccessibilityServiceEnabled(context, ChatTrackerService::class.java) }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("停留時間偵測診斷", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text(
+                    if (accOn) "無障礙服務執行中" else "無障礙服務已關閉，不會有任何紀錄",
+                    fontSize = T.Label, color = if (accOn) AppColors.Positive else AppColors.WorkText, fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    "使用方式：先開著這個 App，切到 LINE / Instagram 打開一個聊天室停留幾秒，再回來看下方紀錄。",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                if (log.isEmpty()) {
+                    Text("尚無偵測紀錄", fontSize = T.Label, color = AppColors.TextTertiary, modifier = Modifier.padding(vertical = 12.dp))
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                        items(log.reversed()) { line ->
+                            Text(
+                                line, fontSize = T.Micro, color = AppColors.TextPrimary, lineHeight = 15.sp,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val text = viewModel.debugLog.value.joinToString("\n")
+                    runCatching {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("RelateStats 診斷", text))
+                        Toast.makeText(context, "已複製 ${viewModel.debugLog.value.size} 行", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)
+            ) { Text("複製紀錄", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { viewModel.clearDetectLog() }) { Text("清空", color = AppColors.TextSecondary) }
+                TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) }
+            }
+        }
+    )
+}
+
 /** 逐筆檢視與勾選刪除互動紀錄 */
 @Composable
 fun RecordManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
@@ -4581,6 +4806,9 @@ fun SettingsView(viewModel: RelateViewModel) {
     val availableCats by viewModel.availableCategories.collectAsState()
     var showCategoryManager by remember { mutableStateOf(false) }
     var showRecordManager by remember { mutableStateOf(false) }
+    var confirmAction by remember { mutableStateOf<String?>(null) }
+    var showDiagnostics by remember { mutableStateOf(false) }
+    val wordFreqNow by viewModel.wordFreq.collectAsState()
     val undoAvailable by viewModel.undoAvailable.collectAsState()
     val undoLabel by viewModel.undoLabel.collectAsState()
     LaunchedEffect(Unit) { viewModel.refreshUndoState() }
@@ -4763,11 +4991,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
-                            onClick = {
-                                val removed = viewModel.removeAbnormalRecords()
-                                abnormalCount = viewModel.countAbnormalRecords()
-                                Toast.makeText(context, "已清理 $removed 筆異常紀錄", Toast.LENGTH_SHORT).show()
-                            },
+                            onClick = { confirmAction = "abnormal" },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
                             shape = RoundedCornerShape(12.dp)
@@ -4788,27 +5012,27 @@ fun SettingsView(viewModel: RelateViewModel) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(
-                            onClick = {
-                                val n = viewModel.retagSystemContacts()
-                                Toast.makeText(context, if (n > 0) "已歸類 $n 個系統通知" else "沒有需要歸類的項目", Toast.LENGTH_SHORT).show()
-                            },
+                            onClick = { confirmAction = "retag" },
                             modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)
-                        ) { Text("整理系統通知", fontSize = 11.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        ) { Text("整理系統通知", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
 
                         OutlinedButton(
-                            onClick = {
-                                viewModel.clearWordFreq()
-                                Toast.makeText(context, "已清除常用詞統計", Toast.LENGTH_SHORT).show()
-                            },
+                            onClick = { confirmAction = "words" },
                             modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)
-                        ) { Text("清除常用詞", fontSize = 11.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        ) { Text("清除常用詞", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
 
                     Spacer(modifier = Modifier.height(6.dp))
                     OutlinedButton(
                         onClick = { showRecordManager = true },
                         modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
-                    ) { Text("逐筆檢視／勾選刪除紀錄", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    ) { Text("逐筆檢視／勾選刪除紀錄", fontSize = T.Body, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = { showDiagnostics = true },
+                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
+                    ) { Text("停留時間偵測診斷", fontSize = T.Body, color = AppColors.ActiveBlue, maxLines = 1, overflow = TextOverflow.Ellipsis) }
 
                     if (undoAvailable) {
                         Spacer(modifier = Modifier.height(10.dp))
@@ -4862,6 +5086,52 @@ fun SettingsView(viewModel: RelateViewModel) {
 
     if (showRecordManager) {
         RecordManagerDialog(viewModel) { showRecordManager = false }
+    }
+
+    if (showDiagnostics) {
+        DetectionDiagnosticsDialog(viewModel) { showDiagnostics = false }
+    }
+
+    when (confirmAction) {
+        "retag" -> {
+            val targets = remember { viewModel.previewRetagTargets() }
+            ConfirmDialog(
+                title = "整理系統通知",
+                message = if (targets.isEmpty()) "目前沒有需要歸類的項目。"
+                else "以下 ${targets.size} 個聯絡人會被歸類到「系統通知」標籤，排行榜將不再顯示。\n互動紀錄不會刪除，之後仍可自行改回其他標籤。",
+                details = targets,
+                confirmLabel = if (targets.isEmpty()) "知道了" else "歸類 ${targets.size} 個",
+                onConfirm = {
+                    val n = viewModel.retagSystemContacts()
+                    Toast.makeText(context, if (n > 0) "已歸類 $n 個系統通知" else "沒有需要歸類的項目", Toast.LENGTH_SHORT).show()
+                    confirmAction = null
+                },
+                onDismiss = { confirmAction = null }
+            )
+        }
+        "words" -> ConfirmDialog(
+            title = "清除常用詞統計",
+            message = "會刪除目前累積的 ${wordFreqNow.size} 個詞的統計資料，總覽頁的「常用詞」會歸零重新累積。\n互動紀錄與訊息數不受影響，此操作無法復原。",
+            confirmLabel = "清除",
+            onConfirm = {
+                viewModel.clearWordFreq()
+                Toast.makeText(context, "已清除常用詞統計", Toast.LENGTH_SHORT).show()
+                confirmAction = null
+            },
+            onDismiss = { confirmAction = null }
+        )
+        "abnormal" -> ConfirmDialog(
+            title = "清理異常紀錄",
+            message = "會刪除 $abnormalCount 筆停留時間超過 30 分鐘上限的紀錄，這些是舊版計時錯誤的產物。\n訊息紀錄不受影響，刪除後可在下方「復原」。",
+            confirmLabel = "清理 $abnormalCount 筆",
+            onConfirm = {
+                val removed = viewModel.removeAbnormalRecords()
+                abnormalCount = viewModel.countAbnormalRecords()
+                Toast.makeText(context, "已清理 $removed 筆異常紀錄", Toast.LENGTH_SHORT).show()
+                confirmAction = null
+            },
+            onDismiss = { confirmAction = null }
+        )
     }
 
     if (showGuideDialog) {

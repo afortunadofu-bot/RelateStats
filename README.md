@@ -3,7 +3,7 @@
 Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通知監聽** 與 **無障礙服務** 兩個引擎，
 統計你在通訊軟體上對每個人投入的「注意力停留時間」與「互動頻率」，並做社交人格與數位健康分析。
 
-- **目前版本**：v1.8（versionCode 8）
+- **目前版本**：v1.9（versionCode 9）
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -36,6 +36,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | 使用紀錄存取 | 讀取手機總螢幕時間，算佔比 | 佔比分析不顯示 |
 
 > Samsung 等機型若在系統設定裡找不到本 App，需先到「應用程式 → 本 App → 右上角 → 允許受限制的設定」。
+
+> ⚠️ **每次重新安裝 App，Android 都會自動關閉無障礙服務與通知存取**，這是系統行為。
+> 更新後務必回設定頁重新開啟，否則不會記錄任何新資料。App 內會顯示紅色警示橫幅提醒。
 
 ---
 
@@ -135,6 +138,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   聯絡人有 700+ 位，那樣會一次組完所有節點直接卡死。
 - **任何寬度不可控的文字都要加 `overflow = TextOverflow.Ellipsis`**（聯絡人名稱、時長字串），
   只設 `softWrap = false` 會變成硬裁切。
+- **絕對不要用 `Surface(color = …, modifier = Modifier.clickable { … })` 做按鈕**。
+  Material3 非可點擊的 `Surface` overload 內部有 `.pointerInput(Unit) {}`，會在事件抵達
+  外層 `clickable` 前就消耗掉，按鈕完全沒反應（v1.9 一次修掉五顆這樣寫的按鈕）。
+  要嘛用 `Surface(onClick = …)` overload，要嘛用 `Box` + `clip`/`background`/`clickable`。
+- **同一列的卡片要固定高度**。有副標與沒副標的卡片高度不同，並排就是跑版。
 - **`versionName` 現在會直接顯示在 App 設定頁最下方**（`BuildConfig.VERSION_NAME`）。改版號只需要改 `app/build.gradle.kts` 一處，App 內畫面與 CHANGELOG 版本號要盡量保持一致。
 
 ### 版控
@@ -147,6 +155,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.9 | 2026-08-27 | 修正 Surface 吞點擊導致五顆按鈕失效、儀錶板版面、服務警示、偵測診斷 |
 | v1.8 | 2026-08-27 | 新增「洞察」分頁（12 種統計）、時長偵測三修、預設區間與人格降級 |
 | v1.7 | 2026-08-27 | 資訊儀錶板改版：設計代幣、總覽頁與排行頁重新規劃 |
 | v1.6 | 2026-08-27 | 時長偵測重寫、IG 歸戶修正、刪除可復原、勾選刪除紀錄、聯絡人分軟體 |
