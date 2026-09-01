@@ -3,7 +3,7 @@
 Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通知監聽** 與 **無障礙服務** 兩個引擎，
 統計你在通訊軟體上對每個人投入的「注意力停留時間」與「互動頻率」，並做社交人格與數位健康分析。
 
-- **目前版本**：v1.9（versionCode 9）
+- **目前版本**：v2.0（versionCode 10）
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -83,6 +83,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   （清理前會先另存原始資料到 App 內部空間）。**訊息數與字數的歷史資料是好的，不受影響。**
 - **常用詞從 v1.3 才開始累積**。舊資料只存了字數沒存內容，無法回推。剛升級時這張卡是空的。
 - 常用詞是**全期間累計**，不隨日期篩選變動；只存詞頻，不保留訊息原文。
+- **訊息數與停留時間是互補的，不是同一件事**：進到聊天室閱讀時不會跳通知，
+  所以訊息數反映「被動接收」、停留時間反映「主動開啟」，加起來才是完整的注意力。
+  訊息數不需要無障礙服務就能取得，因此各處預設指標都是訊息數。
 - 單筆紀錄上限 200,000 筆，超過會保留最新的。
 - 單次聊天室停留上限 **1800 秒**（30 分鐘），超過視為背景掛機直接丟棄而非記成上限值。
 
@@ -136,6 +139,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - **UI 一律使用 `T`（字級）與 `D`（間距）代幣**，不要再寫死 sp / dp 數值，否則密度會再度失控。
 - **長列表必須用 `items` / `itemsIndexed` 逐列渲染**，不可塞進單一 `item` 的 Column ——
   聯絡人有 700+ 位，那樣會一次組完所有節點直接卡死。
+- **統計計算一律不可在 composition 期間同步執行**。資料量是 9 萬筆等級，
+  一次全表掃描就有感，十次就是 ANR。統一走 `buildOverview()` / `buildInsights()`
+  一次算完，再用 `produceState` + `Dispatchers.Default` 丟背景（v2.0 的當機主因）。
 - **任何寬度不可控的文字都要加 `overflow = TextOverflow.Ellipsis`**（聯絡人名稱、時長字串），
   只設 `softWrap = false` 會變成硬裁切。
 - **絕對不要用 `Surface(color = …, modifier = Modifier.clickable { … })` 做按鈕**。
@@ -155,6 +161,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v2.0 | 2026-08-27 | 修卡頓（統計移出主執行緒）、訊息優先於時長、洞察重排與擴充、快速分類 |
 | v1.9 | 2026-08-27 | 修正 Surface 吞點擊導致五顆按鈕失效、儀錶板版面、服務警示、偵測診斷 |
 | v1.8 | 2026-08-27 | 新增「洞察」分頁（12 種統計）、時長偵測三修、預設區間與人格降級 |
 | v1.7 | 2026-08-27 | 資訊儀錶板改版：設計代幣、總覽頁與排行頁重新規劃 |

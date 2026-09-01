@@ -1589,7 +1589,8 @@ class RelateViewModel : ViewModel() {
     // 預設看「單週」。預設單日的話，只要今天還沒互動就整片空白，
     // 一開 App 什麼都看不到。
     var timeFilter = MutableStateFlow(DateFilter(FilterType.WEEK, System.currentTimeMillis()))
-    var sortType = MutableStateFlow(SortType.TIME)
+    // 預設依訊息數排序：停留時間需要無障礙服務，訊息數涵蓋面較廣
+    var sortType = MutableStateFlow(SortType.MESSAGES)
     var categoryFilter = MutableStateFlow<ContactCategory?>(null)
     var appFilter = MutableStateFlow<String?>(null)
     var groupFilter = MutableStateFlow(GroupFilter.ALL)
@@ -1987,6 +1988,175 @@ class RelateViewModel : ViewModel() {
         val f = getFilteredRecords(records, filter)
         var gd = 0L; var pd = 0L; var gm = 0; var pm = 0
         f.forEach {
+            if (it.isGroup) { gd += it.durationSeconds; if (it.isIncoming) gm++ }
+            else { pd += it.durationSeconds; if (it.isIncoming) pm++ }
+        }
+        return GroupSplit(gd, pd, gm, pm)
+    }
+
+    // ══════════════ 一次算完的資料包 ══════════════
+    // 舊版在 composition 期間同步跑十幾次全表掃描（每次都重新 getFilteredRecords），
+    // 資料量大時直接凍住畫面。改成一次算完並丟到背景執行緒。
+
+    data class OverviewBundle(
+        val appStats: List<AppUsageStat> = emptyList(),
+        val timeStats: List<TimeOfDayStat> = emptyList(),
+        val persona: SocialPersona = SocialPersona.ALL_TYPES[0],
+        val leaderboard: List<SenderStat> = emptyList(),
+        val catStats: List<CategoryStat> = emptyList(),
+        val heatmap: Array<IntArray> = Array(7) { IntArray(24) },
+        val scoped: List<InteractionRecord> = emptyList(),
+        val ready: Boolean = false
+    )
+
+    fun buildOverview(
+        records: List<InteractionRecord>, filter: DateFilter, weekStart: Int,
+        catsMap: Map<String, String>, aliasMap: Map<String, String>, cats: List<ContactCategory>
+    ): OverviewBundle {
+        val scoped = getFilteredRecords(records, filter)
+        val all = DateFilter(FilterType.ALL)
+        return OverviewBundle(
+            appStats = getAppUsageStats(scoped, all),
+            timeStats = getTimeOfDayStats(scoped, all),
+            persona = getSocialPersona(scoped, all),
+            leaderboard = getDynamicLeaderboard(scoped, catsMap, aliasMap, cats),
+            catStats = getCategoryStats(scoped, all, catsMap, aliasMap, cats),
+            heatmap = getWeekHourHeatmap(scoped, all),
+            scoped = scoped,
+            ready = true
+        )
+    }
+
+    data class InsightsBundle(
+        val trend: List<TrendPoint> = emptyList(),
+        val deltas: Triple<PeriodDelta, PeriodDelta, PeriodDelta>? = null,
+        val conc: ConcentrationStat = ConcentrationStat(0, 0, 0, 0),
+        val churn: ChurnStat = ChurnStat(emptyList(), emptyList()),
+        val nightPct: Int = 0,
+        val streaks: List<Pair<String, Int>> = emptyList(),
+        val contrib: List<Pair<Long, Int>> = emptyList(),
+        val calls: CallSummary = CallSummary(0, 0, 0, 0L),
+        val lengths: List<Triple<String, Int, Float>> = emptyList(),
+        val cross: List<Pair<String, Int>> = emptyList(),
+        val coverage: CoverageStat = CoverageStat(0, 0, 0, 0),
+        val split: GroupSplit = GroupSplit(0L, 0L, 0, 0),
+        val extras: ExtraStats = ExtraStats(),
+        val ready: Boolean = false
+    )
+
+    fun buildInsights(
+        records: List<InteractionRecord>, filter: DateFilter, weekStart: Int,
+        catsMap: Map<String, String>, aliasMap: Map<String, String>, cats: List<ContactCategory>
+    ): InsightsBundle {
+        val scoped = getFilteredRecords(records, filter)
+        val stats = getDynamicLeaderboard(scoped, catsMap, aliasMap, cats)
+        return InsightsBundle(
+            trend = getDailyTrend(records, filter, weekStart),
+            deltas = getPeriodDeltas(records, filter, weekStart, aliasMap),
+            conc = getConcentration(stats),
+            churn = getChurn(records, aliasMap, filter, weekStart),
+            nightPct = nightPctOf(scoped),
+            streaks = getStreaks(records, aliasMap),
+            contrib = getContributionMap(records),
+            calls = callSummaryOf(scoped),
+            lengths = lengthBucketsOf(scoped),
+            cross = getCrossPlatform(records, aliasMap),
+            coverage = getCoverage(records, filter, weekStart),
+            split = groupSplitOf(scoped),
+            extras = extraStatsOf(scoped, records, filter, weekStart),
+            ready = true
+        )
+    }
+
+    /** 額外的補充統計 */
+    data class ExtraStats(
+        val avgMsgPerActiveDay: Int = 0,
+        val avgDurPerActiveDay: Long = 0L,
+        val busiestDayLabel: String = "—",
+        val busiestDayCount: Int = 0,
+        val longestSessionSec: Long = 0L,
+        val weekdayMsgs: Int = 0,
+        val weekendMsgs: Int = 0,
+        val avgWordsPerMsg: Int = 0,
+        val openedChats: Int = 0
+    )
+
+    private fun extraStatsOf(scoped: List<InteractionRecord>, all: List<InteractionRecord>, filter: DateFilter, weekStart: Int): ExtraStats {
+        if (scoped.isEmpty()) return ExtraStats()
+        val cal = Calendar.getInstance()
+        val perDayMsg = HashMap<Long, Int>()
+        var weekday = 0; var weekend = 0
+        var words = 0L; var msgs = 0
+        var longest = 0L
+        var opened = 0
+        scoped.forEach { r ->
+            if (r.isIncoming && !r.isCall) {
+                val d = startOfDay(r.timestamp)
+                perDayMsg[d] = (perDayMsg[d] ?: 0) + 1
+                cal.timeInMillis = r.timestamp
+                val dow = cal.get(Calendar.DAY_OF_WEEK)
+                if (dow == Calendar.SATURDAY || dow == Calendar.SUNDAY) weekend++ else weekday++
+                words += r.wordCount; msgs++
+            }
+            if (r.durationSeconds > 0) {
+                opened++
+                if (r.durationSeconds > longest) longest = r.durationSeconds.toLong()
+            }
+        }
+        val activeDays = scoped.map { startOfDay(it.timestamp) }.distinct().size.coerceAtLeast(1)
+        val busiest = perDayMsg.maxByOrNull { it.value }
+        val label = busiest?.let {
+            cal.timeInMillis = it.key
+            "${cal.get(Calendar.MONTH) + 1}/${cal.get(Calendar.DAY_OF_MONTH)}"
+        } ?: "—"
+        return ExtraStats(
+            avgMsgPerActiveDay = msgs / activeDays,
+            avgDurPerActiveDay = scoped.sumOf { it.durationSeconds.toLong() } / activeDays,
+            busiestDayLabel = label,
+            busiestDayCount = busiest?.value ?: 0,
+            longestSessionSec = longest,
+            weekdayMsgs = weekday,
+            weekendMsgs = weekend,
+            avgWordsPerMsg = if (msgs > 0) (words / msgs).toInt() else 0,
+            openedChats = opened
+        )
+    }
+
+    private fun nightPctOf(scoped: List<InteractionRecord>): Int {
+        if (scoped.isEmpty()) return 0
+        val cal = Calendar.getInstance()
+        val night = scoped.count { cal.timeInMillis = it.timestamp; cal.get(Calendar.HOUR_OF_DAY).let { h -> h >= 22 || h < 5 } }
+        return (night * 100) / scoped.size
+    }
+
+    private fun callSummaryOf(scoped: List<InteractionRecord>): CallSummary {
+        val calls = scoped.filter { it.isCall || it.isMissedCall || it.appName == "電話" }
+        val missed = calls.count { it.isMissedCall }
+        return CallSummary(calls.size, calls.size - missed, missed, calls.sumOf { it.durationSeconds.toLong() })
+    }
+
+    private fun lengthBucketsOf(scoped: List<InteractionRecord>): List<Triple<String, Int, Float>> {
+        val msgs = scoped.filter { it.isIncoming && !it.isCall && it.wordCount > 0 }
+        if (msgs.isEmpty()) return emptyList()
+        val buckets = intArrayOf(0, 0, 0, 0, 0)
+        msgs.forEach {
+            val i = when {
+                it.wordCount <= 5 -> 0
+                it.wordCount <= 15 -> 1
+                it.wordCount <= 40 -> 2
+                it.wordCount <= 100 -> 3
+                else -> 4
+            }
+            buckets[i]++
+        }
+        val labels = listOf("1-5 字", "6-15 字", "16-40 字", "41-100 字", "100+ 字")
+        val total = msgs.size.toFloat()
+        return labels.mapIndexed { i, l -> Triple(l, buckets[i], buckets[i] / total) }
+    }
+
+    private fun groupSplitOf(scoped: List<InteractionRecord>): GroupSplit {
+        var gd = 0L; var pd = 0L; var gm = 0; var pm = 0
+        scoped.forEach {
             if (it.isGroup) { gd += it.durationSeconds; if (it.isIncoming) gm++ }
             else { pd += it.durationSeconds; if (it.isIncoming) pm++ }
         }
@@ -2474,27 +2644,42 @@ fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -
                                     Text(stat.unifiedName, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     val mins = stat.totalDurationSeconds / 60
                                     val secs = stat.totalDurationSeconds % 60
-                                    Text("💬 ${stat.msgCount} 則 | 📞 ${stat.callCount} 通 | ⏳ $mins 分 $secs 秒", fontSize = 11.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top=2.dp))
+                                    Text("💬 ${stat.msgCount} 則 · 📞 ${stat.callCount} 通 · ⏳ $mins 分 $secs 秒", fontSize = T.Label, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                                 Box(modifier = Modifier.background(stat.category.bgColor, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
                                     Text(stat.category.label, color = stat.category.color, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
 
-                            // 🏆 在熱點分析內加入群組長條圖排行榜
+                            // 群組發言排行預設收起，點一下展開再點一下收合
                             if (stat.isGroup && stat.subSenders.isNotEmpty()) {
+                                var expanded by remember(stat.unifiedName) { mutableStateOf(false) }
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = AppColors.BorderLight)
-                                Text("群組發言排行 (Top 3)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary, modifier = Modifier.padding(bottom = 4.dp))
-
-                                val maxCount = stat.subSenders.values.maxOrNull()?.toFloat()?.coerceAtLeast(1f) ?: 1f
-                                stat.subSenders.entries.sortedByDescending { it.value }.take(3).forEach { (name, count) ->
-                                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text(name, fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp))
-                                            Text("$count 則", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
-                                        }
-                                        Box(modifier = Modifier.fillMaxWidth().height(4.dp).padding(top = 2.dp).background(AppColors.BorderLight, RoundedCornerShape(2.dp))) {
-                                            Box(modifier = Modifier.fillMaxWidth(count / maxCount).fillMaxHeight().background(AppColors.ActiveBlue, RoundedCornerShape(2.dp)))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("群組發言排行（${stat.subSenders.size} 人）", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                        color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    Icon(
+                                        if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                                        contentDescription = if (expanded) "收合" else "展開",
+                                        tint = AppColors.ActiveBlue, modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                if (expanded) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    val maxCount = stat.subSenders.values.maxOrNull()?.toFloat()?.coerceAtLeast(1f) ?: 1f
+                                    stat.subSenders.entries.sortedByDescending { it.value }.take(8).forEach { (name, count) ->
+                                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                                Text(name, fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp))
+                                                Text("$count 則", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                                            }
+                                            Box(modifier = Modifier.fillMaxWidth().height(4.dp).padding(top = 2.dp).background(AppColors.BorderLight, RoundedCornerShape(2.dp))) {
+                                                Box(modifier = Modifier.fillMaxWidth(count / maxCount).fillMaxHeight().background(AppColors.ActiveBlue, RoundedCornerShape(2.dp)))
+                                            }
                                         }
                                     }
                                 }
@@ -2644,6 +2829,91 @@ fun BoxScope.ScrollTopButton(listState: LazyListState) {
             }
         }
     }
+}
+
+/**
+ * 未分類聯絡人的逐一快速分類。
+ * 一次只問一位（依訊息數由多到少），避免一次面對幾百人不知從何開始。
+ */
+@Composable
+fun QuickClassifyDialog(
+    pending: List<SenderStat>,
+    categories: List<ContactCategory>,
+    onAssign: (String, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var index by remember { mutableStateOf(0) }
+    val current = pending.getOrNull(index)
+
+    if (current == null) {
+        AlertDialog(
+            containerColor = AppColors.Surface,
+            onDismissRequest = onDismiss,
+            title = { Text("分類完成", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary) },
+            text = { Text("這批未分類的聯絡人都處理完了。", fontSize = T.Body, color = AppColors.TextSecondary) },
+            confirmButton = { Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)) { Text("關閉") } }
+        )
+        return
+    }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("快速分類", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text("第 ${index + 1} / ${pending.size} 位", fontSize = T.Label, color = AppColors.TextSecondary)
+            }
+        },
+        text = {
+            Column {
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(AppColors.SurfaceAlt, RoundedCornerShape(10.dp))
+                        .padding(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (current.isGroup) {
+                            Box(modifier = Modifier.background(AppColors.GroupBg, RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 1.dp)) {
+                                Text("群", color = AppColors.GroupText, fontSize = T.Micro, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.width(5.dp))
+                        }
+                        Text(current.unifiedName, fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "${current.msgCount} 則 · ${formatDuration(current.totalDurationSeconds)}" +
+                            (if (current.callCount > 0) " · ${current.callCount} 通" else "") +
+                            " · " + current.appNames.joinToString("／"),
+                        fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("選一個標籤", fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(6.dp))
+                categories.filter { it.id != ContactCategory.OTHER.id }.chunked(2).forEach { row ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        row.forEach { cat ->
+                            Box(
+                                modifier = Modifier.weight(1f)
+                                    .background(cat.bgColor, RoundedCornerShape(8.dp))
+                                    .clickable { onAssign(current.unifiedName, cat.id); index++ }
+                                    .padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(cat.label, color = cat.color, fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        repeat(2 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { index++ }) { Text("跳過", color = AppColors.TextSecondary) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("稍後再說", color = AppColors.TextSecondary) } }
+    )
 }
 
 /** 單一聯絡人的快速標籤選擇 */
@@ -2909,20 +3179,61 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
 fun ContributionGrid(data: List<Pair<Long, Int>>) {
     if (data.isEmpty()) return
     val max = data.maxOf { it.second }.coerceAtLeast(1)
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        data.chunked(7).forEach { week ->
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                week.forEach { (_, c) ->
-                    val alpha = if (c == 0) 0f else 0.22f + 0.78f * (c.toFloat() / max)
-                    Box(
-                        modifier = Modifier.fillMaxWidth().aspectRatio(1f)
-                            .background(
-                                if (c == 0) AppColors.BorderLight.copy(alpha = 0.55f) else AppColors.Positive.copy(alpha = alpha),
-                                RoundedCornerShape(2.dp)
-                            )
-                    )
+    val cal = remember { Calendar.getInstance() }
+
+    // 對齊星期：第一欄可能不是完整的一週，前面補空格
+    val firstDow = remember(data) {
+        cal.timeInMillis = data.first().first
+        (cal.get(Calendar.DAY_OF_WEEK) - Calendar.SUNDAY + 7) % 7
+    }
+    val cells: List<Pair<Long, Int>?> = remember(data, firstDow) {
+        List(firstDow) { null } + data
+    }
+    val weekLabels = listOf("日", "", "二", "", "四", "", "六")
+
+    Column {
+        Text("每一格是一天，顏色越深代表互動越多", fontSize = T.Micro, color = AppColors.TextTertiary)
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            // 星期標籤
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.width(14.dp)) {
+                weekLabels.forEach {
+                    Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) {
+                        Text(it, fontSize = 7.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                    }
                 }
             }
+            Spacer(modifier = Modifier.width(3.dp))
+            Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                cells.chunked(7).forEach { week ->
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        week.forEach { cell ->
+                            val c = cell?.second
+                            val bg = when {
+                                cell == null -> Color.Transparent
+                                c == 0 -> AppColors.BorderLight.copy(alpha = 0.5f)
+                                else -> AppColors.Positive.copy(alpha = 0.25f + 0.75f * (c!!.toFloat() / max))
+                            }
+                            Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).background(bg, RoundedCornerShape(2.dp)))
+                        }
+                        repeat(7 - week.size) { Spacer(modifier = Modifier.fillMaxWidth().aspectRatio(1f)) }
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            Text("少", fontSize = T.Micro, color = AppColors.TextTertiary)
+            Spacer(modifier = Modifier.width(4.dp))
+            listOf(0f, 0.3f, 0.55f, 0.8f, 1f).forEach { a ->
+                Box(modifier = Modifier.size(9.dp).background(
+                    if (a == 0f) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.Positive.copy(alpha = 0.25f + 0.75f * a),
+                    RoundedCornerShape(2.dp)
+                ))
+                Spacer(modifier = Modifier.width(2.dp))
+            }
+            Spacer(modifier = Modifier.width(2.dp))
+            Text("多（最高 $max 次／天）", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
         }
     }
 }
@@ -2966,22 +3277,16 @@ fun InsightsView(viewModel: RelateViewModel) {
     val weekStartDay by viewModel.weekStartDay.collectAsState()
     val listState = rememberLazyListState()
 
-    val scoped = remember(records, filter, weekStartDay) { viewModel.getFilteredRecords(records, filter) }
-    val stats = remember(scoped, categoriesMap, aliases, availableCats) {
-        viewModel.getDynamicLeaderboard(scoped, categoriesMap, aliases, availableCats)
+    // 十幾項統計一次算完並丟到背景執行緒；同步做會直接凍住畫面
+    val b by produceState(
+        RelateViewModel.InsightsBundle(),
+        records, filter, weekStartDay, categoriesMap, aliases, availableCats
+    ) {
+        value = RelateViewModel.InsightsBundle()
+        value = withContext(Dispatchers.Default) {
+            viewModel.buildInsights(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
+        }
     }
-    val trend = remember(records, filter, weekStartDay) { viewModel.getDailyTrend(records, filter, weekStartDay) }
-    val deltas = remember(records, filter, weekStartDay, aliases) { viewModel.getPeriodDeltas(records, filter, weekStartDay, aliases) }
-    val conc = remember(stats) { viewModel.getConcentration(stats) }
-    val churn = remember(records, aliases, filter, weekStartDay) { viewModel.getChurn(records, aliases, filter, weekStartDay) }
-    val nightPct = remember(records, filter) { viewModel.getNightOwlPct(records, filter) }
-    val streaks = remember(records, aliases) { viewModel.getStreaks(records, aliases) }
-    val contrib = remember(records) { viewModel.getContributionMap(records) }
-    val calls = remember(records, filter) { viewModel.getCallSummary(records, filter) }
-    val lengths = remember(records, filter) { viewModel.getLengthBuckets(records, filter) }
-    val cross = remember(records, aliases) { viewModel.getCrossPlatform(records, aliases) }
-    val coverage = remember(records, filter, weekStartDay) { viewModel.getCoverage(records, filter, weekStartDay) }
-    val split = remember(records, filter) { viewModel.getGroupSplit(records, filter) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -2991,6 +3296,15 @@ fun InsightsView(viewModel: RelateViewModel) {
         ) {
             item { ServiceAlertBanner() }
             item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
+
+            if (!b.ready) {
+                item {
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), horizontalArrangement = Arrangement.Center) {
+                        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp, color = AppColors.ActiveBlue)
+                    }
+                }
+                return@LazyColumn
+            }
 
             if (records.isEmpty()) {
                 item {
@@ -3003,18 +3317,20 @@ fun InsightsView(viewModel: RelateViewModel) {
                 return@LazyColumn
             }
 
-            // 1. 期間對比
-            deltas?.let { (dur, msg, ppl) ->
+            // ── 1. 與上期比較 ──
+            b.deltas?.let { (dur, msg, ppl) ->
                 item {
                     Panel {
-                        SectionHead("與上期比較")
+                        SectionHead("與上期比較") {
+                            Text("同長度的前一區間", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf(
+                                Triple("訊息", "${msg.current} 則", msg.deltaPct),
                                 Triple("停留時間", formatDuration(dur.current), dur.deltaPct),
-                                Triple("訊息", "${msg.current}", msg.deltaPct),
-                                Triple("互動對象", "${ppl.current}", ppl.deltaPct)
+                                Triple("互動對象", "${ppl.current} 位", ppl.deltaPct)
                             ).forEach { (l, v, d) ->
-                                Column(modifier = Modifier.weight(1f).background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 7.dp)) {
+                                Column(modifier = Modifier.weight(1f).background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 7.dp)) {
                                     Text(l, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(v, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                                     Spacer(modifier = Modifier.height(2.dp))
@@ -3026,78 +3342,126 @@ fun InsightsView(viewModel: RelateViewModel) {
                 }
             }
 
-            // 2. 逐日趨勢
+            // ── 2. 逐日趨勢 ──
             item {
-                val (mode, setMode) = remember { mutableStateOf("D") }
+                val (mode, setMode) = remember { mutableStateOf("M") }
                 Panel {
                     SectionHead("逐日趨勢") {
-                        SegBar(listOf("D" to "時長", "M" to "訊息"), mode, setMode)
+                        SegBar(listOf("M" to "訊息", "D" to "時長"), mode, setMode)
                     }
-                    TrendChart(trend, mode == "D")
+                    TrendChart(b.trend, mode == "D")
                 }
             }
 
-            // 3. 活躍度貢獻圖
+            // ── 3. 平均與極值 ──
+            item {
+                Panel {
+                    SectionHead("每日平均")
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("平均每日訊息", "${b.extras.avgMsgPerActiveDay} 則", "以有活動的日子計", Modifier.weight(1f))
+                        StatPair("平均每日停留", formatDuration(b.extras.avgDurPerActiveDay), null, Modifier.weight(1f))
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("最忙的一天", b.extras.busiestDayLabel, "${b.extras.busiestDayCount} 則", Modifier.weight(1f))
+                        StatPair("最長單次停留", formatDuration(b.extras.longestSessionSec), null, Modifier.weight(1f))
+                    }
+                }
+            }
+
+            // ── 4. 活躍密度 ──
             item {
                 Panel {
                     SectionHead("活躍密度") {
                         Text("近 17 週", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                     }
-                    ContributionGrid(contrib)
+                    ContributionGrid(b.contrib)
                 }
             }
 
-            // 4. 覆蓋率與連續天數
+            // ── 5. 活躍天數 ──
             item {
                 Panel {
                     SectionHead("活躍天數")
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatPair("本期活躍", "${coverage.activeDays} 天", "共 ${coverage.totalDays} 天", Modifier.weight(1f))
-                        StatPair("覆蓋率", "${coverage.pct}%", null, Modifier.weight(1f))
-                        StatPair("目前連續", "${coverage.currentStreak} 天", null, Modifier.weight(1f))
-                        StatPair("最長連續", "${coverage.longestStreak} 天", null, Modifier.weight(1f))
+                        StatPair("本期活躍", "${b.coverage.activeDays} 天", "共 ${b.coverage.totalDays} 天", Modifier.weight(1f))
+                        StatPair("覆蓋率", "${b.coverage.pct}%", "有互動的日子佔比", Modifier.weight(1f))
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("目前連續", "${b.coverage.currentStreak} 天", null, Modifier.weight(1f))
+                        StatPair("最長連續", "${b.coverage.longestStreak} 天", null, Modifier.weight(1f))
                     }
                 }
             }
 
-            // 5. 社交集中度
+            // ── 6. 社交集中度 ──
             item {
                 Panel {
                     SectionHead("社交集中度")
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatPair("互動對象", "${conc.activeContacts}", "位", Modifier.weight(1f))
-                        StatPair("第一名佔比", "${conc.top1Pct}%", null, Modifier.weight(1f))
-                        StatPair("前三名佔比", "${conc.top3Pct}%", null, Modifier.weight(1f))
-                        StatPair("集中指數", "${conc.gini}", "0 均勻 / 100 集中", Modifier.weight(1f))
+                        StatPair("互動對象", "${b.conc.activeContacts} 位", null, Modifier.weight(1f))
+                        StatPair("集中指數", "${b.conc.gini}", "0 平均 · 100 極度集中", Modifier.weight(1f))
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("第一名佔比", "${b.conc.top1Pct}%", null, Modifier.weight(1f))
+                        StatPair("前三名佔比", "${b.conc.top3Pct}%", null, Modifier.weight(1f))
                     }
                 }
             }
 
-            // 6. 群組 vs 個人
+            // ── 7. 訊息 vs 停留（一體兩面） ──
             item {
                 Panel {
-                    SectionHead("群組 vs 個人")
-                    SplitBar("群組", split.groupDuration, "個人", split.personDuration,
-                        AppColors.GroupText, AppColors.ActiveBlue) { formatDuration(it) }
+                    SectionHead("訊息 vs 停留")
+                    Text(
+                        "兩者是互補的：訊息只有在你「沒開著聊天室」時才會跳通知，" +
+                        "而停留時間只有在你「主動打開聊天室」時才會累積。加起來才是完整的注意力。",
+                        fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
+                    )
                     Spacer(modifier = Modifier.height(10.dp))
-                    SplitBar("群組訊息", split.groupMsgs.toLong(), "個人訊息", split.personMsgs.toLong(),
-                        AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f)) { "$it 則" }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatPair("被動接收", "${b.extras.weekdayMsgs + b.extras.weekendMsgs} 則", "通知攔截", Modifier.weight(1f))
+                        StatPair("主動開啟", "${b.extras.openedChats} 次", "進入聊天室", Modifier.weight(1f))
+                    }
                 }
             }
 
-            // 7. 深夜社交
+            // ── 8. 平日 vs 週末 ──
+            item {
+                Panel {
+                    SectionHead("平日 vs 週末")
+                    SplitBar("平日", b.extras.weekdayMsgs.toLong(), "週末", b.extras.weekendMsgs.toLong(),
+                        AppColors.ActiveBlue, AppColors.WorkText) { "$it 則" }
+                }
+            }
+
+            // ── 9. 群組 vs 個人 ──
+            item {
+                Panel {
+                    SectionHead("群組 vs 個人")
+                    SplitBar("群組", b.split.groupMsgs.toLong(), "個人", b.split.personMsgs.toLong(),
+                        AppColors.GroupText, AppColors.ActiveBlue) { "$it 則" }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    SplitBar("群組停留", b.split.groupDuration, "個人停留", b.split.personDuration,
+                        AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f)) { formatDuration(it) }
+                }
+            }
+
+            // ── 10. 深夜社交 ──
             item {
                 Panel {
                     SectionHead("深夜社交指數") {
                         Text("22:00 – 04:59", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("$nightPct%", fontSize = T.Kpi, fontWeight = FontWeight.Black, color = AppColors.TextPrimary)
+                        Text("${b.nightPct}%", fontSize = T.Kpi, fontWeight = FontWeight.Black, color = AppColors.TextPrimary)
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
                             when {
-                                nightPct >= 40 -> "深夜是你的主場，注意作息"
-                                nightPct >= 20 -> "有一定比例的深夜互動"
+                                b.nightPct >= 40 -> "深夜是你的主場，注意作息"
+                                b.nightPct >= 20 -> "有一定比例的深夜互動"
                                 else -> "作息規律，深夜互動不多"
                             },
                             fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis
@@ -3106,32 +3470,37 @@ fun InsightsView(viewModel: RelateViewModel) {
                 }
             }
 
-            // 8. 通話統計
-            if (calls.total > 0) {
+            // ── 11. 通話統計 ──
+            if (b.calls.total > 0) {
                 item {
                     Panel {
                         SectionHead("通話統計")
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            StatPair("總通話", "${calls.total}", "通", Modifier.weight(1f))
-                            StatPair("接通", "${calls.answered}", null, Modifier.weight(1f))
-                            StatPair("未接", "${calls.missed}", "${calls.missRate}%", Modifier.weight(1f))
-                            StatPair("平均時長", formatDuration(calls.avgSeconds), null, Modifier.weight(1f))
+                            StatPair("總通話", "${b.calls.total} 通", null, Modifier.weight(1f))
+                            StatPair("接通", "${b.calls.answered} 通", null, Modifier.weight(1f))
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            StatPair("未接", "${b.calls.missed} 通", "未接率 ${b.calls.missRate}%", Modifier.weight(1f))
+                            StatPair("平均時長", formatDuration(b.calls.avgSeconds), null, Modifier.weight(1f))
                         }
                     }
                 }
             }
 
-            // 9. 訊息長度分佈
-            if (lengths.isNotEmpty()) {
+            // ── 12. 訊息長度分佈 ──
+            if (b.lengths.isNotEmpty()) {
                 item {
                     Panel {
-                        SectionHead("訊息長度分佈")
-                        lengths.forEach { (label, count, pct) ->
+                        SectionHead("訊息長度分佈") {
+                            Text("平均 ${b.extras.avgWordsPerMsg} 字／則", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                        }
+                        b.lengths.forEach { (label, count, pct) ->
                             DataRow(
                                 name = label,
                                 dotColor = AppColors.ActiveBlue,
                                 progress = pct,
-                                primary = "$count",
+                                primary = "$count 則",
                                 secondary = "${(pct * 100).toInt()}%"
                             )
                         }
@@ -3139,50 +3508,50 @@ fun InsightsView(viewModel: RelateViewModel) {
                 }
             }
 
-            // 10. 連續互動排行
-            if (streaks.isNotEmpty()) {
+            // ── 13. 連續互動排行 ──
+            if (b.streaks.isNotEmpty()) {
                 item {
                     Panel {
                         SectionHead("連續互動天數") {
                             Text("到今天為止", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                         }
-                        val maxS = streaks.first().second.toFloat().coerceAtLeast(1f)
-                        streaks.forEach { (name, days) ->
+                        val maxS = b.streaks.first().second.toFloat().coerceAtLeast(1f)
+                        b.streaks.forEach { (name, days) ->
                             DataRow(name = name, dotColor = AppColors.Positive, progress = days / maxS, primary = "$days 天")
                         }
                     }
                 }
             }
 
-            // 11. 跨平台聯絡人
-            if (cross.isNotEmpty()) {
+            // ── 14. 跨平台聯絡 ──
+            if (b.cross.isNotEmpty()) {
                 item {
                     Panel {
                         SectionHead("跨平台聯絡") {
                             Text("同時用多個 App", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                         }
-                        cross.forEach { (name, n) ->
+                        b.cross.forEach { (name, n) ->
                             DataRow(name = name, dotColor = AppColors.FamilyText, progress = n / 4f, primary = "$n 個平台")
                         }
                     }
                 }
             }
 
-            // 12. 新加入與沉寂
-            if (churn.newcomers.isNotEmpty() || churn.dormant.isNotEmpty()) {
+            // ── 15. 關係變化 ──
+            if (b.churn.newcomers.isNotEmpty() || b.churn.dormant.isNotEmpty()) {
                 item {
                     Panel {
                         SectionHead("關係變化")
-                        if (churn.newcomers.isNotEmpty()) {
-                            Text("本期新出現 ${churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Positive)
+                        if (b.churn.newcomers.isNotEmpty()) {
+                            Text("本期新出現 ${b.churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Positive)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text(churn.newcomers.take(10).joinToString("、"), fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
+                            Text(b.churn.newcomers.take(10).joinToString("、"), fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
                             Spacer(modifier = Modifier.height(10.dp))
                         }
-                        if (churn.dormant.isNotEmpty()) {
+                        if (b.churn.dormant.isNotEmpty()) {
                             Text("已沉寂（14 天以上沒互動）", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
                             Spacer(modifier = Modifier.height(4.dp))
-                            churn.dormant.take(8).forEach { (name, days) ->
+                            b.churn.dormant.take(8).forEach { (name, days) ->
                                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text(name, fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp))
                                     Text("$days 天前", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
@@ -3211,17 +3580,24 @@ fun OverviewView(viewModel: RelateViewModel) {
     val weekStartDay by viewModel.weekStartDay.collectAsState()
     val context = LocalContext.current
 
-    val filteredRecords = remember(records, filter, weekStartDay) { viewModel.getFilteredRecords(records, filter) }
-    val appStats = remember(filteredRecords) { viewModel.getAppUsageStats(filteredRecords, DateFilter(FilterType.ALL)) }
-    val timeStats = remember(filteredRecords) { viewModel.getTimeOfDayStats(filteredRecords, DateFilter(FilterType.ALL)) }
-    val persona = remember(filteredRecords) { viewModel.getSocialPersona(filteredRecords, DateFilter(FilterType.ALL)) }
-    val leaderboard = remember(filteredRecords, categoriesMap, aliases, availableCats) {
-        viewModel.getDynamicLeaderboard(filteredRecords, categoriesMap, aliases, availableCats)
+    // 全部統計一次算完並丟到背景執行緒。
+    // 舊版在 composition 期間同步跑多次全表掃描，資料量大時會直接凍住畫面。
+    val bundle by produceState(
+        RelateViewModel.OverviewBundle(),
+        records, filter, weekStartDay, categoriesMap, aliases, availableCats
+    ) {
+        value = RelateViewModel.OverviewBundle()
+        value = withContext(Dispatchers.Default) {
+            viewModel.buildOverview(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
+        }
     }
-    val catStats = remember(filteredRecords, categoriesMap, aliases, availableCats) {
-        viewModel.getCategoryStats(filteredRecords, DateFilter(FilterType.ALL), categoriesMap, aliases, availableCats)
-    }
-    val heatmap = remember(filteredRecords) { viewModel.getWeekHourHeatmap(filteredRecords, DateFilter(FilterType.ALL)) }
+    val filteredRecords = bundle.scoped
+    val appStats = bundle.appStats
+    val timeStats = bundle.timeStats
+    val persona = bundle.persona
+    val leaderboard = bundle.leaderboard
+    val catStats = bundle.catStats
+    val heatmap = bundle.heatmap
     val wordFreq by viewModel.wordFreq.collectAsState()
 
     val totalTimeSec = appStats.sumOf { it.totalDurationSeconds }
@@ -3237,6 +3613,8 @@ fun OverviewView(viewModel: RelateViewModel) {
     val (activeDetailDialog, setActiveDetailDialog) = remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
     val (showDemoUI, setShowDemoUI) = remember { mutableStateOf(false) }
     var quickTagTarget by remember { mutableStateOf<String?>(null) }
+    var showQuickClassify by remember { mutableStateOf(false) }
+    var classifyDismissed by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     if (showDemoUI) {
@@ -3246,7 +3624,7 @@ fun OverviewView(viewModel: RelateViewModel) {
         return
     }
 
-    val isEmpty = appStats.isEmpty() && leaderboard.isEmpty()
+    val isEmpty = bundle.ready && appStats.isEmpty() && leaderboard.isEmpty()
 
     Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
@@ -3256,6 +3634,15 @@ fun OverviewView(viewModel: RelateViewModel) {
     ) {
         item { ServiceAlertBanner() }
         item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
+
+        if (!bundle.ready) {
+            item {
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), horizontalArrangement = Arrangement.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp, color = AppColors.ActiveBlue)
+                }
+            }
+            return@LazyColumn
+        }
 
         if (isEmpty) {
             item {
@@ -3284,18 +3671,53 @@ fun OverviewView(viewModel: RelateViewModel) {
             return@LazyColumn
         }
 
+        // ── 未分類提示：主動邀請分類，而不是等使用者自己去聯絡人頁 ──
+        run {
+            val pending = leaderboard.filter { it.category.id == ContactCategory.OTHER.id && it.msgCount >= 3 }
+            if (pending.isNotEmpty() && !classifyDismissed) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(AppColors.FamilyBg, RoundedCornerShape(D.Radius))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("有 ${pending.size} 位還沒分類", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                color = AppColors.FamilyText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("分好類之後，標籤分佈才看得出你的時間花在哪種關係上",
+                                fontSize = T.Micro, color = AppColors.FamilyText.copy(alpha = 0.8f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        Button(
+                            onClick = { showQuickClassify = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.FamilyText),
+                            shape = RoundedCornerShape(9.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) { Text("開始分類", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            Icons.Rounded.Close, contentDescription = "先不要",
+                            tint = AppColors.FamilyText.copy(alpha = 0.6f),
+                            modifier = Modifier.size(16.dp).clickable { classifyDismissed = true }
+                        )
+                    }
+                }
+            }
+        }
+
         // ── KPI 兩列四格 ──
         item {
             Column(verticalArrangement = Arrangement.spacedBy(D.Gap)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
-                    KpiTile("停留時間", formatDuration(totalTimeSec), if (screenPct > 0) "佔手機 $screenPct%" else null,
-                        AppColors.ActiveBlue, Modifier.weight(1f))
-                    KpiTile("接收訊息", "$totalNotifs", "則", AppColors.Positive, Modifier.weight(1f))
+                    KpiTile("接收訊息", "$totalNotifs 則", "來自 ${leaderboard.size} 位對象", AppColors.Positive, Modifier.weight(1f))
+                    KpiTile("停留時間", formatDuration(totalTimeSec), if (screenPct > 0) "佔手機用量 $screenPct%" else "開啟聊天室的時間", AppColors.ActiveBlue, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
-                    KpiTile("互動對象", "${leaderboard.size}", "位", AppColors.FamilyText, Modifier.weight(1f))
-                    val topName = leaderboard.firstOrNull()?.unifiedName ?: "—"
-                    KpiTile("時間最多", topName, leaderboard.firstOrNull()?.let { formatDuration(it.totalDurationSeconds) },
+                    val topByMsg = leaderboard.maxByOrNull { it.msgCount }
+                    KpiTile("訊息最多", topByMsg?.unifiedName ?: "—", topByMsg?.let { "${it.msgCount} 則" } ?: "尚無資料",
+                        AppColors.FamilyText, Modifier.weight(1f))
+                    val topByTime = leaderboard.maxByOrNull { it.totalDurationSeconds }
+                    KpiTile("停留最久", topByTime?.unifiedName ?: "—", topByTime?.let { formatDuration(it.totalDurationSeconds) } ?: "尚無資料",
                         AppColors.WorkText, Modifier.weight(1f))
                 }
             }
@@ -3304,10 +3726,12 @@ fun OverviewView(viewModel: RelateViewModel) {
         // ── 平台分佈（表格） ──
         if (appStats.isNotEmpty()) {
             item {
-                val (mode, setMode) = remember { mutableStateOf("TIME") }
+                // 預設看訊息數：進到聊天室閱讀時不會有通知，兩個指標是互補的，
+                // 但訊息數涵蓋面較廣（不需要開啟無障礙服務），當預設值比較不會是空的。
+                val (mode, setMode) = remember { mutableStateOf("NOTIF") }
                 Panel {
                     SectionHead("平台分佈") {
-                        SegBar(listOf("TIME" to "時長", "NOTIF" to "訊息"), mode, setMode)
+                        SegBar(listOf("NOTIF" to "訊息", "TIME" to "時長"), mode, setMode)
                     }
                     val total = if (mode == "TIME") totalTimeSec.toFloat() else totalNotifs.toFloat()
                     appStats.forEach { stat ->
@@ -3316,7 +3740,7 @@ fun OverviewView(viewModel: RelateViewModel) {
                             name = stat.appName,
                             dotColor = AppColors.AppBrands[stat.appName] ?: AppColors.TextSecondary,
                             progress = if (total > 0f) v / total else 0f,
-                            primary = if (mode == "TIME") formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount}",
+                            primary = if (mode == "TIME") formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount} 則",
                             secondary = if (mode == "TIME") "${stat.incomingCount} 則" else formatDuration(stat.totalDurationSeconds),
                             onClick = {
                                 val rs = filteredRecords.filter { it.appName == stat.appName }
@@ -3331,10 +3755,10 @@ fun OverviewView(viewModel: RelateViewModel) {
         // ── 標籤分佈（表格，取代原本的橫向卡片） ──
         if (catStats.isNotEmpty()) {
             item {
-                val (showTime, setShowTime) = remember { mutableStateOf(true) }
+                val (showTime, setShowTime) = remember { mutableStateOf(false) }
                 Panel {
                     SectionHead("標籤分佈") {
-                        SegBar(listOf("T" to "時長", "M" to "訊息"), if (showTime) "T" else "M") { setShowTime(it == "T") }
+                        SegBar(listOf("M" to "訊息", "T" to "時長"), if (showTime) "T" else "M") { setShowTime(it == "T") }
                     }
                     val maxV = catStats.maxOfOrNull { if (showTime) it.totalDurationSeconds.toFloat() else it.incomingCount.toFloat() }?.coerceAtLeast(1f) ?: 1f
                     val sorted = if (showTime) catStats.sortedByDescending { it.totalDurationSeconds } else catStats.sortedByDescending { it.incomingCount }
@@ -3344,7 +3768,7 @@ fun OverviewView(viewModel: RelateViewModel) {
                             name = stat.category.label,
                             dotColor = stat.category.color,
                             progress = v / maxV,
-                            primary = if (showTime) formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount}",
+                            primary = if (showTime) formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount} 則",
                             secondary = if (showTime) "${stat.incomingCount} 則" else formatDuration(stat.totalDurationSeconds),
                             onClick = {
                                 val rs = filteredRecords.filter { r ->
@@ -3403,15 +3827,18 @@ fun OverviewView(viewModel: RelateViewModel) {
         if (leaderboard.isNotEmpty()) {
             item {
                 Panel {
-                    SectionHead("互動對象 Top 5")
-                    val maxD = leaderboard.maxOfOrNull { it.totalDurationSeconds }?.toFloat()?.coerceAtLeast(1f) ?: 1f
-                    leaderboard.take(5).forEachIndexed { i, stat ->
+                    SectionHead("互動對象 Top 5") {
+                        Text("點擊可設定標籤", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                    }
+                    val byMsg = leaderboard.sortedByDescending { it.msgCount }
+                    val maxD = byMsg.maxOfOrNull { it.msgCount }?.toFloat()?.coerceAtLeast(1f) ?: 1f
+                    byMsg.take(5).forEachIndexed { i, stat ->
                         DataRow(
                             name = stat.unifiedName,
                             dotColor = if (stat.isGroup) AppColors.GroupText else stat.category.color,
-                            progress = stat.totalDurationSeconds / maxD,
-                            primary = formatDuration(stat.totalDurationSeconds),
-                            secondary = "${stat.msgCount} 則",
+                            progress = stat.msgCount / maxD,
+                            primary = "${stat.msgCount} 則",
+                            secondary = formatDuration(stat.totalDurationSeconds),
                             badge = {
                                 Text("${i + 1}", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextTertiary,
                                     modifier = Modifier.width(12.dp), textAlign = TextAlign.Center)
@@ -3441,6 +3868,16 @@ fun OverviewView(viewModel: RelateViewModel) {
         }
     }
         ScrollTopButton(listState)
+    }
+
+    if (showQuickClassify) {
+        QuickClassifyDialog(
+            pending = leaderboard.filter { it.category.id == ContactCategory.OTHER.id && it.msgCount >= 3 }
+                .sortedByDescending { it.msgCount },
+            categories = availableCats,
+            onAssign = { name, catId -> viewModel.setCategory(name, catId) },
+            onDismiss = { showQuickClassify = false }
+        )
     }
 
     quickTagTarget?.let { target ->
@@ -3692,12 +4129,12 @@ fun RankRow(rank: Int, stat: SenderStat, maxScore: Float, sortType: SortType, on
             }
         }
 
-        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(min = 56.dp)) {
-            Text(formatDuration(stat.totalDurationSeconds), fontSize = T.Body, fontWeight = FontWeight.Black,
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(min = 58.dp)) {
+            Text("${stat.msgCount} 則", fontSize = T.Body, fontWeight = FontWeight.Black,
                 color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
             Text(
                 buildString {
-                    append("${stat.msgCount} 則")
+                    append(formatDuration(stat.totalDurationSeconds))
                     if (stat.callCount > 0) append(" · ${stat.callCount} 通")
                 },
                 fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false
@@ -3755,7 +4192,7 @@ fun LeaderboardView(viewModel: RelateViewModel) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 SegBar(
-                    listOf(SortType.TIME.name to "時長", SortType.MESSAGES.name to "訊息"),
+                    listOf(SortType.MESSAGES.name to "訊息", SortType.TIME.name to "時長"),
                     sort.name
                 ) { viewModel.setSortType(SortType.valueOf(it)) }
 
