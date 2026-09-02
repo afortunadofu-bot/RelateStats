@@ -3131,11 +3131,13 @@ fun SegBar(options: List<Pair<String, String>>, current: String, onSelect: (Stri
 /** KPI 方塊 */
 @Composable
 fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier: Modifier = Modifier) {
-    // 固定高度：同一列的方塊若因為有沒有副標而高度不同，看起來就是跑版。
-    // 高度必須容得下 標籤 + 主數字 + 副標三行，太緊會把數字下緣裁掉。
+    // ⚠️ 不可以寫死 .height()。方塊高度是 dp、裡面的字是 sp，
+    //    使用者把系統字體放大時 sp 會變大、dp 不會，第三行就會被裁掉。
+    //    改成內容決定高度；同列要等高，由外層 Row 的 IntrinsicSize.Min + fillMaxHeight 負責。
     Column(
         modifier = modifier
-            .height(76.dp)
+            .fillMaxHeight()
+            .heightIn(min = 76.dp)
             .background(AppColors.Surface, RoundedCornerShape(D.Radius))
             .border(1.dp, AppColors.BorderLight, RoundedCornerShape(D.Radius))
             .padding(horizontal = 10.dp, vertical = 8.dp)
@@ -3145,12 +3147,13 @@ fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier:
             Spacer(modifier = Modifier.width(5.dp))
             Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        Spacer(modifier = Modifier.height(6.dp))
         Spacer(modifier = Modifier.weight(1f))
         // 這裡的值可能是聯絡人名稱，長度不可控，必須省略而不是溢出裁切。
-        // lineHeight 要略大於字級，否則中文的下緣會被切掉。
-        Text(value, fontSize = T.KpiSm, lineHeight = 22.sp, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
+        // 不指定 lineHeight：用字型自己的行高才含得下中文下緣，寫死反而會裁字。
+        Text(value, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-        Text(sub ?: "", fontSize = T.Micro, lineHeight = 13.sp, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(sub ?: "", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -3829,11 +3832,13 @@ fun OverviewView(viewModel: RelateViewModel) {
         // ── KPI 兩列四格 ──
         item {
             Column(verticalArrangement = Arrangement.spacedBy(D.Gap)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
+                // IntrinsicSize.Min：先量兩格各自需要的高度，取較高者當整列高度。
+                // 這樣字體放大時整列一起長高，既不裁字也不會兩格高低不齊。
+                Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
                     KpiTile("接收訊息", "$totalNotifs 則", "來自 ${leaderboard.size} 位對象", AppColors.Positive, Modifier.weight(1f))
                     KpiTile("停留時間", formatDuration(totalTimeSec), if (screenPct > 0) "佔手機用量 $screenPct%" else "開啟聊天室的時間", AppColors.ActiveBlue, Modifier.weight(1f))
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
+                Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
                     val topByMsg = leaderboard.maxByOrNull { it.msgCount }
                     KpiTile("訊息最多", topByMsg?.unifiedName ?: "—", topByMsg?.let { "${it.msgCount} 則" } ?: "尚無資料",
                         AppColors.FamilyText, Modifier.weight(1f))
