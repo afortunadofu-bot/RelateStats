@@ -3,7 +3,7 @@
 Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通知監聽** 與 **無障礙服務** 兩個引擎，
 統計你在通訊軟體上對每個人投入的「注意力停留時間」與「互動頻率」，並做社交人格與數位健康分析。
 
-- **目前版本**：v2.0（versionCode 10）
+- **目前版本**：v2.1（versionCode 11）
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -63,7 +63,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 **標籤**
 
-預設 家人／另一半／朋友／工作／未分類／系統通知，全部可改名、換色、排序、刪除、新增。
+預設 家人／伴侶／朋友／工作／未分類／系統通知，全部可改名、換色、排序、刪除、新增。
 
 **備份**
 
@@ -133,8 +133,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   呼叫端會在回傳後立刻改資料，否則快照會拍到已刪除後的狀態。
 - `Notification.MessagingStyle` 規格：**`sender` 為 null 代表訊息由使用者本人發出**，
   必須排除，否則自己發的訊息會被算成收到的。
-- **群組判定不可用 `conversationTitle` 是否存在來推斷** —— IG 連一對一私訊都會帶，
-  會導致所有私訊被併成同一個「群組」。只能信 `android.isGroupConversation` 或多發言人。
+- **群組判定「只」能信 `android.isGroupConversation`**。不可用 `conversationTitle`
+  是否存在來推斷（IG 連一對一私訊都會帶），**也不可用「多位不同發言人」**——
+  Instagram 會把多個不同的一對一私訊打包進同一則通知，發言人自然不只一位，
+  誤判會把不同的人全部併成同一個群組（v2.1 修）。
+- **`produceState` 的 key 不可直接放會頻繁變動的大型集合**。通知服務持續寫入時
+  `_interactions` 每次都是新實例，會讓整包統計不斷取消重啟直到 ANR。
+  producer 開頭要 `delay(300)` 讓連續變動合併成一次計算。
 - 修改後請務必跑一次 `assembleDebug` 確認可建置，再 commit。
 - **UI 一律使用 `T`（字級）與 `D`（間距）代幣**，不要再寫死 sp / dp 數值，否則密度會再度失控。
 - **長列表必須用 `items` / `itemsIndexed` 逐列渲染**，不可塞進單一 `item` 的 Column ——
@@ -161,6 +166,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v2.1 | 2026-08-27 | 修閃退（重算風暴）、IG 群組誤判、常用詞演算法、崩潰記錄器 |
 | v2.0 | 2026-08-27 | 修卡頓（統計移出主執行緒）、訊息優先於時長、洞察重排與擴充、快速分類 |
 | v1.9 | 2026-08-27 | 修正 Surface 吞點擊導致五顆按鈕失效、儀錶板版面、服務警示、偵測診斷 |
 | v1.8 | 2026-08-27 | 新增「洞察」分頁（12 種統計）、時長偵測三修、預設區間與人格降級 |
@@ -205,4 +211,5 @@ docs/
 - [ ] Google 帳號登入 + Drive API 同步（卡在需要專案擁有者申請 OAuth 憑證）
 - [ ] 自動備份的密碼欄位 `autoBackupPassword` 已存在但 UI 未開放，匯出目前一律不加密
 - [ ] 常用詞尚未支援依聯絡人拆分（目前只有全域統計）
+- [ ] 無法阻止 Android 在重新安裝時停用無障礙服務（系統設計如此，需使用者手動重開）
 - [ ] MainActivity.kt 已達 3,600 行，後續可考慮拆檔

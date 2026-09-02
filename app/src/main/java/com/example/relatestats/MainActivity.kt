@@ -182,7 +182,7 @@ data class ContactCategory(val id: String, val label: String, val colorInt: Int,
         val OTHER = ContactCategory("OTHER", "未分類", AppColors.OtherText.toArgb(), AppColors.OtherBg.toArgb())
         // IG 讚／追蹤者／串文推播等非真人通知統一歸到這裡，排行預設不顯示
         val SYSTEM = ContactCategory("SYSTEM", "系統通知", AppColors.GroupText.toArgb(), AppColors.GroupBg.toArgb())
-        val PARTNER = ContactCategory("PARTNER", "另一半", AppColors.PartnerText.toArgb(), AppColors.PartnerBg.toArgb())
+        val PARTNER = ContactCategory("PARTNER", "伴侶", AppColors.PartnerText.toArgb(), AppColors.PartnerBg.toArgb())
 
         // 首次啟動的預設清單。名稱與顏色之後都可以在「標籤管理」裡改，
         // 但 OTHER / SYSTEM 這兩個 id 程式內部會用到，不可刪除。
@@ -249,14 +249,42 @@ private val WORD_STOPWORDS = setOf(
     "我們", "你們", "他們", "這個", "那個", "一個", "就是", "不是", "沒有", "可是", "所以", "因為", "但是", "然後", "如果", "還有", "已經", "這樣", "那樣", "什麼", "怎麼"
 )
 
-/** 只累計詞頻，不保留原文。中文用雙字組，英數用單字。 */
+/**
+ * 「已傳送貼圖」「傳送了一張照片」這類是 LINE / IG 自動產生的系統文字，
+ * 不是使用者真的打的字。整句符合就完全不計入詞頻，
+ * 否則詞頻榜會被「傳送 / 送了 / 貼圖 / 了貼 / 照片」洗版。
+ */
+private val SYSTEM_PHRASE = Regex(
+    "^(您|你|我)?\\s*(已|剛剛)?\\s*(傳送|傳了|送出|分享|收回|貼上)了?\\s*" +
+    "(一[張個則段份]|一則)?\\s*" +
+    "(貼圖|照片|圖片|影片|檔案|文件|語音訊息|語音|音檔|位置|訊息|連結|禮物|紅包|名片)\\s*$"
+)
+private val SYSTEM_HINT = Regex("(已傳送|傳送了|收回了訊息|已收回|正在輸入|加入了聊天|退出了聊天|邀請|已讀)")
+
+fun isSystemGeneratedText(text: String): Boolean {
+    val t = text.trim()
+    if (t.isEmpty()) return true
+    if (SYSTEM_PHRASE.containsMatchIn(t)) return true
+    // 很短又含系統字眼，幾乎一定是系統訊息
+    return t.length <= 14 && SYSTEM_HINT.containsMatchIn(t)
+}
+
+/**
+ * 只累計詞頻，不保留原文。
+ * 中文同時產生 2/3/4 字組合，顯示時再依使用者選擇的字數過濾 ——
+ * 因為只存詞頻不存原文，事後無法重新切詞，必須先都算好。
+ */
 fun tokenizeForWordFreq(text: String): List<String> {
     if (text.isBlank() || text.length > 500) return emptyList()
+    if (isSystemGeneratedText(text)) return emptyList()
     val out = ArrayList<String>()
     Regex("[A-Za-z][A-Za-z']{1,15}").findAll(text).forEach { out.add(it.value.lowercase()) }
     Regex("[\\u4e00-\\u9fa5]{2,}").findAll(text).forEach { m ->
         val s = m.value
-        for (i in 0..s.length - 2) out.add(s.substring(i, i + 2))
+        for (n in 2..4) {
+            if (s.length < n) break
+            for (i in 0..s.length - n) out.add(s.substring(i, i + n))
+        }
     }
     return out.filter { it.length >= 2 && it !in WORD_STOPWORDS }
 }
@@ -456,6 +484,46 @@ object DataRepository {
     // 自動清理掉的異常紀錄數（設定頁顯示用）
     val lastCleanupRemoved = MutableStateFlow(0)
 
+    // 服務心跳：讓使用者一眼看出無障礙服務到底還活著沒有
+    val lastServiceBeat = MutableStateFlow(0L)
+    fun beat() { lastServiceBeat.value = System.currentTimeMillis() }
+
+    private const val CRASH_FILE = "RelateStats_LastCrash.txt"
+
+    /**
+     * 攔截未捕捉例外並寫檔。
+     * 沒有裝置可以看 logcat 時，這是唯一能問出閃退原因的方法；
+     * 寫完一定要交回原本的 handler，否則系統無法正常結束程序。
+     */
+    fun installCrashReporter(context: Context) {
+        val ctx = context.applicationContext
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, err ->
+            runCatching {
+                val sw = java.io.StringWriter()
+                err.printStackTrace(java.io.PrintWriter(sw))
+                val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+                File(ctx.filesDir, CRASH_FILE).writeText(
+                    "時間：$stamp\n版本：${BuildConfig.VERSION_NAME}\n執行緒：${thread.name}\n\n$sw"
+                )
+            }
+            prev?.uncaughtException(thread, err)
+        }
+    }
+
+    fun readLastCrash(): String? {
+        val ctx = appContext ?: return null
+        return runCatching {
+            val f = File(ctx.filesDir, CRASH_FILE)
+            if (f.exists()) f.readText() else null
+        }.getOrNull()
+    }
+
+    fun clearLastCrash() {
+        val ctx = appContext ?: return
+        runCatching { File(ctx.filesDir, CRASH_FILE).delete() }
+    }
+
     // 偵測診斷用的環狀日誌。無法在開發機上重現使用者的 App 版本時，
     // 這是唯一能問出「服務到底看到什麼」的方法。
     val debugLog = MutableStateFlow<List<String>>(emptyList())
@@ -472,7 +540,8 @@ object DataRepository {
 
     private val _wordFreq = MutableStateFlow<Map<String, Int>>(emptyMap())
     val wordFreq: StateFlow<Map<String, Int>> = _wordFreq.asStateFlow()
-    private const val MAX_WORDS = 3000
+    // 同時存 2/3/4 字組合，上限需放大
+    private const val MAX_WORDS = 9000
 
     @Volatile
     private var prefs: SharedPreferences? = null
@@ -1125,12 +1194,13 @@ class RelateNotificationService : NotificationListenerService() {
             !s.isNullOrBlank() && (selfName == null || !s.equals(selfName, ignoreCase = true))
         }
 
-        // ⚠️ 群組判定只能信官方旗標或「多位不同發言人」。
-        // 不能用 conversationTitle 是否存在來判斷 —— IG 連一對一私訊都會帶
-        // conversationTitle，那會讓所有 IG 私訊被當成同一個群組，
-        // 對話對象全部被塞進 subSender、併成同一個人。
-        val distinctSenders = incoming.mapNotNull { it.sender?.trim() }.filter { it.isNotBlank() }.distinct()
-        val isGroupFlag = extras.getBoolean("android.isGroupConversation", false) || distinctSenders.size >= 2
+        // ⚠️ 群組判定「只」能信官方旗標 android.isGroupConversation。
+        //  - 不能用 conversationTitle 是否存在：IG 連一對一私訊都會帶。
+        //  - 也不能用「多位不同發言人」：Instagram 會把多個不同私訊串
+        //    打包進同一則通知，發言人自然不只一位，但那是好幾段一對一對話，
+        //    不是群組。誤判會讓不同的人被併成同一個「群組」。
+        //    非群組時每則訊息各自歸戶到自己的發話者即可正確拆開。
+        val isGroupFlag = extras.getBoolean("android.isGroupConversation", false)
 
         if (incoming.isNotEmpty()) {
             val convName = convTitle?.trim()?.takeIf { it.isNotBlank() }
@@ -1349,6 +1419,8 @@ class ChatTrackerService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         DataRepository.init(applicationContext)
+        DataRepository.beat()
+        DataRepository.logDetect("無障礙服務已連線")
         // 關螢幕／解鎖時強制結算，避免整夜掛在聊天室
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
@@ -1407,6 +1479,7 @@ class ChatTrackerService : AccessibilityService() {
         }
 
         missStreak = 0
+        DataRepository.beat()
         DataRepository.logDetect("$appName 記錄中 · $name · viewId=${hit.fromViewId} · 輸入框=${hit.hasEditText}")
         enterChat(name!!, appName)
     }
@@ -2041,6 +2114,7 @@ class RelateViewModel : ViewModel() {
         val coverage: CoverageStat = CoverageStat(0, 0, 0, 0),
         val split: GroupSplit = GroupSplit(0L, 0L, 0, 0),
         val extras: ExtraStats = ExtraStats(),
+        val persona: SocialPersona = SocialPersona.ALL_TYPES[0],
         val ready: Boolean = false
     )
 
@@ -2064,6 +2138,7 @@ class RelateViewModel : ViewModel() {
             coverage = getCoverage(records, filter, weekStart),
             split = groupSplitOf(scoped),
             extras = extraStatsOf(scoped, records, filter, weekStart),
+            persona = getSocialPersona(scoped, DateFilter(FilterType.ALL)),
             ready = true
         )
     }
@@ -2206,6 +2281,9 @@ class RelateViewModel : ViewModel() {
     fun previewRetagTargets() = DataRepository.previewRetagTargets()
     val debugLog = DataRepository.debugLog
     fun clearDetectLog() = DataRepository.clearDetectLog()
+    val lastServiceBeat = DataRepository.lastServiceBeat
+    fun readLastCrash() = DataRepository.readLastCrash()
+    fun clearLastCrash() = DataRepository.clearLastCrash()
     fun setCategories(names: Collection<String>, categoryId: String) = DataRepository.updateCategories(names, categoryId)
     fun updateCategoryMeta(id: String, label: String, colorInt: Int, bgColorInt: Int) = DataRepository.updateCategoryMeta(id, label, colorInt, bgColorInt)
     fun deleteCategory(id: String) = DataRepository.deleteCategory(id)
@@ -2281,6 +2359,7 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = true
         }
 
+        DataRepository.installCrashReporter(applicationContext)
         DataRepository.init(applicationContext)
         setContent {
             MaterialTheme {
@@ -3052,10 +3131,11 @@ fun SegBar(options: List<Pair<String, String>>, current: String, onSelect: (Stri
 /** KPI 方塊 */
 @Composable
 fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier: Modifier = Modifier) {
-    // 固定高度：同一列的方塊若因為有沒有副標而高度不同，看起來就是跑版
+    // 固定高度：同一列的方塊若因為有沒有副標而高度不同，看起來就是跑版。
+    // 高度必須容得下 標籤 + 主數字 + 副標三行，太緊會把數字下緣裁掉。
     Column(
         modifier = modifier
-            .height(64.dp)
+            .height(76.dp)
             .background(AppColors.Surface, RoundedCornerShape(D.Radius))
             .border(1.dp, AppColors.BorderLight, RoundedCornerShape(D.Radius))
             .padding(horizontal = 10.dp, vertical = 8.dp)
@@ -3066,10 +3146,11 @@ fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier:
             Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(modifier = Modifier.weight(1f))
-        // 這裡的值可能是聯絡人名稱，長度不可控，必須省略而不是溢出裁切
-        Text(value, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
+        // 這裡的值可能是聯絡人名稱，長度不可控，必須省略而不是溢出裁切。
+        // lineHeight 要略大於字級，否則中文的下緣會被切掉。
+        Text(value, fontSize = T.KpiSm, lineHeight = 22.sp, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-        Text(sub ?: "", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(sub ?: "", fontSize = T.Micro, lineHeight = 13.sp, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -3100,7 +3181,7 @@ fun DataRow(
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(end = 8.dp)
         )
-        Box(modifier = Modifier.width(46.dp).height(5.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
+        Box(modifier = Modifier.width(64.dp).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
             Box(modifier = Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(dotColor))
         }
         Spacer(modifier = Modifier.width(8.dp))
@@ -3189,36 +3270,56 @@ fun ContributionGrid(data: List<Pair<Long, Int>>) {
     val cells: List<Pair<Long, Int>?> = remember(data, firstDow) {
         List(firstDow) { null } + data
     }
-    val weekLabels = listOf("日", "", "二", "", "四", "", "六")
+    val weekLabels = listOf("日", "一", "二", "三", "四", "五", "六")
+
+    var picked by remember { mutableStateOf<Pair<Long, Int>?>(null) }
+    val dayFmt = remember { SimpleDateFormat("M/d（E）", Locale.TAIWAN) }
 
     Column {
-        Text("每一格是一天，顏色越深代表互動越多", fontSize = T.Micro, color = AppColors.TextTertiary)
+        Text("每一格是一天，顏色越深代表互動越多；點格子看當天數字",
+            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
         Spacer(modifier = Modifier.height(8.dp))
         Row(modifier = Modifier.fillMaxWidth()) {
-            // 星期標籤
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.width(14.dp)) {
+            // 星期標籤：欄寬與字級都要夠，否則中文會糊成一團
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.width(20.dp)) {
                 weekLabels.forEach {
-                    Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) {
-                        Text(it, fontSize = 7.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                    Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.CenterStart) {
+                        Text(it, fontSize = 9.sp, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                     }
                 }
             }
-            Spacer(modifier = Modifier.width(3.dp))
+            Spacer(modifier = Modifier.width(4.dp))
             Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 cells.chunked(7).forEach { week ->
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         week.forEach { cell ->
                             val c = cell?.second
+                            val on = cell != null && picked?.first == cell.first
                             val bg = when {
                                 cell == null -> Color.Transparent
                                 c == 0 -> AppColors.BorderLight.copy(alpha = 0.5f)
                                 else -> AppColors.Positive.copy(alpha = 0.25f + 0.75f * (c!!.toFloat() / max))
                             }
-                            Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).background(bg, RoundedCornerShape(2.dp)))
+                            Box(
+                                modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                                    .background(bg, RoundedCornerShape(2.dp))
+                                    .then(if (on) Modifier.border(1.5.dp, AppColors.BrandPrimary, RoundedCornerShape(2.dp)) else Modifier)
+                                    .then(if (cell != null) Modifier.clickable { picked = if (on) null else cell } else Modifier)
+                            )
                         }
                         repeat(7 - week.size) { Spacer(modifier = Modifier.fillMaxWidth().aspectRatio(1f)) }
                     }
                 }
+            }
+        }
+        picked?.let { (ts, count) ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
+                horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(dayFmt.format(Date(ts)), fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                Text("$count 次互動", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.Positive, maxLines = 1, softWrap = false)
             }
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -3282,7 +3383,8 @@ fun InsightsView(viewModel: RelateViewModel) {
         RelateViewModel.InsightsBundle(),
         records, filter, weekStartDay, categoriesMap, aliases, availableCats
     ) {
-        value = RelateViewModel.InsightsBundle()
+        delay(300)
+        if (value.ready) value = value.copy(ready = false)
         value = withContext(Dispatchers.Default) {
             viewModel.buildInsights(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
         }
@@ -3537,7 +3639,23 @@ fun InsightsView(viewModel: RelateViewModel) {
                 }
             }
 
-            // ── 15. 關係變化 ──
+            // ── 15. 社交人格 ──
+            item {
+                val persona = b.persona
+                Panel {
+                    SectionHead("社交人格")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(persona.emoji, fontSize = 24.sp)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(persona.title, fontSize = T.Title, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(persona.description.replace("\n", "　"), fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
+                        }
+                    }
+                }
+            }
+
+            // ── 16. 關係變化 ──
             if (b.churn.newcomers.isNotEmpty() || b.churn.dormant.isNotEmpty()) {
                 item {
                     Panel {
@@ -3586,7 +3704,10 @@ fun OverviewView(viewModel: RelateViewModel) {
         RelateViewModel.OverviewBundle(),
         records, filter, weekStartDay, categoriesMap, aliases, availableCats
     ) {
-        value = RelateViewModel.OverviewBundle()
+        // 先等一下再算：新訊息會讓 records 一直換新實例，
+        // 不做合併的話每則訊息都會觸發一次全表重算，直接把 CPU 吃滿。
+        delay(300)
+        if (value.ready) value = value.copy(ready = false)
         value = withContext(Dispatchers.Default) {
             viewModel.buildOverview(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
         }
@@ -3853,27 +3974,19 @@ fun OverviewView(viewModel: RelateViewModel) {
         item { WeekHourHeatmapCard(heatmap) }
         item { TopWordsCard(wordFreq) }
 
-        // 人格降級為頁尾一行：資訊價值不高，不該長期佔據首屏
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth().clickable { setShowPersonaInfo(true) }.padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(persona.emoji, fontSize = 13.sp)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("社交人格 · ${persona.title}", fontSize = T.Label, color = AppColors.TextSecondary,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Text("查看圖鑑", fontSize = T.Micro, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
-            }
-        }
     }
         ScrollTopButton(listState)
     }
 
     if (showQuickClassify) {
+        // 清單必須凍結：每分類一位就會從 leaderboard 消失，
+        // 清單即時縮短會讓 index 指到下一位，等於跳過人。
+        val frozenPending = remember(showQuickClassify) {
+            leaderboard.filter { it.category.id == ContactCategory.OTHER.id && it.msgCount >= 3 }
+                .sortedByDescending { it.msgCount }
+        }
         QuickClassifyDialog(
-            pending = leaderboard.filter { it.category.id == ContactCategory.OTHER.id && it.msgCount >= 3 }
-                .sortedByDescending { it.msgCount },
+            pending = frozenPending,
             categories = availableCats,
             onAssign = { name, catId -> viewModel.setCategory(name, catId) },
             onDismiss = { showQuickClassify = false }
@@ -3962,15 +4075,33 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
 /** 常用詞（只累計詞頻，不保留訊息原文） */
 @Composable
 fun TopWordsCard(wordFreq: Map<String, Int>) {
-    val top = remember(wordFreq) { wordFreq.entries.sortedByDescending { it.value }.take(12).map { it.key to it.value } }
+    // 預設看 3 字：2 字組合太容易切出「送了」「了貼」這種跨詞邊界的碎片
+    var mode by remember { mutableStateOf("3") }
+    val top = remember(wordFreq, mode) {
+        wordFreq.entries.asSequence()
+            .filter { e ->
+                val w = e.key
+                val isCjk = w.all { it.code in 0x4e00..0x9fa5 }
+                when (mode) {
+                    "EN" -> !isCjk
+                    else -> isCjk && w.length == mode.toInt()
+                }
+            }
+            .sortedByDescending { it.value }
+            .take(12).map { it.key to it.value }.toList()
+    }
 
     Panel {
         SectionHead("常用詞") {
-            Text("累計", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+            SegBar(listOf("2" to "2字", "3" to "3字", "4" to "4字", "EN" to "英文"), mode) { mode = it }
         }
         run {
             if (top.isEmpty()) {
-                Text("接收訊息後會在這裡累積常用詞（只統計詞頻，不保留訊息內容）", fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
+                Text(
+                    if (wordFreq.isEmpty()) "接收訊息後會在這裡累積常用詞（只統計詞頻，不保留訊息內容）"
+                    else "這個字數還沒有累積到資料，換一個看看",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp
+                )
                 return@Panel
             }
             val maxCount = top.first().second.coerceAtLeast(1)
@@ -4114,10 +4245,18 @@ fun RankRow(rank: Int, stat: SenderStat, maxScore: Float, sortType: SortType, on
 
         Column(modifier = Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.background(if (stat.isGroup) AppColors.GroupBg else stat.category.bgColor, RoundedCornerShape(4.dp))
+                // 標籤才是使用者要看的資訊；群組只用一個小記號附註，不再蓋掉標籤
+                Box(modifier = Modifier.background(stat.category.bgColor, RoundedCornerShape(4.dp))
                     .padding(horizontal = 5.dp, vertical = 1.dp)) {
-                    Text(if (stat.isGroup) "群" else stat.category.label,
-                        color = accent, fontSize = T.Micro, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    Text(stat.category.label, color = stat.category.color, fontSize = T.Micro,
+                        fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                }
+                if (stat.isGroup) {
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Box(modifier = Modifier.background(AppColors.GroupBg, RoundedCornerShape(3.dp))
+                        .padding(horizontal = 3.dp, vertical = 1.dp)) {
+                        Text("群", color = AppColors.GroupText, fontSize = T.Micro, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    }
                 }
                 Spacer(modifier = Modifier.width(5.dp))
                 Text(stat.unifiedName, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
@@ -4861,7 +5000,10 @@ fun AutoMergeDialog(
 fun DetectionDiagnosticsDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val log by viewModel.debugLog.collectAsState()
+    val beat by viewModel.lastServiceBeat.collectAsState()
     val accOn = remember { isAccessibilityServiceEnabled(context, ChatTrackerService::class.java) }
+    val crash = remember { viewModel.readLastCrash() }
+    val beatFmt = remember { SimpleDateFormat("MM/dd HH:mm:ss", Locale.US) }
 
     AlertDialog(
         containerColor = AppColors.Surface,
@@ -4877,6 +5019,30 @@ fun DetectionDiagnosticsDialog(viewModel: RelateViewModel, onDismiss: () -> Unit
         },
         text = {
             Column {
+                if (crash != null) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(AppColors.WorkBg, RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("上次閃退紀錄", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
+                            Text("清除", fontSize = T.Label, color = AppColors.WorkText, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable { viewModel.clearLastCrash() }.padding(4.dp))
+                        }
+                        Text(crash.lineSequence().take(8).joinToString("\n"),
+                            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 14.sp)
+                        Text("按下方「複製紀錄」會一併複製完整堆疊",
+                            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.7f), modifier = Modifier.padding(top = 4.dp))
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                Text(
+                    "服務最後回報：" + (if (beat > 0) beatFmt.format(Date(beat)) else "本次啟動後尚未回報"),
+                    fontSize = T.Label, fontWeight = FontWeight.Bold,
+                    color = if (beat > 0) AppColors.Positive else AppColors.TextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     "使用方式：先開著這個 App，切到 LINE / Instagram 打開一個聊天室停留幾秒，再回來看下方紀錄。",
                     fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
@@ -4899,7 +5065,11 @@ fun DetectionDiagnosticsDialog(viewModel: RelateViewModel, onDismiss: () -> Unit
         confirmButton = {
             Button(
                 onClick = {
-                    val text = viewModel.debugLog.value.joinToString("\n")
+                    val text = buildString {
+                        viewModel.readLastCrash()?.let { append("=== 上次閃退 ===\n").append(it).append("\n\n") }
+                        append("=== 偵測紀錄 ===\n")
+                        append(viewModel.debugLog.value.joinToString("\n"))
+                    }
                     runCatching {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText("RelateStats 診斷", text))
