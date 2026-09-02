@@ -3219,7 +3219,9 @@ fun StatPair(label: String, value: String, sub: String? = null, modifier: Modifi
     Column(modifier = modifier.background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 7.dp)) {
         Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(value, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-        if (sub != null) Text(sub, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // ⚠️ 副標一定要畫，沒有就畫空字串。這個元件都是兩兩並排，
+        //    只要一格有副標、另一格沒有，兩格高度就會差一行，看起來就是跑版。
+        Text(sub ?: "", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -3284,6 +3286,8 @@ fun ContributionGrid(data: List<Pair<Long, Int>>) {
         Spacer(modifier = Modifier.height(8.dp))
         Row(modifier = Modifier.fillMaxWidth()) {
             // 星期標籤：欄寬與字級都要夠，否則中文會糊成一團
+            // 這裡必須是固定 width：底下的格子用 fillMaxWidth()，
+            // 改成 widthIn 會讓格子撐滿整列寬度。20dp 已容得下放大後的 9sp 中文。
             Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.width(20.dp)) {
                 weekLabels.forEach {
                     Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.CenterStart) {
@@ -3967,7 +3971,7 @@ fun OverviewView(viewModel: RelateViewModel) {
                             secondary = formatDuration(stat.totalDurationSeconds),
                             badge = {
                                 Text("${i + 1}", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextTertiary,
-                                    modifier = Modifier.width(12.dp), textAlign = TextAlign.Center)
+                                    modifier = Modifier.widthIn(min = 12.dp), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
                             },
                             onClick = { quickTagTarget = stat.unifiedName }
                         )
@@ -4053,9 +4057,12 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
                 return@Panel
             }
             Spacer(modifier = Modifier.height(10.dp))
+            // 標籤欄寬必須跟下方時間軸的 padding 用同一個值，否則兩排會對不齊
+            val labelW = 20.dp
             grid.forEachIndexed { d, row ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
-                    Text(days[d], fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.width(14.dp), textAlign = TextAlign.Center)
+                    Text(days[d], fontSize = T.Micro, color = AppColors.TextTertiary,
+                        modifier = Modifier.widthIn(min = labelW), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
                     row.forEach { v ->
                         val alpha = if (v == 0) 0f else 0.2f + 0.8f * (v.toFloat() / max)
                         Box(
@@ -4068,7 +4075,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
                     }
                 }
             }
-            Row(modifier = Modifier.fillMaxWidth().padding(start = 14.dp, top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(modifier = Modifier.fillMaxWidth().padding(start = labelW, top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 listOf("0", "6", "12", "18", "23").forEach {
                     Text(it, fontSize = T.Micro, color = AppColors.TextTertiary)
                 }
@@ -4162,7 +4169,8 @@ fun ContactDetailDialog(stat: SenderStat, hourlyData: Array<HourlyStat>, missedC
                     }
                 }
 
-                Box(modifier = Modifier.fillMaxWidth().height(64.dp).background(AppColors.Background, RoundedCornerShape(8.dp)).padding(10.dp)) {
+                // heightIn 而非 height：裡面是兩行 sp 文字，字體放大時要能長高
+                Box(modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp).background(AppColors.Background, RoundedCornerShape(8.dp)).padding(10.dp)) {
                     if (selectedHour != null) {
                         val hStat = hourlyData[selectedHour!!]
                         val min = hStat.durationSeconds / 60
@@ -4246,7 +4254,8 @@ fun RankRow(rank: Int, stat: SenderStat, maxScore: Float, sortType: SortType, on
     ) {
         Text("$rank", fontSize = T.Label, fontWeight = FontWeight.Black,
             color = if (rank <= 3) AppColors.ActiveBlue else AppColors.TextTertiary,
-            modifier = Modifier.width(18.dp), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
+            // widthIn 而非 width：名次會到三位數，字體再放大就會被切掉
+            modifier = Modifier.widthIn(min = 18.dp), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
 
         Column(modifier = Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5751,7 +5760,8 @@ fun SettingsView(viewModel: RelateViewModel) {
             containerColor = AppColors.Surface, onDismissRequest = { setShowGuideDialog(false) },
             title = { Text("📖 App 核心運作邏輯", fontWeight = FontWeight.Bold) },
             text = {
-                Column(modifier = Modifier.height(350.dp).padding(vertical = 8.dp)) {
+                // heightIn(max)：內容本來就可捲動，固定高度只會在小螢幕/大字體時把按鈕頂掉
+                Column(modifier = Modifier.heightIn(max = 350.dp).padding(vertical = 8.dp)) {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         item { Text("1. 接收訊息怎麼算？", fontWeight = FontWeight.Bold, color = AppColors.TextPrimary) }
                         item { Text("依賴「通知存取」權限。只要對方傳訊息來跳出通知，App 就會在背景攔截，計算字數，並自動切除 IG/LINE 煩人的系統標籤。", fontSize = 13.sp, color = AppColors.TextSecondary) }
