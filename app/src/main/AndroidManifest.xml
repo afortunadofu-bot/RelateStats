@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+    <!-- 只用於「設定 → 匯入手機通話紀錄」，使用者主動按才會要求授權 -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
