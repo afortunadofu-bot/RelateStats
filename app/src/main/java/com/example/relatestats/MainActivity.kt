@@ -4173,6 +4173,7 @@ fun InfoDot(title: String, body: String, tint: Color = AppColors.TextTertiary) {
  * 佔比用角度比用長條直覺：一眼看得出誰過半。
  * 但小切片在圓餅上讀不出來，所以右邊一定要配圖例與百分比。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DonutChart(
     slices: List<Triple<String, Long, Color>>,
@@ -4181,50 +4182,108 @@ fun DonutChart(
     onSliceClick: ((String) -> Unit)? = null
 ) {
     val total = slices.sumOf { it.second }.coerceAtLeast(1L)
+    // 點扇形＝預覽（中心顯示該項數字），長按＝下鑽。
+    // 只有圖例能點的話，圖本身看起來像裝飾品。
+    var picked by remember(slices.size) { mutableStateOf<Int?>(null) }
+
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(modifier = Modifier.size(116.dp), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier.size(116.dp)
+                .pointerInput(slices) {
+                    fun hit(offset: Offset): Int? {
+                        val cx = size.width / 2f
+                        val cy = size.height / 2f
+                        val dx = offset.x - cx
+                        val dy = offset.y - cy
+                        val r = kotlin.math.sqrt(dx * dx + dy * dy)
+                        val outer = minOf(size.width, size.height) / 2f
+                        // 圓環內外緣之外的點擊不算（中間的空心與圓外都略過）
+                        if (r > outer || r < outer * 0.45f) return null
+                        // 從 12 點鐘方向順時針量角度，跟繪圖的 startAngle = -90 對齊
+                        var deg = Math.toDegrees(kotlin.math.atan2(dy.toDouble(), dx.toDouble())).toFloat() + 90f
+                        if (deg < 0f) deg += 360f
+                        var acc = 0f
+                        slices.forEachIndexed { i, sl ->
+                            val sweep = (sl.second.toFloat() / total) * 360f
+                            if (deg >= acc && deg < acc + sweep) return i
+                            acc += sweep
+                        }
+                        return null
+                    }
+                    detectTapGestures(
+                        onTap = { off -> hit(off)?.let { i -> picked = if (picked == i) null else i } },
+                        onLongPress = { off -> hit(off)?.let { i -> onSliceClick?.invoke(slices[i].first) } }
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val stroke = size.minDimension * 0.22f
                 val inset = stroke / 2f
                 var startAngle = -90f
-                slices.forEach { (_, v, c) ->
-                    val sweep = (v.toFloat() / total) * 360f
+                slices.forEachIndexed { i, sl ->
+                    val sweep = (sl.second.toFloat() / total) * 360f
                     if (sweep > 0f) {
+                        val on = picked == i
                         drawArc(
-                            color = c, startAngle = startAngle, sweepAngle = sweep - 1.2f, useCenter = false,
+                            color = if (picked == null || on) sl.third else sl.third.copy(alpha = 0.35f),
+                            startAngle = startAngle, sweepAngle = sweep - 1.2f, useCenter = false,
                             topLeft = Offset(inset, inset),
                             size = Size(size.width - stroke, size.height - stroke),
-                            style = Stroke(width = stroke, cap = StrokeCap.Butt)
+                            style = Stroke(width = if (on) stroke * 1.25f else stroke, cap = StrokeCap.Butt)
                         )
                     }
                     startAngle += sweep
                 }
             }
+            val p = picked
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(centerValue, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                Text(centerLabel, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                if (p != null && p in slices.indices) {
+                    val sl = slices[p]
+                    Text("${((sl.second.toFloat() / total) * 100).toInt()}%", fontSize = T.KpiSm,
+                        fontWeight = FontWeight.Black, color = sl.third, maxLines = 1, softWrap = false)
+                    Text(sl.first, fontSize = T.Micro, color = AppColors.TextSecondary,
+                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                } else {
+                    Text(centerValue, fontSize = T.KpiSm, fontWeight = FontWeight.Black,
+                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    Text(centerLabel, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                }
             }
         }
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            slices.take(6).forEach { (name, v, c) ->
+            slices.take(6).forEachIndexed { i, sl ->
+                val (name, v, c) = sl
                 val pct = ((v.toFloat() / total) * 100).toInt()
+                val on = picked == i
                 Row(
                     modifier = Modifier.fillMaxWidth()
-                        .let { m -> if (onSliceClick != null) m.clip(RoundedCornerShape(6.dp)).clickable { onSliceClick(name) } else m }
-                        .padding(vertical = 3.dp),
+                        .clip(RoundedCornerShape(6.dp))
+                        .let { m ->
+                            if (onSliceClick != null) m.combinedClickable(
+                                onClick = { picked = if (on) null else i },
+                                onLongClick = { onSliceClick(name) }
+                            ) else m
+                        }
+                        .padding(vertical = 3.dp, horizontal = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(c))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(name, fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    Text("$pct%", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    Text(name, fontSize = T.Label,
+                        color = if (on) c else AppColors.TextPrimary,
+                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Text("$pct%", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = if (on) c else AppColors.TextPrimary, maxLines = 1, softWrap = false)
                 }
             }
             if (slices.size > 6) {
                 Text("＋其他 ${slices.size - 6} 項", fontSize = T.Micro, color = AppColors.TextTertiary)
             }
+            Text("點看比例 · 長按看是誰", fontSize = T.Micro, color = AppColors.TextTertiary,
+                modifier = Modifier.padding(top = 2.dp))
         }
     }
 }
@@ -4295,28 +4354,32 @@ fun DataRow(
     onClick: (() -> Unit)? = null
 ) {
     // 名稱靠左、長條置中、數值靠右的單列表格。
-    // 舊版把長條放在名稱底下、數值另起一欄，中間留下大片空白，看起來像破版。
+    // ⚠️ 這個元件被平台分佈、標籤分佈、訊息長度、Top 5、聯絡人詳情共用，
+    //    高度改一次全部跟著改。主／次數值以前上下疊成兩行、外加 7dp 上下留白，
+    //    一列就要 ~39dp，五六列就吃掉半個螢幕。改成同一行並排 + 4dp 留白，
+    //    一列 ~24dp，資訊完全沒少。
     Row(
         modifier = Modifier.fillMaxWidth()
             .let { if (onClick != null) it.clickable { onClick() } else it }
-            .padding(vertical = 7.dp),
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-        Spacer(modifier = Modifier.width(7.dp))
+        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(dotColor))
+        Spacer(modifier = Modifier.width(6.dp))
         badge?.let { it(); Spacer(modifier = Modifier.width(4.dp)) }
         Text(
             name, fontSize = T.Body, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(end = 8.dp)
+            modifier = Modifier.weight(1f).padding(end = 6.dp)
         )
-        Box(modifier = Modifier.width(64.dp).height(6.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
+        Box(modifier = Modifier.width(48.dp).height(5.dp).clip(RoundedCornerShape(3.dp)).background(AppColors.Background)) {
             Box(modifier = Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(dotColor))
         }
         Spacer(modifier = Modifier.width(8.dp))
-        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(min = 56.dp)) {
+        Row(verticalAlignment = Alignment.Bottom) {
             Text(primary, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
             if (secondary != null) {
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(secondary, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
             }
         }
@@ -5724,10 +5787,34 @@ fun ContactDetailDialog(
                 if (insight.weekly.any { it.second > 0 }) {
                     DetailHead("近 8 週訊息數")
                     val maxW = insight.weekly.maxOf { it.second }.coerceAtLeast(1)
+                    // 跟其他圖表一致：點下去看得到那一週的實際數字
+                    var pickedWeek by remember { mutableStateOf<Int?>(null) }
+                    Box(modifier = Modifier.fillMaxWidth().heightIn(min = 20.dp), contentAlignment = Alignment.CenterStart) {
+                        val pw = pickedWeek
+                        if (pw != null && pw in insight.weekly.indices) {
+                            val (lbl, n) = insight.weekly[pw]
+                            Text("$lbl · $n 則", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                        } else {
+                            Text("點長條看那一週", fontSize = T.Micro, color = AppColors.TextTertiary)
+                        }
+                    }
                     Row(modifier = Modifier.fillMaxWidth().height(72.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        insight.weekly.forEach { (_, n) ->
-                            Box(modifier = Modifier.weight(1f).fillMaxHeight((n.toFloat() / maxW).coerceIn(0.03f, 1f))
-                                .background(if (n > 0) AppColors.ActiveBlue else AppColors.BorderLight, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))
+                        insight.weekly.forEachIndexed { wi, pair ->
+                            val n = pair.second
+                            val on = pickedWeek == wi
+                            // 整根欄位可點，矮的那幾週才點得到
+                            Column(
+                                modifier = Modifier.weight(1f).fillMaxHeight()
+                                    .clickable { pickedWeek = if (on) null else wi },
+                                verticalArrangement = Arrangement.Bottom
+                            ) {
+                                Box(modifier = Modifier.fillMaxWidth().fillMaxHeight((n.toFloat() / maxW).coerceIn(0.03f, 1f))
+                                    .background(
+                                        if (on) AppColors.BrandPrimary else if (n > 0) AppColors.ActiveBlue else AppColors.BorderLight,
+                                        RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)
+                                    ))
+                            }
                         }
                     }
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
