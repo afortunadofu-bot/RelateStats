@@ -747,6 +747,13 @@ object DataRepository {
         }.getOrDefault(emptyList())
 
         _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
+        _blockedNames.value = runCatching { p.getStringSet("blocked_names", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
+        _deletedNames.value = runCatching {
+            (p.getStringSet("deleted_names", emptySet()) ?: emptySet()).mapNotNull { line ->
+                val i = line.lastIndexOf("|=|")
+                if (i > 0) line.substring(0, i) to (line.substring(i + 3).toLongOrNull() ?: 0L) else null
+            }.toMap()
+        }.getOrDefault(emptyMap())
         _categories.value = runCatching { parsePairs(p.getStringSet("categories", emptySet())) }.getOrDefault(emptyMap())
 
         _availableCategories.value = runCatching {
@@ -828,6 +835,8 @@ object DataRepository {
                 putStringSet("categories", cats)
                 putString("all_categories", allCats)
                 putStringSet("word_freq", words)
+                putStringSet("blocked_names", _blockedNames.value)
+                putStringSet("deleted_names", _deletedNames.value.map { it.key + "|=|" + it.value }.toSet())
             }.apply()
         }
     }
@@ -1180,9 +1189,55 @@ object DataRepository {
         return deleteContacts(names)
     }
 
+    // ── 刪除過的對象 ────────────────────────────────────────
+    // 刪掉之後對方又傳訊息，紀錄就會重建、聯絡人又冒出來，
+    // 使用者得一直重刪。所以記住刪過誰、什麼時候刪的，
+    // 之後偵測到又有新紀錄就主動問一次。
+    private val _deletedNames = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val deletedNames: StateFlow<Map<String, Long>> = _deletedNames
+
+    /** 永久忽略名單：通知服務直接不收，不會再產生任何紀錄 */
+    private val _blockedNames = MutableStateFlow<Set<String>>(emptySet())
+    val blockedNames: StateFlow<Set<String>> = _blockedNames
+
+    fun isBlocked(name: String): Boolean = name.trim() in _blockedNames.value
+
+    fun blockName(name: String) {
+        _blockedNames.update { it + name }
+        _deletedNames.update { it - name }
+        saveData(immediate = true)
+    }
+
+    /** 使用者說「這個人要留著」：從刪除名單移除，之後不再詢問 */
+    fun forgetDeleted(name: String) {
+        _deletedNames.update { it - name }
+        _blockedNames.update { it - name }
+        saveData(immediate = true)
+    }
+
+    fun unblockName(name: String) {
+        _blockedNames.update { it - name }
+        saveData(immediate = true)
+    }
+
+    /** 刪除過、而且刪除之後又有新紀錄的對象 */
+    fun resurrectedNames(): List<Pair<String, Int>> {
+        val del = _deletedNames.value
+        if (del.isEmpty()) return emptyList()
+        val counts = HashMap<String, Int>()
+        _interactions.value.forEach { r ->
+            val nm = _aliases.value[r.rawSenderName] ?: r.rawSenderName
+            val since = del[nm] ?: return@forEach
+            if (r.timestamp > since) counts[nm] = (counts[nm] ?: 0) + 1
+        }
+        return counts.entries.sortedByDescending { it.value }.map { it.key to it.value }
+    }
+
     fun deleteContacts(names: Set<String>): Int {
         if (names.isEmpty()) return 0
         snapshotForUndo("刪除 ${names.size} 位聯絡人")
+        val now = System.currentTimeMillis()
+        _deletedNames.update { m -> m + names.associateWith { now } }
         val before = _interactions.value.size
         _interactions.value = _interactions.value.filterNot {
             (_aliases.value[it.rawSenderName] ?: it.rawSenderName) in names
@@ -1745,6 +1800,8 @@ class RelateNotificationService : NotificationListenerService() {
     private fun addMessage(appName: String, senderName: String, subSender: String?, body: String, isGroup: Boolean, ts: Long) {
         val name = senderName.trim()
         if (name.isBlank()) return
+        // 使用者說過「這個永遠不要記」——在最源頭擋掉，不產生任何紀錄
+        if (DataRepository.isBlocked(name)) return
         // 非真人通知不累計詞頻
         // 連人名一起排除：通知本文有時會夾帶對方名字，切成 n-gram 就變成「常用詞」
         if (!isNonPersonContact(name)) DataRepository.addWords(tokenizeForWordFreq(body), name)
@@ -3014,6 +3071,11 @@ class RelateViewModel : ViewModel() {
         DataRepository.addCustomCategory(ContactCategory(UUID.randomUUID().toString(), name, colorInt, bgColorInt))
     }
     fun deleteContacts(names: Set<String>) = DataRepository.deleteContactsWithTrash(names)
+    val blockedNames = DataRepository.blockedNames
+    fun resurrectedNames() = DataRepository.resurrectedNames()
+    fun blockName(n: String) = DataRepository.blockName(n)
+    fun forgetDeleted(n: String) = DataRepository.forgetDeleted(n)
+    fun unblockName(n: String) = DataRepository.unblockName(n)
     fun listTrash() = DataRepository.listTrash()
     fun restoreTrash(f: String) = DataRepository.restoreTrash(f)
     fun purgeTrash(f: String) = DataRepository.purgeTrash(f)
@@ -4258,7 +4320,7 @@ fun ContributionGrid(data: List<ContribDay>) {
     val dayFmt = remember { SimpleDateFormat("M/d（E）", Locale.TAIWAN) }
 
     Column {
-        Text("直排是星期（上到下 日→六），橫排是週；顏色越深互動越多。點格子看那天的數字",
+        Text("縱軸＝星期（上到下 日→六），橫軸＝週（左舊右新）；顏色越深互動越多。點格子看那天的數字",
             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
         Spacer(modifier = Modifier.height(8.dp))
         // ⚠️ 星期標籤與格子的邊長必須是「同一個數字」。
@@ -4266,12 +4328,42 @@ fun ContributionGrid(data: List<ContribDay>) {
         //    標籤區寬 20dp → 每格 20dp；格子區是 weight 平分 → 每格約 22dp。
         //    差 2dp，堆七列就差十幾 dp，看起來就是沒對齊。
         //    改成自己算邊長，兩邊都用 .size(cell)。
-        val weeks = remember(cells) { cells.chunked(7) }
+        val allWeeks = remember(cells) { cells.chunked(7) }
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
             val labelW = 18.dp
             val gap = 2.dp
-            val cell = ((maxWidth - labelW - 4.dp - gap * (weeks.size - 1).coerceAtLeast(0)) /
-                weeks.size.coerceAtLeast(1)).coerceIn(6.dp, 28.dp)
+            // ⚠️ 格子邊長同時也是「星期」標籤那一列的高度。
+            //    塞滿 17 週時每格只剩約 16dp，使用者把系統字體放大後
+            //    9sp 的中文連行高都不夠，字就被切掉 —— 這是「字還是被卡掉」的原因。
+            //    所以先訂下最小格子邊長，再回推畫得下幾週，多的週直接不顯示。
+            val minCell = 20.dp
+            val avail = maxWidth - labelW - 4.dp
+            val fitWeeks = ((avail + gap) / (minCell + gap)).toInt().coerceIn(4, 26)
+            val weeks = if (allWeeks.size > fitWeeks) allWeeks.takeLast(fitWeeks) else allWeeks
+            val cell = ((avail - gap * (weeks.size - 1).coerceAtLeast(0)) /
+                weeks.size.coerceAtLeast(1)).coerceIn(minCell, 32.dp)
+
+            Column {
+                // 月份刻度：橫軸到底是哪段時間，光看格子看不出來
+                Row(modifier = Modifier.padding(start = labelW + 4.dp, bottom = 3.dp), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    val mcal = Calendar.getInstance()
+                    var lastMonth = -1
+                    weeks.forEach { week ->
+                        val firstDay = week.firstOrNull { it != null }
+                        val m = if (firstDay != null) {
+                            mcal.timeInMillis = firstDay.dayStart
+                            mcal.get(Calendar.MONTH)
+                        } else -1
+                        val showLabel = m >= 0 && m != lastMonth
+                        if (showLabel) lastMonth = m
+                        Box(modifier = Modifier.width(cell)) {
+                            if (showLabel) {
+                                Text("${m + 1}月", fontSize = 8.sp, color = AppColors.TextTertiary,
+                                    maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
             Row {
                 Column(verticalArrangement = Arrangement.spacedBy(gap)) {
                     weekLabels.forEach {
@@ -4303,6 +4395,11 @@ fun ContributionGrid(data: List<ContribDay>) {
                         }
                     }
                 }
+            }
+            if (allWeeks.size > weeks.size) {
+                Text("畫面寬度只放得下最近 ${weeks.size} 週", fontSize = T.Micro,
+                    color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
+            }
             }
         }
         picked?.let { d ->
@@ -5972,6 +6069,11 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var longPressTarget by remember { mutableStateOf<String?>(null) }
     var renameTarget by remember { mutableStateOf<String?>(null) }
     var quickTagTarget by remember { mutableStateOf<String?>(null) }
+    // 刪過的人又冒出來：不自動處理，問過使用者再決定
+    var resurrected by remember { mutableStateOf<List<Pair<String, Int>>>(emptyList()) }
+    LaunchedEffect(cb.ready, records.size) {
+        if (cb.ready) resurrected = viewModel.resurrectedNames()
+    }
     var showAutoMerge by remember { mutableStateOf(false) }
     val similarGroups = cb.similar
 
@@ -5992,6 +6094,61 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 14.dp, bottom = if (selectionMode) 92.dp else 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            if (resurrected.isNotEmpty()) {
+                item {
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(AppColors.WorkBg, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        Text("刪除過的對象又有新紀錄", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
+                        Text("你刪掉他們之後，對方又傳了訊息，紀錄被重新建立。要繼續記錄還是永遠不要記？",
+                            fontSize = T.Label, color = AppColors.WorkText.copy(alpha = 0.85f), lineHeight = 16.sp,
+                            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
+                        resurrected.forEach { (name, count) ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(name, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                        color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("新增 $count 筆", fontSize = T.Micro, color = AppColors.TextTertiary)
+                                }
+                                Box(
+                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                        .background(AppColors.Surface)
+                                        .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            viewModel.forgetDeleted(name)
+                                            resurrected = viewModel.resurrectedNames()
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text("保留", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                        .background(AppColors.WorkText)
+                                        .clickable {
+                                            // 刪掉現有紀錄，並加入永久忽略，之後通知服務直接不收
+                                            viewModel.deleteContacts(setOf(name))
+                                            viewModel.blockName(name)
+                                            resurrected = viewModel.resurrectedNames()
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text("刪除並封鎖", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                        color = Color.White, maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ⚠️ 「自動合併」以前跟標題擠在同一列。標題吃掉 weight(1f)，
             //    按鈕只拿得到剩餘寬度；名稱一長或字體一放大，按鈕就被推出父容器邊界。
             //    畫面上看得到（Row 不裁切子元件），但觸控事件不會派送到父容器外 ——
@@ -6935,6 +7092,55 @@ fun ClearPreviewDialog(
     )
 }
 
+/**
+ * 封鎖名單。
+ * 「刪除並封鎖」是單向門，一定要有地方看得到封鎖了誰、能解除，
+ * 否則封錯人就永遠救不回來。
+ */
+@Composable
+fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
+    val blocked by viewModel.blockedNames.collectAsState()
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("永不記錄名單", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text("這些對象的通知會被直接忽略，不產生任何紀錄",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
+            }
+        },
+        text = {
+            if (blocked.isEmpty()) {
+                Text("目前沒有封鎖任何對象。", fontSize = T.Body, color = AppColors.TextSecondary)
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(blocked.toList().sorted(), key = { it }) { name ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(name, fontSize = T.Body, color = AppColors.TextPrimary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                    .background(AppColors.Background)
+                                    .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+                                    .clickable { viewModel.unblockName(name) }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("解除", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+}
+
 /** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
 @Composable
 fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
@@ -7134,6 +7340,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     var confirmAction by remember { mutableStateOf<String?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var showTrash by remember { mutableStateOf(false) }
+    var showBlocked by remember { mutableStateOf(false) }
+    val blockedNow by viewModel.blockedNames.collectAsState()
     val wordFreqNow by viewModel.wordFreq.collectAsState()
     val undoAvailable by viewModel.undoAvailable.collectAsState()
     val undoLabel by viewModel.undoLabel.collectAsState()
@@ -7342,6 +7550,18 @@ fun SettingsView(viewModel: RelateViewModel) {
                         Text(it, fontSize = T.Label, color = AppColors.FriendText, modifier = Modifier.padding(top = 6.dp), lineHeight = 16.sp)
                     }
 
+                    if (blockedNow.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedButton(
+                            onClick = { showBlocked = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("永不記錄名單（${blockedNow.size} 位）", fontSize = 12.sp,
+                                color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(6.dp))
                     OutlinedButton(
                         onClick = { showTrash = true },
@@ -7463,6 +7683,10 @@ fun SettingsView(viewModel: RelateViewModel) {
 
     if (showTrash) {
         TrashDialog(viewModel) { showTrash = false }
+    }
+
+    if (showBlocked) {
+        BlockedNamesDialog(viewModel) { showBlocked = false }
     }
 
     if (showRecordManager) {
