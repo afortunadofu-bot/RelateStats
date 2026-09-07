@@ -581,14 +581,13 @@ val INSIGHT_SECTIONS: List<Pair<String, String>> = listOf(
     "trend" to "逐日趨勢",
     "avg" to "每日平均",
     "contrib" to "活躍密度",
+    "timeofday" to "時段分佈",
+    "heatmap" to "活躍熱力圖",
+    "words" to "常用詞",
     "coverage" to "活躍天數",
     "conc" to "社交集中度",
-    "msgtime" to "訊息 vs 停留",
     "weekday" to "平日 vs 週末",
-    "groupvs" to "群組 vs 個人",
     "night" to "深夜社交",
-    "calls" to "通話統計",
-    "lengths" to "訊息長度分佈",
     "streaks" to "連續互動排行",
     "cross" to "跨平台聯絡",
     "persona" to "社交人格",
@@ -2743,6 +2742,11 @@ class RelateViewModel : ViewModel() {
         val catStats: List<CategoryStat> = emptyList(),
         val heatmap: Array<IntArray> = Array(7) { IntArray(24) },
         val scoped: List<InteractionRecord> = emptyList(),
+        // 「構成」類卡片從洞察搬過來，資料也一起搬
+        val calls: CallSummary = CallSummary(0, 0, 0, 0L),
+        val lengths: List<Triple<String, Int, Float>> = emptyList(),
+        val split: GroupSplit = GroupSplit(0L, 0L, 0, 0),
+        val extras: ExtraStats = ExtraStats(),
         val ready: Boolean = false
     )
 
@@ -2760,6 +2764,10 @@ class RelateViewModel : ViewModel() {
             catStats = getCategoryStats(scoped, all, catsMap, aliasMap, cats),
             heatmap = getWeekHourHeatmap(scoped, all),
             scoped = scoped,
+            calls = callSummaryOf(scoped),
+            lengths = lengthBucketsOf(scoped),
+            split = groupSplitOf(scoped),
+            extras = extraStatsOf(scoped, records, filter, weekStart),
             ready = true
         )
     }
@@ -2943,6 +2951,9 @@ class RelateViewModel : ViewModel() {
         val split: GroupSplit = GroupSplit(0L, 0L, 0, 0),
         val extras: ExtraStats = ExtraStats(),
         val persona: SocialPersona = SocialPersona.ALL_TYPES[0],
+        // 「時間模式」類卡片從總覽搬過來
+        val timeStats: List<TimeOfDayStat> = emptyList(),
+        val heatmap: Array<IntArray> = Array(7) { IntArray(24) },
         val ready: Boolean = false
     )
 
@@ -2962,11 +2973,14 @@ class RelateViewModel : ViewModel() {
             contrib = getContributionMap(records, aliasMap),
             calls = callSummaryOf(scoped),
             lengths = lengthBucketsOf(scoped),
-            cross = getCrossPlatform(records, aliasMap),
+            // 「本期有幾個人從多個平台找你」是一個期間問題，要跟隨篩選
+            cross = getCrossPlatform(scoped, aliasMap),
             coverage = getCoverage(records, filter, weekStart),
             split = groupSplitOf(scoped),
             extras = extraStatsOf(scoped, records, filter, weekStart),
             persona = getSocialPersona(scoped, DateFilter(FilterType.ALL)),
+            timeStats = getTimeOfDayStats(scoped, DateFilter(FilterType.ALL)),
+            heatmap = getWeekHourHeatmap(scoped, DateFilter(FilterType.ALL)),
             ready = true
         )
     }
@@ -4562,6 +4576,7 @@ fun InsightsView(viewModel: RelateViewModel) {
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     // 圖表點下去要看得到「是哪些人」，不能只給一個總數
     var drill by remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
+    val wordFreq by viewModel.wordFreq.collectAsState()
     val secOrder by viewModel.sectionOrder.collectAsState()
     val secHidden by viewModel.hiddenSections.collectAsState()
     var showSectionEditor by remember { mutableStateOf(false) }
@@ -4620,6 +4635,10 @@ fun InsightsView(viewModel: RelateViewModel) {
         ) {
             item { ServiceAlertBanner() }
             stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
+            item {
+                Text("時間上的規律、跟過去比、關係的變化",
+                    fontSize = T.Micro, color = AppColors.TextTertiary)
+            }
 
             if (!b.ready) {
                 item {
@@ -4708,6 +4727,8 @@ fun InsightsView(viewModel: RelateViewModel) {
             sections.add(Sec("contrib", "活躍密度") {
                 Panel {
                     SectionHead("活躍密度") {
+                        ScopeTag("近數月")
+                        Spacer(modifier = Modifier.width(4.dp))
                         InfoDot(
                             "活躍密度怎麼看",
                             "橫軸是「週」，由左到右一週一欄；縱軸是「星期幾」，由上到下週日到週六。\n" +
@@ -4723,6 +4744,18 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             // ── 5. 活躍天數 ──
+            sections.add(Sec("timeofday", "時段分佈") {
+                TimeOfDayCard(b.timeStats) { title, pred -> drillInto(title, pred) }
+            })
+
+            sections.add(Sec("heatmap", "活躍熱力圖") {
+                WeekHourHeatmapCard(b.heatmap)
+            })
+
+            sections.add(Sec("words", "常用詞") {
+                TopWordsCard(wordFreq)
+            })
+
             sections.add(Sec("coverage", "活躍天數") {
                 Panel {
                     SectionHead("活躍天數")
@@ -4764,25 +4797,6 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             // ── 7. 訊息 vs 停留（一體兩面） ──
-            sections.add(Sec("msgtime", "訊息 vs 停留") {
-                Panel {
-                    SectionHead("訊息 vs 停留")
-                    Text(
-                        "兩者是互補的：訊息只有在你「沒開著聊天室」時才會跳通知，" +
-                        "而停留時間只有在你「主動打開聊天室」時才會累積。加起來才是完整的注意力。",
-                        fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatPair("被動接收", "${b.extras.weekdayMsgs + b.extras.weekendMsgs} 則", "通知攔截", Modifier.weight(1f)) {
-                            drillInto("被動接收（通知攔截）") { r -> r.isIncoming && !r.isCall }
-                        }
-                        StatPair("主動開啟", "${b.extras.openedChats} 次", "進入聊天室", Modifier.weight(1f)) {
-                            drillInto("主動開啟（進入聊天室）") { r -> r.durationSeconds > 0 }
-                        }
-                    }
-                }
-            })
 
             // ── 8. 平日 vs 週末 ──
             sections.add(Sec("weekday", "平日 vs 週末") {
@@ -4798,24 +4812,6 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             // ── 9. 群組 vs 個人 ──
-            sections.add(Sec("groupvs", "群組 vs 個人") {
-                Panel {
-                    SectionHead("群組 vs 個人")
-                    SplitBar(
-                        "群組", b.split.groupMsgs.toLong(), "個人", b.split.personMsgs.toLong(),
-                        AppColors.GroupText, AppColors.ActiveBlue,
-                        onLeftClick = { drillInto("群組") { r -> r.isGroup } },
-                        onRightClick = { drillInto("個人") { r -> !r.isGroup } }
-                    ) { "$it 則" }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    SplitBar(
-                        "群組停留", b.split.groupDuration, "個人停留", b.split.personDuration,
-                        AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f),
-                        onLeftClick = { drillInto("群組停留") { r -> r.isGroup && r.durationSeconds > 0 } },
-                        onRightClick = { drillInto("個人停留") { r -> !r.isGroup && r.durationSeconds > 0 } }
-                    ) { formatDuration(it) }
-                }
-            })
 
             // ── 10. 深夜社交 ──
             sections.add(Sec("night", "深夜社交") {
@@ -4847,67 +4843,10 @@ fun InsightsView(viewModel: RelateViewModel) {
 
             // ── 11. 通話統計 ──
             if (b.calls.total > 0) {
-                sections.add(Sec("calls", "通話統計") {
-                    Panel {
-                        SectionHead("通話統計")
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            StatPair("總通話", "${b.calls.total} 通", null, Modifier.weight(1f))
-                            StatPair("接通", "${b.calls.answered} 通", null, Modifier.weight(1f))
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            StatPair("未接", "${b.calls.missed} 通", "未接率 ${b.calls.missRate}%", Modifier.weight(1f))
-                            // 沒抳到秒數就要說清楚，顯示 0s 會讓人以為是算錯
-                            if (b.calls.hasDuration) {
-                                StatPair("平均時長", formatDuration(b.calls.avgSeconds), "依 ${b.calls.timed} 通有秒數的通話", Modifier.weight(1f))
-                            } else {
-                                StatPair("平均時長", "—", "需匯入通話紀錄", Modifier.weight(1f))
-                            }
-                        }
-                        if (!b.calls.hasDuration) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                "原生撥號 App 接通後不會發通知，只靠通知拿不到通話秒數。" +
-                                    "到「設定 → 匯入手機通話紀錄」可以把真實時長補進來。",
-                                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp
-                            )
-                        }
-                    }
-                })
             }
 
             // ── 12. 訊息長度分佈 ──
             if (b.lengths.isNotEmpty()) {
-                sections.add(Sec("lengths", "訊息長度分佈") {
-                    Panel {
-                        SectionHead("訊息長度分佈") {
-                            Text("平均 ${b.extras.avgWordsPerMsg} 字／則", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
-                        }
-                        b.lengths.forEachIndexed { i, triple ->
-                            val (label, count, pct) = triple
-                            // 五個級距對應的字數區間，點下去看是誰在傳這種長度的訊息
-                            val range = when (i) {
-                                0 -> 1..5
-                                1 -> 6..15
-                                2 -> 16..40
-                                3 -> 41..100
-                                else -> 101..Int.MAX_VALUE
-                            }
-                            DataRow(
-                                name = label,
-                                dotColor = AppColors.ActiveBlue,
-                                progress = pct,
-                                primary = "$count 則",
-                                secondary = "${(pct * 100).toInt()}%",
-                                onClick = {
-                                    drillInto("$label 的訊息來自") { r ->
-                                        r.isIncoming && !r.isCall && r.wordCount in range
-                                    }
-                                }
-                            )
-                        }
-                    }
-                })
             }
 
             // ── 13. 連續互動排行 ──
@@ -4915,7 +4854,8 @@ fun InsightsView(viewModel: RelateViewModel) {
                 sections.add(Sec("streaks", "連續互動排行") {
                     Panel {
                         SectionHead("連續互動天數") {
-                            Text("到今天為止", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                            // 連續天數本質上是長期指標，切到單日看「這天的連續天數」沒有意義
+                            ScopeTag("全期間 · 到今天為止")
                         }
                         val maxS = b.streaks.first().second.toFloat().coerceAtLeast(1f)
                         b.streaks.forEach { (name, days) ->
@@ -4943,7 +4883,13 @@ fun InsightsView(viewModel: RelateViewModel) {
             sections.add(Sec("persona", "社交人格") {
                 val persona = b.persona
                 Panel {
-                    SectionHead("社交人格")
+                    SectionHead("社交人格") {
+                        InfoDot(
+                            "社交人格怎麼判定",
+                            "依據本期的四個比例算出來：訊息量、停留時間、平均訊息長度、對象集中程度。\n\n" +
+                                "換一個日期範圍就可能換一個人格 —— 它描述的是「你在這段期間的樣子」，不是固定標籤。"
+                        )
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(persona.emoji, fontSize = 24.sp)
                         Spacer(modifier = Modifier.width(10.dp))
@@ -4959,7 +4905,14 @@ fun InsightsView(viewModel: RelateViewModel) {
             if (b.churn.newcomers.isNotEmpty() || b.churn.dormant.isNotEmpty()) {
                 sections.add(Sec("churn", "關係變化") {
                     Panel {
-                        SectionHead("關係變化")
+                        SectionHead("關係變化") {
+                            InfoDot(
+                                "關係變化怎麼算",
+                                "「新出現」與「已沉寂」都跟隨上方的日期範圍，但判斷「新不新」必須回頭看完整歷史 —— " +
+                                    "一個人是不是本期才第一次出現，只有看過去所有紀錄才知道。\n\n" +
+                                    "沉寂的定義是超過 14 天沒有任何互動。"
+                            )
+                        }
                         if (b.churn.newcomers.isNotEmpty()) {
                             Text("本期新出現 ${b.churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Positive)
                             Spacer(modifier = Modifier.height(4.dp))
@@ -5053,6 +5006,12 @@ fun OverviewView(viewModel: RelateViewModel) {
 
     val (showPersonaInfo, setShowPersonaInfo) = remember { mutableStateOf(false) }
     val (activeDetailDialog, setActiveDetailDialog) = remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
+
+    // 構成卡片共用的下鑽：挑出符合條件的紀錄，算成排行後開對話框
+    val overviewDrill: (String, (InteractionRecord) -> Boolean) -> Unit = { title, pred ->
+        val rs = filteredRecords.filter(pred)
+        setActiveDetailDialog(title to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats))
+    }
     val (showDemoUI, setShowDemoUI) = remember { mutableStateOf(false) }
     var quickTagTarget by remember { mutableStateOf<String?>(null) }
     var overviewDetailTarget by remember { mutableStateOf<SenderStat?>(null) }
@@ -5077,6 +5036,11 @@ fun OverviewView(viewModel: RelateViewModel) {
     ) {
         item { ServiceAlertBanner() }
         stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
+        // 兩頁的分工要寫出來：使用者問過「洞察跟總覽的用意差在哪」
+        item {
+            Text("這段期間有多少、誰佔多少",
+                fontSize = T.Micro, color = AppColors.TextTertiary)
+        }
 
         if (!bundle.ready) {
             item {
@@ -5290,45 +5254,6 @@ fun OverviewView(viewModel: RelateViewModel) {
             }
         }
 
-        // ── 時段分佈 ──
-        if (timeStats.isNotEmpty()) {
-            item {
-                Panel {
-                    SectionHead("時段分佈")
-                    Row(modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
-                        timeStats.forEach { s ->
-                            Box(modifier = Modifier.weight(s.percentage.coerceAtLeast(0.01f)).fillMaxHeight().background(s.color))
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        timeStats.forEach { s ->
-                            val periodName = s.period.split(" ")[0]
-                            Column(
-                                modifier = Modifier.weight(1f)
-                                    .background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp))
-                                    .clickable {
-                                        val rs = filteredRecords.filter {
-                                            val h = Calendar.getInstance().apply { timeInMillis = it.timestamp }.get(Calendar.HOUR_OF_DAY)
-                                            when (periodName) { "早晨" -> h in 5..11; "下午" -> h in 12..17; else -> h !in 5..17 }
-                                        }
-                                        setActiveDetailDialog("$periodName 活躍對象" to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats))
-                                    }
-                                    .padding(horizontal = 8.dp, vertical = 7.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(s.color))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(periodName, fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                                }
-                                Text("${(s.percentage * 100).toInt()}%", fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                                Text(s.explicitTimeRange, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         // ── 互動對象 Top 5（直接放總覽，不用切到排行） ──
         if (leaderboard.isNotEmpty()) {
@@ -5359,8 +5284,15 @@ fun OverviewView(viewModel: RelateViewModel) {
             }
         }
 
-        item { WeekHourHeatmapCard(heatmap) }
-        item { TopWordsCard(wordFreq) }
+        // ── 構成：這段期間裡誰／什麼佔多少 ──
+        item { MsgVsTimeCard(bundle.extras.weekdayMsgs + bundle.extras.weekendMsgs, bundle.extras.openedChats, overviewDrill) }
+        item { GroupSplitCard(bundle.split, overviewDrill) }
+        if (bundle.lengths.isNotEmpty()) {
+            item { LengthsCard(bundle.lengths, bundle.extras.avgWordsPerMsg, overviewDrill) }
+        }
+        if (bundle.calls.total > 0) {
+            item { CallsCard(bundle.calls) }
+        }
 
     }
         ScrollTopButton(listState)
@@ -5518,6 +5450,10 @@ fun TopWordsCard(wordFreq: Map<String, Int>) {
 
     Panel {
         SectionHead("常用詞") {
+            // 只存詞頻不存原文，事後無法重新切詞，所以只能是全期間累計。
+            // 不跟隨日期篩選就一定要標明，否則使用者會以為數字算錯。
+            ScopeTag("全期間")
+            Spacer(modifier = Modifier.width(4.dp))
             SegBar(listOf("2" to "2字", "3" to "3字", "4" to "4字", "EN" to "英文"), mode) { mode = it }
         }
         run {
@@ -7326,6 +7262,187 @@ fun SectionOrderDialog(
         },
         dismissButton = { TextButton(onClick = onReset) { Text("回到預設", color = AppColors.TextSecondary) } }
     )
+}
+
+/**
+ * 「構成」類的卡片：講的是「這段期間裡誰／什麼佔多少」。
+ *
+ * ⚠️ 這四張以前只長在洞察頁，但它們跟總覽的平台分佈／標籤分佈是同一種東西
+ *    （都是本期構成），分在兩頁才會讓人分不清兩頁的差別。
+ *    抽出來讓總覽用，洞察頁只留「模式與變化」。
+ *
+ * drill 統一由呼叫端提供：兩頁各自有自己的下鑽對話框。
+ */
+@Composable
+fun CallsCard(calls: CallSummary) {
+    Panel {
+        SectionHead("通話統計")
+        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatPair("總通話", "${calls.total} 通", null, Modifier.weight(1f))
+            StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f))
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatPair("未接", "${calls.missed} 通", "未接率 ${calls.missRate}%", Modifier.weight(1f))
+            // 沒抓到秒數就要說清楚，顯示 0s 會讓人以為是算錯
+            if (calls.hasDuration) {
+                StatPair("平均時長", formatDuration(calls.avgSeconds), "依 ${calls.timed} 通有秒數的通話", Modifier.weight(1f))
+            } else {
+                StatPair("平均時長", "—", "需匯入通話紀錄", Modifier.weight(1f))
+            }
+        }
+        if (!calls.hasDuration) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "原生撥號 App 接通後不會發通知，只靠通知拿不到通話秒數。" +
+                    "到「設定 → 匯入手機通話紀錄」可以把真實時長補進來。",
+                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp
+            )
+        }
+    }
+}
+
+@Composable
+fun LengthsCard(
+    lengths: List<Triple<String, Int, Float>>,
+    avgWords: Int,
+    drill: (String, (InteractionRecord) -> Boolean) -> Unit
+) {
+    Panel {
+        SectionHead("訊息長度分佈") {
+            Text("平均 $avgWords 字／則", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+        }
+        lengths.forEachIndexed { i, triple ->
+            val (label, count, pct) = triple
+            // 五個級距對應的字數區間，點下去看是誰在傳這種長度的訊息
+            val range = when (i) {
+                0 -> 1..5
+                1 -> 6..15
+                2 -> 16..40
+                3 -> 41..100
+                else -> 101..Int.MAX_VALUE
+            }
+            DataRow(
+                name = label,
+                dotColor = AppColors.ActiveBlue,
+                progress = pct,
+                primary = "$count 則",
+                secondary = "${(pct * 100).toInt()}%",
+                onClick = {
+                    drill("$label 的訊息來自") { r -> r.isIncoming && !r.isCall && r.wordCount in range }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun GroupSplitCard(split: GroupSplit, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
+    Panel {
+        SectionHead("群組 vs 個人")
+        SplitBar(
+            "群組", split.groupMsgs.toLong(), "個人", split.personMsgs.toLong(),
+            AppColors.GroupText, AppColors.ActiveBlue,
+            onLeftClick = { drill("群組") { r -> r.isGroup } },
+            onRightClick = { drill("個人") { r -> !r.isGroup } }
+        ) { "$it 則" }
+        Spacer(modifier = Modifier.height(10.dp))
+        SplitBar(
+            "群組停留", split.groupDuration, "個人停留", split.personDuration,
+            AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f),
+            onLeftClick = { drill("群組停留") { r -> r.isGroup && r.durationSeconds > 0 } },
+            onRightClick = { drill("個人停留") { r -> !r.isGroup && r.durationSeconds > 0 } }
+        ) { formatDuration(it) }
+    }
+}
+
+@Composable
+fun MsgVsTimeCard(msgs: Int, opened: Int, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
+    Panel {
+        SectionHead("訊息 vs 停留")
+        Text(
+            "兩者是互補的：訊息只有在你「沒開著聊天室」時才會跳通知，" +
+                "而停留時間只有在你「主動打開聊天室」時才會累積。加起來才是完整的注意力。",
+            fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatPair("被動接收", "$msgs 則", "通知攔截", Modifier.weight(1f)) {
+                drill("被動接收（通知攔截）") { r -> r.isIncoming && !r.isCall }
+            }
+            StatPair("主動開啟", "$opened 次", "進入聊天室", Modifier.weight(1f)) {
+                drill("主動開啟（進入聊天室）") { r -> r.durationSeconds > 0 }
+            }
+        }
+    }
+}
+
+/**
+ * 時段分佈（早晨 / 下午 / 夜晚）。
+ * 這是「時間模式」，跟平台分佈那種「構成」不同類，所以放在洞察頁。
+ */
+@Composable
+fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
+    Panel {
+        SectionHead("時段分佈")
+        Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp))) {
+            timeStats.forEach { st ->
+                val name = st.period.split(" ")[0]
+                Box(
+                    modifier = Modifier.weight(st.percentage.coerceAtLeast(0.01f)).fillMaxHeight()
+                        .background(st.color)
+                        .clickable { drill("$name 活躍對象", periodPredicate(name)) }
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            timeStats.forEach { st ->
+                val name = st.period.split(" ")[0]
+                Column(
+                    modifier = Modifier.weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(AppColors.SurfaceAlt)
+                        .clickable { drill("$name 活躍對象", periodPredicate(name)) }
+                        .padding(horizontal = 8.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(st.color))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(name, fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    }
+                    Text("${(st.percentage * 100).toInt()}%", fontSize = T.KpiSm, fontWeight = FontWeight.Black,
+                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    Text(st.explicitTimeRange, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                }
+            }
+        }
+    }
+}
+
+/** 早晨 05-11 / 下午 12-17 / 夜晚 18-04 */
+fun periodPredicate(name: String): (InteractionRecord) -> Boolean = { r ->
+    val h = Calendar.getInstance().apply { timeInMillis = r.timestamp }.get(Calendar.HOUR_OF_DAY)
+    when (name) {
+        "早晨" -> h in 5..11
+        "下午" -> h in 12..17
+        else -> h !in 5..17
+    }
+}
+
+/**
+ * 標明這張卡的時間範圍不跟隨上方的日期篩選。
+ * 使用者問過「洞察裡有很多非本週的東西也被算進去」——
+ * 有些指標確實刻意看全期間，但一定要在卡片上講清楚，不能讓人猜。
+ */
+@Composable
+fun ScopeTag(text: String) {
+    Box(
+        modifier = Modifier.background(AppColors.Background, RoundedCornerShape(5.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Text(text, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+    }
 }
 
 /** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
