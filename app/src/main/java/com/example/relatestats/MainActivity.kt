@@ -3557,7 +3557,14 @@ fun QuickClassifyDialog(
 
 /** 單一聯絡人的快速標籤選擇 */
 @Composable
-fun QuickTagDialog(name: String, categories: List<ContactCategory>, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+fun QuickTagDialog(
+    name: String,
+    categories: List<ContactCategory>,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+    currentId: String? = null,
+    onAddNew: (() -> Unit)? = null
+) {
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
@@ -3568,18 +3575,41 @@ fun QuickTagDialog(name: String, categories: List<ContactCategory>, onPick: (Str
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // 標籤可能不少，超過畫面高度時要能捲
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())
+            ) {
                 categories.forEach { cat ->
+                    val on = currentId == cat.id
                     Row(
                         modifier = Modifier.fillMaxWidth()
-                            .background(cat.bgColor, RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(cat.bgColor)
+                            .then(if (on) Modifier.border(2.dp, cat.color, RoundedCornerShape(8.dp)) else Modifier)
                             .clickable { onPick(cat.id) }
-                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                            .padding(horizontal = 12.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(cat.color))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(cat.label, color = cat.color, fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(cat.label, color = cat.color, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        if (on) Text("目前", color = cat.color, fontSize = T.Micro, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    }
+                }
+                if (onAddNew != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(AppColors.Background)
+                            .clickable { onAddNew() }
+                            .padding(horizontal = 12.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("新增自訂標籤", color = AppColors.ActiveBlue, fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -5540,6 +5570,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var mergeSource by remember { mutableStateOf<String?>(null) }
     var longPressTarget by remember { mutableStateOf<String?>(null) }
     var renameTarget by remember { mutableStateOf<String?>(null) }
+    var quickTagTarget by remember { mutableStateOf<String?>(null) }
     var showAutoMerge by remember { mutableStateOf(false) }
     val similarGroups = cb.similar
 
@@ -5679,7 +5710,6 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             items(filteredContacts, key = { it }) { unifiedName ->
                 val catId = categoriesMap[unifiedName] ?: ContactCategory.OTHER.id
                 val currentCategory = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
-                val (expandedCat, setExpandedCat) = remember { mutableStateOf(false) }
                 val isSel = selected.contains(unifiedName)
 
                 val rawNamesForThis = cb.rawByUnified[unifiedName] ?: listOf(unifiedName)
@@ -5720,17 +5750,21 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                     Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, maxLines = 1, softWrap = false)
                                 }
                             } else {
-                                Box {
-                                    TextButton(onClick = { setExpandedCat(true) }, modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(8.dp)), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
-                                        Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
-                                    DropdownMenu(expanded = expandedCat, onDismissRequest = { setExpandedCat(false) }, modifier = Modifier.background(AppColors.Surface)) {
-                                        availableCats.forEach { category ->
-                                            DropdownMenuItem(text = { Text(category.label, color = category.color, fontWeight = FontWeight.Bold) }, onClick = { viewModel.setCategory(unifiedName, category.id); setExpandedCat(false) })
-                                        }
-                                        HorizontalDivider(color = AppColors.BorderLight)
-                                        DropdownMenuItem(text = { Text("+ 新增自訂分類", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold) }, onClick = { setExpandedCat(false); setPendingAssignName(unifiedName); setShowAddCategoryDialog(true) })
-                                    }
+                                // 以前是 DropdownMenu：選項小、要對準、還會被畫面邊界擠掉。
+                                // 改用跟總覽同一個 QuickTagDialog —— 大塊、一按就好。
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(currentCategory.bgColor)
+                                        .clickable { quickTagTarget = unifiedName }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Icon(Icons.Rounded.ArrowDropDown, contentDescription = "更換標籤",
+                                        tint = currentCategory.color, modifier = Modifier.size(16.dp))
                                 }
                             }
                         }
@@ -5851,6 +5885,21 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         CategoryManagerDialog(viewModel, availableCats) { showCategoryManager = false }
     }
 
+    quickTagTarget?.let { target ->
+        QuickTagDialog(
+            name = target,
+            categories = availableCats,
+            currentId = categoriesMap[target] ?: ContactCategory.OTHER.id,
+            onPick = { catId -> viewModel.setCategory(target, catId); quickTagTarget = null },
+            onDismiss = { quickTagTarget = null },
+            onAddNew = {
+                setPendingAssignName(target)
+                quickTagTarget = null
+                setShowAddCategoryDialog(true)
+            }
+        )
+    }
+
     longPressTarget?.let { target ->
         AlertDialog(
             containerColor = AppColors.Surface,
@@ -5878,7 +5927,10 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                     when (action) {
                                         "rename" -> renameTarget = target
                                         "merge" -> mergeSource = target
-                                        "tag" -> setPendingAssignName(target)
+                                        // ⚠️ 以前接到 pendingAssignName，但那個狀態只是
+                                        //    「新增自訂分類」時用來記住要套用給誰，
+                                        //    本身不會開任何對話框 —— 所以按了完全沒反應。
+                                        "tag" -> quickTagTarget = target
                                         "delete" -> pendingDelete = setOf(target)
                                     }
                                     longPressTarget = null
