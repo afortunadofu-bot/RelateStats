@@ -50,6 +50,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
@@ -58,6 +60,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -335,13 +338,26 @@ private val SYSTEM_HINT = Regex(
 private val JUNK_WORD_MARKERS = listOf(
     "傳送", "傳了", "送出", "發送", "收回", "撤回", "貼圖", "貼文", "照片", "圖片",
     "影片", "檔案", "語音", "音檔", "限時", "已讀", "追蹤", "新的讚", "按讚", "未接",
-    "來電", "通話時", "則新", "新訊息", "邀請", "加入了", "退出了", "拍了拍", "分享了", "回覆了"
+    "來電", "通話時", "則新", "新訊息", "邀請", "加入了", "退出了", "拍了拍", "分享了", "回覆了",
+    // ⚠️ 以下是實際回報漏掉的。整句過濾（isSystemGeneratedText）本來就擋得住這些句子，
+    //    但**已經存進詞頻的是 n-gram 碎片**：「標註您的訊息內容」會被切成
+    //    「標註」「註您」「您的」「訊息」「內容」…… 沒有一個含有上面舊的標記字串，
+    //    所以清理完全清不到。清理用的標記必須跟得上過濾規則。
+    "標註", "傳達", "按了", "回覆", "回應", "提及", "動態", "訊息", "內容", "留言",
+    "貼上", "撤銷", "已傳", "新增了", "查看全部", "訊息要求"
 )
 private val JUNK_WORD_EXACT: Set<String> by lazy {
+    // 這份語料要涵蓋 SYSTEM_PHRASE / SYSTEM_HINT 擋得住的每一種句型，
+    // 否則「過濾擋得住、清理清不掉」，使用者看到的還是舊資料。
     val corpus = listOf(
         "傳送了一則貼圖", "傳送了一張照片", "傳送了一個檔案", "傳送了一段影片",
         "傳送了語音訊息", "傳送了一則訊息", "收回了訊息", "分享了一則貼文",
-        "你有一則新訊息", "已傳送", "正在輸入中", "加入了聊天", "退出了聊天"
+        "你有一則新訊息", "已傳送", "正在輸入中", "加入了聊天", "退出了聊天",
+        // 使用者實際點名的五種
+        "標註您的訊息內容", "標註你的訊息內容", "已傳送貼圖", "對你的訊息按了讚",
+        "對您的訊息按了", "傳達了", "已傳達了", "已回覆了你的限時動態",
+        "回覆了你的限時動態", "回應了你的限時動態", "提及了你", "在留言中提到你",
+        "拍了拍你", "邀請你加入", "開始追蹤你", "查看全部訊息", "訊息要求"
     )
     val out = HashSet<String>()
     corpus.forEach { c -> for (n in 2..4) for (i in 0..c.length - n) out.add(c.substring(i, i + n)) }
@@ -740,9 +756,11 @@ object DataRepository {
     /** v2.3：舊詞頻裡的系統通知殘渣只需要清一次 */
     private fun runWordPurgeIfNeeded() {
         val p = prefs ?: return
-        if (p.getBoolean("word_purge_v23_done", false)) return
+        // ⚠️ 每次補強 JUNK_WORD_MARKERS 或語料就要換一次旗標名稱，
+        //    否則升級後不會重跑，使用者看到的還是舊的髒資料。
+        if (p.getBoolean("word_purge_v30_done", false)) return
         lastWordPurge.value = purgeJunkWords()
-        p.edit().putBoolean("word_purge_v23_done", true).apply()
+        p.edit().putBoolean("word_purge_v30_done", true).apply()
     }
 
     fun init(context: Context) {
@@ -2575,7 +2593,9 @@ class RelateViewModel : ViewModel() {
     fun getChurn(records: List<InteractionRecord>, aliasMap: Map<String, String>, filter: DateFilter, weekStart: Int): ChurnStat {
         if (records.isEmpty()) return ChurnStat(emptyList(), emptyList())
         val range = rangeOf(filter, weekStart)
-        val now = System.currentTimeMillis()
+        // ⚠️ 基準是「區間結束日」不是今天。翻到上個月時，
+        //    「沉寂了幾天」要以那個月底來算，否則所有人看起來都沉寂很久。
+        val now = range?.second ?: System.currentTimeMillis()
 
         val firstSeen = HashMap<String, Long>()
         val lastSeen = HashMap<String, Long>()
@@ -2592,6 +2612,7 @@ class RelateViewModel : ViewModel() {
 
         val dormant = lastSeen
             .mapNotNull { (name, ts) ->
+                if (ts > now) return@mapNotNull null
                 val days = ((now - ts) / 86_400_000L).toInt()
                 if (days in 14..365) name to days else null
             }
@@ -2611,17 +2632,33 @@ class RelateViewModel : ViewModel() {
     }
 
     /** 每位聯絡人的連續互動天數（到今天為止） */
-    fun getStreaks(records: List<InteractionRecord>, aliasMap: Map<String, String>): List<Pair<String, Int>> {
+    /**
+     * 連續互動天數。
+     *
+     * ⚠️ 連續的「天」必須回頭看完整歷史（否則跨出區間的那幾天會被截斷），
+     *    但**基準日要跟著使用者選的區間走**，而且只列出「最後一次互動落在區間內」的人。
+     *    舊版一律以今天為基準，所以翻到上個月看到的還是今天的連續天數，完全對不上。
+     */
+    fun getStreaks(
+        records: List<InteractionRecord>, aliasMap: Map<String, String>,
+        filter: DateFilter, weekStart: Int
+    ): List<Pair<String, Int>> {
         if (records.isEmpty()) return emptyList()
+        val range = rangeOf(filter, weekStart)
+        val anchor = startOfDay(range?.second ?: System.currentTimeMillis())
+        val rangeStart = range?.first ?: 0L
+
         val byPerson = HashMap<String, MutableSet<Long>>()
         records.forEach { r ->
             byPerson.getOrPut(aliasMap[r.rawSenderName] ?: r.rawSenderName) { HashSet() }.add(startOfDay(r.timestamp))
         }
-        val today = startOfDay(System.currentTimeMillis())
         return byPerson.mapNotNull { (name, days) ->
-            if (!days.contains(today) && !days.contains(today - 86_400_000L)) return@mapNotNull null
+            if (isNonPersonContact(name)) return@mapNotNull null
+            // 最後一次互動必須落在這個區間裡，否則這個人跟本期無關
+            val last = days.max()
+            if (last < startOfDay(rangeStart) || last > anchor) return@mapNotNull null
             var streak = 0
-            var cursor = if (days.contains(today)) today else today - 86_400_000L
+            var cursor = last
             while (days.contains(cursor)) { streak++; cursor -= 86_400_000L }
             if (streak >= 2) name to streak else null
         }.sortedByDescending { it.second }.take(10)
@@ -2750,6 +2787,18 @@ class RelateViewModel : ViewModel() {
         val ready: Boolean = false
     )
 
+    // 算好的結果留一份在 ViewModel 裡。分頁切走再切回來時，
+    // produceState 用它當初始值，畫面直接是上次的內容，不會先空一下再重畫。
+    // ⚠️ 只是「不閃空白」，資料仍然會在背景重算並覆蓋，不會拿到過期數字。
+    var cachedOverview = OverviewBundle()
+        private set
+    var cachedInsights = InsightsBundle()
+        private set
+    var cachedLeader = LeaderBundle()
+        private set
+    var cachedContacts = ContactsBundle()
+        private set
+
     fun buildOverview(
         records: List<InteractionRecord>, filter: DateFilter, weekStart: Int,
         catsMap: Map<String, String>, aliasMap: Map<String, String>, cats: List<ContactCategory>
@@ -2769,7 +2818,7 @@ class RelateViewModel : ViewModel() {
             split = groupSplitOf(scoped),
             extras = extraStatsOf(scoped, records, filter, weekStart),
             ready = true
-        )
+        ).also { cachedOverview = it }
     }
 
     data class ContactInsight(
@@ -2902,7 +2951,7 @@ class RelateViewModel : ViewModel() {
         list = getLeaderboard(records, catsMap, aliasMap, cats, filter, sort, catFlt, appFlt, groupFlt),
         apps = records.map { it.appName }.distinct().sorted(),
         ready = true
-    )
+    ).also { cachedLeader = it }
 
     data class ContactsBundle(
         val unifiedNames: List<String> = emptyList(),
@@ -2933,7 +2982,7 @@ class RelateViewModel : ViewModel() {
             rawByUnified = records.map { it.rawSenderName }.distinct()
                 .groupBy { aliasMap[it] ?: it },
             ready = true
-        )
+        ).also { cachedContacts = it }
     }
 
     data class InsightsBundle(
@@ -2969,7 +3018,7 @@ class RelateViewModel : ViewModel() {
             conc = getConcentration(stats),
             churn = getChurn(records, aliasMap, filter, weekStart),
             nightPct = nightPctOf(scoped),
-            streaks = getStreaks(records, aliasMap),
+            streaks = getStreaks(records, aliasMap, filter, weekStart),
             contrib = getContributionMap(records, aliasMap),
             calls = callSummaryOf(scoped),
             lengths = lengthBucketsOf(scoped),
@@ -2982,7 +3031,7 @@ class RelateViewModel : ViewModel() {
             timeStats = getTimeOfDayStats(scoped, DateFilter(FilterType.ALL)),
             heatmap = getWeekHourHeatmap(scoped, DateFilter(FilterType.ALL)),
             ready = true
-        )
+        ).also { cachedInsights = it }
     }
 
     /** 額外的補充統計 */
@@ -3432,21 +3481,27 @@ fun MainAppContent(viewModel: RelateViewModel) {
         },
         bottomBar = {
             NavigationBar(containerColor = AppColors.Surface, tonalElevation = 8.dp) {
-                NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, "總覽") }, label = { Text("總覽", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, "概況") }, label = { Text("概況", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "leaderboard", onClick = { setActiveTab("leaderboard") }, icon = { Icon(Icons.AutoMirrored.Rounded.List, "排行") }, label = { Text("排行", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "insights", onClick = { setActiveTab("insights") }, icon = { Icon(Icons.Rounded.Star, "洞察") }, label = { Text("洞察", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "insights", onClick = { setActiveTab("insights") }, icon = { Icon(Icons.Rounded.Star, "分析") }, label = { Text("分析", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "contacts", onClick = { setActiveTab("contacts") }, icon = { Icon(Icons.Rounded.Person, "聯絡人") }, label = { Text("聯絡人", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "settings", onClick = { setActiveTab("settings") }, icon = { Icon(Icons.Rounded.Settings, "設定") }, label = { Text("設定", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
             }
         }
     ) { paddingValues ->
+        // ⚠️ when(activeTab) 會把上一個分頁整個移出組合樹，
+        //    裡面的 rememberSaveable（含捲動位置）就跟著被丟掉 ——
+        //    所以切回來永遠是最上面。SaveableStateProvider 會按 key 保存並還原。
+        val stateHolder = rememberSaveableStateHolder()
         Box(modifier = Modifier.fillMaxSize().padding(paddingValues).navigationBarsPadding()) {
-            when (activeTab) {
-                "overview" -> OverviewView(viewModel)
-                "leaderboard" -> LeaderboardView(viewModel)
-                "insights" -> InsightsView(viewModel)
-                "contacts" -> ContactsCategoryView(viewModel)
-                "settings" -> SettingsView(viewModel)
+            stateHolder.SaveableStateProvider(activeTab) {
+                when (activeTab) {
+                    "overview" -> OverviewView(viewModel)
+                    "leaderboard" -> LeaderboardView(viewModel)
+                    "insights" -> InsightsView(viewModel)
+                    "contacts" -> ContactsCategoryView(viewModel)
+                    "settings" -> SettingsView(viewModel)
+                }
             }
         }
     }
@@ -4333,7 +4388,7 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
                     fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
                 )
             } else {
-                Text("點長條看當天數字", fontSize = T.Micro, color = AppColors.TextTertiary)
+                Text("點長條看當天", fontSize = T.Micro, color = AppColors.TextTertiary)
             }
         }
         Row(
@@ -4372,28 +4427,28 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
 
 /** 近數週每日活躍密度圖 */
 @Composable
-fun ContributionGrid(data: List<ContribDay>) {
+fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY) {
     if (data.isEmpty()) return
     val max = data.maxOf { it.count }.coerceAtLeast(1)
     val cal = remember { Calendar.getInstance() }
 
     // 對齊星期：第一欄可能不是完整的一週，前面補空格
-    val firstDow = remember(data) {
+    // ⚠️ 這裡以前寫死從週日開始，設定頁的「一週起始日」對它完全沒作用 ——
+    //    使用者選週一，貢獻格還是週日開頭，兩邊對不起來。
+    val firstDow = remember(data, weekStartDay) {
         cal.timeInMillis = data.first().dayStart
-        (cal.get(Calendar.DAY_OF_WEEK) - Calendar.SUNDAY + 7) % 7
+        (cal.get(Calendar.DAY_OF_WEEK) - weekStartDay + 7) % 7
     }
     val cells: List<ContribDay?> = remember(data, firstDow) {
         List(firstDow) { null } + data
     }
-    val weekLabels = listOf("日", "一", "二", "三", "四", "五", "六")
+    val weekLabels = remember(weekStartDay) { rotatedWeekLabels(weekStartDay) }
 
     var picked by remember { mutableStateOf<ContribDay?>(null) }
     val dayFmt = remember { SimpleDateFormat("M/d（E）", Locale.TAIWAN) }
 
     Column {
-        Text("縱軸＝星期（上到下 日→六），橫軸＝週（左舊右新）；顏色越深互動越多。點格子看那天的數字",
-            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
-        Spacer(modifier = Modifier.height(8.dp))
+
         // ⚠️ 星期標籤與格子的邊長必須是「同一個數字」。
         //    舊寫法讓兩邊各自用 aspectRatio(1f) 推導高度：
         //    標籤區寬 20dp → 每格 20dp；格子區是 weight 平分 → 每格約 22dp。
@@ -4467,10 +4522,6 @@ fun ContributionGrid(data: List<ContribDay>) {
                     }
                 }
             }
-            if (allWeeks.size > weeks.size) {
-                Text("畫面寬度只放得下最近 ${weeks.size} 週", fontSize = T.Micro,
-                    color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
-            }
             }
         }
         picked?.let { d ->
@@ -4499,11 +4550,11 @@ fun ContributionGrid(data: List<ContribDay>) {
                 Spacer(modifier = Modifier.width(2.dp))
             }
             Spacer(modifier = Modifier.width(2.dp))
-            Text("多（最高 $max 次／天）", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+            Text("多（最高 $max）", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
         }
         val avgPeople = data.filter { it.count > 0 }.let { d -> if (d.isEmpty()) 0 else d.sumOf { it.people } / d.size }
         if (avgPeople > 0) {
-            Text("有互動的日子平均跟 $avgPeople 個人聊天", fontSize = T.Micro, color = AppColors.TextTertiary,
+            Text("平均每天 $avgPeople 人", fontSize = T.Micro, color = AppColors.TextTertiary,
                 modifier = Modifier.padding(top = 4.dp))
         }
     }
@@ -4594,7 +4645,7 @@ fun InsightsView(viewModel: RelateViewModel) {
 
     // 十幾項統計一次算完並丟到背景執行緒；同步做會直接凍住畫面
     val b by produceState(
-        RelateViewModel.InsightsBundle(),
+        viewModel.cachedInsights,
         records, filter, weekStartDay, categoriesMap, aliases, availableCats
     ) {
         delay(300)
@@ -4636,8 +4687,29 @@ fun InsightsView(viewModel: RelateViewModel) {
             item { ServiceAlertBanner() }
             stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
             item {
-                Text("時間上的規律、跟過去比、關係的變化",
-                    fontSize = T.Micro, color = AppColors.TextTertiary)
+                // 排序入口以前埋在整頁最下面，要滑到底才看得到 —— 改放這裡
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("時間上的規律、跟過去比、關係的變化",
+                        fontSize = T.Micro, color = AppColors.TextTertiary,
+                        modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .background(AppColors.Surface)
+                            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+                            .clickable { showSectionEditor = true }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("☰", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("排序", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                            color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                    }
+                }
             }
 
             if (!b.ready) {
@@ -4727,8 +4799,6 @@ fun InsightsView(viewModel: RelateViewModel) {
             sections.add(Sec("contrib", "活躍密度") {
                 Panel {
                     SectionHead("活躍密度") {
-                        ScopeTag("近數月")
-                        Spacer(modifier = Modifier.width(4.dp))
                         InfoDot(
                             "活躍密度怎麼看",
                             "橫軸是「週」，由左到右一週一欄；縱軸是「星期幾」，由上到下週日到週六。\n" +
@@ -4739,7 +4809,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("近 17 週", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                     }
-                    ContributionGrid(b.contrib)
+                    ContributionGrid(b.contrib, weekStartDay)
                 }
             })
 
@@ -4749,7 +4819,7 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             sections.add(Sec("heatmap", "活躍熱力圖") {
-                WeekHourHeatmapCard(b.heatmap)
+                WeekHourHeatmapCard(b.heatmap, weekStartDay)
             })
 
             sections.add(Sec("words", "常用詞") {
@@ -4938,20 +5008,7 @@ fun InsightsView(viewModel: RelateViewModel) {
             val ordered = (secOrder.mapNotNull { byId[it] } + sections.filter { it.id !in secOrder })
             ordered.filter { it.id !in secHidden }.forEach { sc -> item(key = sc.id) { sc.body() } }
 
-            item {
-                Box(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(AppColors.Surface)
-                        .border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp))
-                        .clickable { showSectionEditor = true }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("調整區塊順序 / 隱藏", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-                }
-            }
+
         }
         ScrollTopButton(listState)
     }
@@ -4975,7 +5032,7 @@ fun OverviewView(viewModel: RelateViewModel) {
     // 全部統計一次算完並丟到背景執行緒。
     // 舊版在 composition 期間同步跑多次全表掃描，資料量大時會直接凍住畫面。
     val bundle by produceState(
-        RelateViewModel.OverviewBundle(),
+        viewModel.cachedOverview,
         records, filter, weekStartDay, categoriesMap, aliases, availableCats
     ) {
         // 先等一下再算：新訊息會讓 records 一直換新實例，
@@ -5367,10 +5424,15 @@ fun OverviewView(viewModel: RelateViewModel) {
 }
 
 @Composable
-fun WeekHourHeatmapCard(grid: Array<IntArray>) {
+fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MONDAY) {
     val max = (grid.maxOfOrNull { row -> row.maxOrNull() ?: 0 } ?: 0).coerceAtLeast(1)
-    val days = listOf("日", "一", "二", "三", "四", "五", "六")
+    // grid 的索引固定是 0=週日（資料層），顯示時才依設定旋轉
+    val days = remember(weekStartDay) { rotatedWeekLabels(weekStartDay) }
+    val rowOrder = remember(weekStartDay) { (0..6).map { (it + (weekStartDay - Calendar.SUNDAY)) % 7 } }
     val total = grid.sumOf { row -> row.sum() }
+    val cellColor = AppColors.ActiveBlue
+    val emptyColor = AppColors.BorderLight.copy(alpha = 0.5f)
+    val markColor = AppColors.BrandPrimary
 
     Panel {
         SectionHead("活躍熱力圖") {
@@ -5381,39 +5443,74 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
                 Text("這段期間沒有互動紀錄", fontSize = T.Label, color = AppColors.TextSecondary)
                 return@Panel
             }
-            // 選中的格子（星期, 小時）
+            // 選中的格子（資料列索引, 小時）
             var picked by remember { mutableStateOf<Pair<Int, Int>?>(null) }
             Box(modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp), contentAlignment = Alignment.CenterStart) {
                 val p = picked
                 if (p != null) {
+                    val displayIdx = rowOrder.indexOf(p.first).coerceAtLeast(0)
                     Text(
-                        days[p.first] + " " + String.format(Locale.US, "%02d:00-%02d:59", p.second, p.second) +
+                        days[displayIdx] + " " + String.format(Locale.US, "%02d:00", p.second) +
                             " · " + grid[p.first][p.second] + " 次",
                         fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
                     )
                 } else {
-                    Text("點格子看那個時段的次數", fontSize = T.Micro, color = AppColors.TextTertiary)
+                    Text("點格子看時段", fontSize = T.Micro, color = AppColors.TextTertiary)
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
-            // 標籤欄寬必須跟下方時間軸的 padding 用同一個值，否則兩排會對不齊
+
             val labelW = 20.dp
-            grid.forEachIndexed { d, row ->
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
-                    Text(days[d], fontSize = T.Micro, color = AppColors.TextTertiary,
-                        modifier = Modifier.widthIn(min = labelW), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
-                    row.forEachIndexed { h, v ->
-                        val alpha = if (v == 0) 0f else 0.2f + 0.8f * (v.toFloat() / max)
-                        val on = picked?.first == d && picked?.second == h
-                        Box(
-                            modifier = Modifier.weight(1f).aspectRatio(1f).padding(0.5.dp)
-                                .background(
-                                    if (v == 0) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.ActiveBlue.copy(alpha = alpha),
-                                    RoundedCornerShape(2.dp)
+            Row(modifier = Modifier.fillMaxWidth()) {
+                // 星期標籤另外畫，格子本體整個交給一張 Canvas
+                Column {
+                    days.forEach {
+                        Box(modifier = Modifier.width(labelW).height(15.dp), contentAlignment = Alignment.CenterStart) {
+                            Text(it, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+                // ⚠️ 這裡以前是 7×24＝168 個各自帶 clickable 的 Box。
+                //    每個 clickable 都會帶出 InteractionSource、Indication 與語意節點，
+                //    捲到這張卡時要一次組出近千個 modifier 節點 —— 明顯的卡頓來源。
+                //    改成一張 Canvas 畫完、一個 pointerInput 做命中測試，節點數從近千降到個位數。
+                Canvas(
+                    modifier = Modifier.weight(1f).height(15.dp * 7)
+                        .pointerInput(rowOrder) {
+                            detectTapGestures { offset ->
+                                val cw = size.width / 24f
+                                val ch = size.height / 7f
+                                val h = (offset.x / cw).toInt().coerceIn(0, 23)
+                                val rowIdx = (offset.y / ch).toInt().coerceIn(0, 6)
+                                val d = rowOrder[rowIdx]
+                                picked = if (picked?.first == d && picked?.second == h) null else (d to h)
+                            }
+                        }
+                ) {
+                    val cw = size.width / 24f
+                    val ch = size.height / 7f
+                    val pad = 1f
+                    rowOrder.forEachIndexed { rowIdx, d ->
+                        for (h in 0..23) {
+                            val v = grid[d][h]
+                            val color = if (v == 0) emptyColor
+                            else cellColor.copy(alpha = 0.2f + 0.8f * (v.toFloat() / max))
+                            drawRoundRect(
+                                color = color,
+                                topLeft = Offset(h * cw + pad, rowIdx * ch + pad),
+                                size = Size(cw - pad * 2, ch - pad * 2),
+                                cornerRadius = CornerRadius(3f, 3f)
+                            )
+                            if (picked?.first == d && picked?.second == h) {
+                                drawRoundRect(
+                                    color = markColor,
+                                    topLeft = Offset(h * cw + pad, rowIdx * ch + pad),
+                                    size = Size(cw - pad * 2, ch - pad * 2),
+                                    cornerRadius = CornerRadius(3f, 3f),
+                                    style = Stroke(width = 3f)
                                 )
-                                .then(if (on) Modifier.border(1.5.dp, AppColors.BrandPrimary, RoundedCornerShape(2.dp)) else Modifier)
-                                .clickable { picked = if (on) null else (d to h) }
-                        )
+                            }
+                        }
                     }
                 }
             }
@@ -5796,7 +5893,7 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     //    等於在主執行緒做全表運算；而 key 包含 records，
     //    每收到一則通知就重算一次，畫面直接凍住 → ANR。
     val lb by produceState(
-        RelateViewModel.LeaderBundle(),
+        viewModel.cachedLeader,
         records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter
     ) {
         delay(300)
@@ -6084,7 +6181,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     // ⚠️ 這裡本來有五次各自獨立的全表掃描（去重、計數、App 對應、
     //    垃圾聯絡人、相似分組）全部寫在 remember{}，也就是全部跑在主執行緒。
     //    findSimilarGroups 更是 O(n²)，800 位聯絡人就是 60 萬次比對。合併並丟到背景。
-    val cb by produceState(RelateViewModel.ContactsBundle(), records, aliases) {
+    val cb by produceState(viewModel.cachedContacts, records, aliases) {
         delay(300)
         if (value.ready) value = value.copy(ready = false)
         value = withContext(Dispatchers.Default) { viewModel.buildContacts(records, aliases) }
@@ -6374,10 +6471,20 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         }
                         if (!selectionMode) {
                             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = AppColors.BorderLight)
-                            Row(modifier = Modifier.fillMaxWidth().clickable { mergeSource = unifiedName }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("綁定其他帳號", fontSize = 12.sp, color = AppColors.ActiveBlue, fontWeight = FontWeight.Medium)
+                            // ⚠️ 舊版只有 padding(vertical = 2.dp)，觸控區約 20dp 高又貼在卡片最底緣，
+                            //    低於系統最小觸控目標，稍微偏一點就打到卡片本身（卡片的 onClick
+                            //    在非選取模式下什麼都不做）—— 這就是「合併按不了」。
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(AppColors.ActiveBlue.copy(alpha = 0.08f))
+                                    .clickable { mergeSource = unifiedName }
+                                    .padding(horizontal = 10.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("綁定其他帳號到這個人", fontSize = T.Label, color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -7276,7 +7383,15 @@ fun SectionOrderDialog(
 @Composable
 fun CallsCard(calls: CallSummary) {
     Panel {
-        SectionHead("通話統計")
+        SectionHead("通話統計") {
+            if (!calls.hasDuration) {
+                InfoDot(
+                    "為什麼沒有通話時長",
+                    "原生撥號 App 接通後不會發通知，只靠通知拿不到通話秒數。\n\n" +
+                        "到「設定 → 匯入手機通話紀錄」可以把真實時長補進來，也會回補過去的通話。"
+                )
+            }
+        }
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatPair("總通話", "${calls.total} 通", null, Modifier.weight(1f))
             StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f))
@@ -7291,14 +7406,7 @@ fun CallsCard(calls: CallSummary) {
                 StatPair("平均時長", "—", "需匯入通話紀錄", Modifier.weight(1f))
             }
         }
-        if (!calls.hasDuration) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "原生撥號 App 接通後不會發通知，只靠通知拿不到通話秒數。" +
-                    "到「設定 → 匯入手機通話紀錄」可以把真實時長補進來。",
-                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp
-            )
-        }
+
     }
 }
 
@@ -7359,13 +7467,14 @@ fun GroupSplitCard(split: GroupSplit, drill: (String, (InteractionRecord) -> Boo
 @Composable
 fun MsgVsTimeCard(msgs: Int, opened: Int, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
     Panel {
-        SectionHead("訊息 vs 停留")
-        Text(
-            "兩者是互補的：訊息只有在你「沒開著聊天室」時才會跳通知，" +
-                "而停留時間只有在你「主動打開聊天室」時才會累積。加起來才是完整的注意力。",
-            fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
-        )
-        Spacer(modifier = Modifier.height(10.dp))
+        // 長段說明一律收進 i，卡片上只留數字
+        SectionHead("訊息 vs 停留") {
+            InfoDot(
+                "訊息 vs 停留",
+                "兩者是互補的：訊息只有在你「沒開著聊天室」時才會跳通知，" +
+                    "而停留時間只有在你「主動打開聊天室」時才會累積。\n\n加起來才是完整的注意力。"
+            )
+        }
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatPair("被動接收", "$msgs 則", "通知攔截", Modifier.weight(1f)) {
                 drill("被動接收（通知攔截）") { r -> r.isIncoming && !r.isCall }
@@ -7418,6 +7527,16 @@ fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRe
             }
         }
     }
+}
+
+/**
+ * 依「一週起始日」設定旋轉星期標籤。
+ * 資料層一律以週日為索引 0，只有顯示時旋轉，這樣改設定不用重算任何統計。
+ */
+fun rotatedWeekLabels(weekStartDay: Int): List<String> {
+    val base = listOf("日", "一", "二", "三", "四", "五", "六")
+    val offset = (weekStartDay - Calendar.SUNDAY + 7) % 7
+    return (0..6).map { base[(it + offset) % 7] }
 }
 
 /** 早晨 05-11 / 下午 12-17 / 夜晚 18-04 */
