@@ -329,4 +329,4 @@ docs/
 - [ ] 自動備份的密碼欄位 `autoBackupPassword` 已存在但 UI 未開放，匯出目前一律不加密
 - [ ] 常用詞尚未支援依聯絡人拆分（目前只有全域統計）
 - [ ] 無法阻止 Android 在重新安裝時停用無障礙服務（系統設計如此，需使用者手動重開）
-- [ ] MainActivity.kt 已達 3,600 行，後續可考慮拆檔
+- [ ] MainActivity.kt 已達 8,000 行以上，維護成本越來越高，建議拆成 data / service / ui 三層
