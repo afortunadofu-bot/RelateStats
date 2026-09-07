@@ -563,6 +563,38 @@ fun isWeekend(ts: Long): Boolean {
     return d == Calendar.SATURDAY || d == Calendar.SUNDAY
 }
 
+/**
+ * 洞察頁的一個可排序區塊。
+ * body 是 @Composable，先收集起來、依使用者存的順序再輸出。
+ */
+class Sec(val id: String, val label: String, val body: @Composable () -> Unit)
+
+/**
+ * 洞察區塊的完整清單（id 與顯示名稱）。
+ * ⚠️ 排序對話框吃這份常數，不是吃「這次畫了哪些」——
+ *    有些區塊在沒資料時不會畫出來（例如通話統計），
+ *    但使用者還是應該能先幫它排好位置。
+ *    新增區塊時這裡要一起加，順序即預設順序。
+ */
+val INSIGHT_SECTIONS: List<Pair<String, String>> = listOf(
+    "delta" to "與上期比較",
+    "trend" to "逐日趨勢",
+    "avg" to "每日平均",
+    "contrib" to "活躍密度",
+    "coverage" to "活躍天數",
+    "conc" to "社交集中度",
+    "msgtime" to "訊息 vs 停留",
+    "weekday" to "平日 vs 週末",
+    "groupvs" to "群組 vs 個人",
+    "night" to "深夜社交",
+    "calls" to "通話統計",
+    "lengths" to "訊息長度分佈",
+    "streaks" to "連續互動排行",
+    "cross" to "跨平台聯絡",
+    "persona" to "社交人格",
+    "churn" to "關係變化"
+)
+
 /** 活躍密度的一格：某一天的互動次數與聊天人數 */
 data class ContribDay(val dayStart: Long, val count: Int, val people: Int)
 
@@ -748,6 +780,10 @@ object DataRepository {
 
         _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
         _blockedNames.value = runCatching { p.getStringSet("blocked_names", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
+        _sectionOrder.value = runCatching {
+            p.getString("section_order", "")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+        }.getOrDefault(emptyList())
+        _hiddenSections.value = runCatching { p.getStringSet("hidden_sections", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
         _deletedNames.value = runCatching {
             (p.getStringSet("deleted_names", emptySet()) ?: emptySet()).mapNotNull { line ->
                 val i = line.lastIndexOf("|=|")
@@ -836,6 +872,8 @@ object DataRepository {
                 putString("all_categories", allCats)
                 putStringSet("word_freq", words)
                 putStringSet("blocked_names", _blockedNames.value)
+                putString("section_order", _sectionOrder.value.joinToString(","))
+                putStringSet("hidden_sections", _hiddenSections.value)
                 putStringSet("deleted_names", _deletedNames.value.map { it.key + "|=|" + it.value }.toSet())
             }.apply()
         }
@@ -1197,6 +1235,28 @@ object DataRepository {
     val deletedNames: StateFlow<Map<String, Long>> = _deletedNames
 
     /** 永久忽略名單：通知服務直接不收，不會再產生任何紀錄 */
+    // 洞察區塊的顯示順序與隱藏清單。只存 id，新版新增的區塊會自動接在後面。
+    private val _sectionOrder = MutableStateFlow<List<String>>(emptyList())
+    val sectionOrder: StateFlow<List<String>> = _sectionOrder
+    private val _hiddenSections = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenSections: StateFlow<Set<String>> = _hiddenSections
+
+    fun setSectionOrder(ids: List<String>) {
+        _sectionOrder.value = ids
+        saveData(immediate = true)
+    }
+
+    fun toggleSectionHidden(id: String) {
+        _hiddenSections.update { if (id in it) it - id else it + id }
+        saveData(immediate = true)
+    }
+
+    fun resetSections() {
+        _sectionOrder.value = emptyList()
+        _hiddenSections.value = emptySet()
+        saveData(immediate = true)
+    }
+
     private val _blockedNames = MutableStateFlow<Set<String>>(emptySet())
     val blockedNames: StateFlow<Set<String>> = _blockedNames
 
@@ -3072,6 +3132,11 @@ class RelateViewModel : ViewModel() {
     }
     fun deleteContacts(names: Set<String>) = DataRepository.deleteContactsWithTrash(names)
     val blockedNames = DataRepository.blockedNames
+    val sectionOrder = DataRepository.sectionOrder
+    val hiddenSections = DataRepository.hiddenSections
+    fun setSectionOrder(ids: List<String>) = DataRepository.setSectionOrder(ids)
+    fun toggleSectionHidden(id: String) = DataRepository.toggleSectionHidden(id)
+    fun resetSections() = DataRepository.resetSections()
     fun resurrectedNames() = DataRepository.resurrectedNames()
     fun blockName(n: String) = DataRepository.blockName(n)
     fun forgetDeleted(n: String) = DataRepository.forgetDeleted(n)
@@ -4505,6 +4570,14 @@ fun InsightsView(viewModel: RelateViewModel) {
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     // 圖表點下去要看得到「是哪些人」，不能只給一個總數
     var drill by remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
+    val secOrder by viewModel.sectionOrder.collectAsState()
+    val secHidden by viewModel.hiddenSections.collectAsState()
+    var showSectionEditor by remember { mutableStateOf(false) }
+    // 依存檔順序排好的完整區塊清單；沒排到的接在後面
+    val orderedMeta = remember(secOrder) {
+        val byId = INSIGHT_SECTIONS.associateBy { it.first }
+        secOrder.mapNotNull { byId[it] } + INSIGHT_SECTIONS.filter { it.first !in secOrder }
+    }
 
     /** 從目前篩選範圍內挑出符合條件的紀錄，算成排行後開對話框 */
     fun drillInto(title: String, predicate: (InteractionRecord) -> Boolean) {
@@ -4526,6 +4599,25 @@ fun InsightsView(viewModel: RelateViewModel) {
 
     drill?.let { (title, stats) ->
         OverviewDetailDialog(title = title, stats = stats) { drill = null }
+    }
+
+    if (showSectionEditor) {
+        SectionOrderDialog(
+            sections = orderedMeta,
+            hidden = secHidden,
+            onMove = { id, delta ->
+                val cur = orderedMeta.map { it.first }.toMutableList()
+                val i = cur.indexOf(id)
+                val j = i + delta
+                if (i >= 0 && j in cur.indices) {
+                    cur[i] = cur[j].also { cur[j] = cur[i] }
+                    viewModel.setSectionOrder(cur)
+                }
+            },
+            onToggle = { viewModel.toggleSectionHidden(it) },
+            onReset = { viewModel.resetSections() },
+            onDismiss = { showSectionEditor = false }
+        )
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -4557,9 +4649,15 @@ fun InsightsView(viewModel: RelateViewModel) {
                 return@LazyColumn
             }
 
+            // ⚠️ 這些區塊不是直接 item{} 出去，而是先收集成清單，
+            //    再依使用者存的順序輸出，並跳過被隱藏的。
+            //    收集與輸出都在同一個 content lambda 裡，收集在前、輸出在後，
+            //    所以順序是對的；容器宣告在 lambda 內，每次重組都是新的，不會累加。
+            val sections = ArrayList<Sec>()
+
             // ── 1. 與上期比較 ──
             b.deltas?.let { (dur, msg, ppl) ->
-                item {
+                sections.add(Sec("delta", "與上期比較") {
                     Panel {
                         SectionHead("與上期比較") {
                             Text("同長度的前一區間", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
@@ -4579,11 +4677,11 @@ fun InsightsView(viewModel: RelateViewModel) {
                             }
                         }
                     }
-                }
+                })
             }
 
             // ── 2. 逐日趨勢 ──
-            item {
+            sections.add(Sec("trend", "逐日趨勢") {
                 val (mode, setMode) = remember { mutableStateOf("M") }
                 Panel {
                     SectionHead("逐日趨勢") {
@@ -4591,10 +4689,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                     }
                     TrendChart(b.trend, mode == "D")
                 }
-            }
+            })
 
             // ── 3. 平均與極值 ──
-            item {
+            sections.add(Sec("avg", "每日平均") {
                 Panel {
                     SectionHead("每日平均")
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -4612,10 +4710,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                         StatPair("最長單次停留", formatDuration(b.extras.longestSessionSec), null, Modifier.weight(1f))
                     }
                 }
-            }
+            })
 
             // ── 4. 活躍密度 ──
-            item {
+            sections.add(Sec("contrib", "活躍密度") {
                 Panel {
                     SectionHead("活躍密度") {
                         InfoDot(
@@ -4630,10 +4728,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                     }
                     ContributionGrid(b.contrib)
                 }
-            }
+            })
 
             // ── 5. 活躍天數 ──
-            item {
+            sections.add(Sec("coverage", "活躍天數") {
                 Panel {
                     SectionHead("活躍天數")
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -4646,10 +4744,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                         StatPair("最長連續", "${b.coverage.longestStreak} 天", null, Modifier.weight(1f))
                     }
                 }
-            }
+            })
 
             // ── 6. 社交集中度 ──
-            item {
+            sections.add(Sec("conc", "社交集中度") {
                 Panel {
                     SectionHead("社交集中度") {
                         InfoDot(
@@ -4671,10 +4769,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                         StatPair("前三名佔比", "${b.conc.top3Pct}%", null, Modifier.weight(1f))
                     }
                 }
-            }
+            })
 
             // ── 7. 訊息 vs 停留（一體兩面） ──
-            item {
+            sections.add(Sec("msgtime", "訊息 vs 停留") {
                 Panel {
                     SectionHead("訊息 vs 停留")
                     Text(
@@ -4692,10 +4790,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                         }
                     }
                 }
-            }
+            })
 
             // ── 8. 平日 vs 週末 ──
-            item {
+            sections.add(Sec("weekday", "平日 vs 週末") {
                 Panel {
                     SectionHead("平日 vs 週末")
                     SplitBar(
@@ -4705,10 +4803,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                         onRightClick = { drillInto("週末的互動對象") { r -> isWeekend(r.timestamp) } }
                     ) { "$it 則" }
                 }
-            }
+            })
 
             // ── 9. 群組 vs 個人 ──
-            item {
+            sections.add(Sec("groupvs", "群組 vs 個人") {
                 Panel {
                     SectionHead("群組 vs 個人")
                     SplitBar(
@@ -4725,10 +4823,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                         onRightClick = { drillInto("個人停留") { r -> !r.isGroup && r.durationSeconds > 0 } }
                     ) { formatDuration(it) }
                 }
-            }
+            })
 
             // ── 10. 深夜社交 ──
-            item {
+            sections.add(Sec("night", "深夜社交") {
                 Panel {
                     SectionHead("深夜社交指數") {
                         InfoDot(
@@ -4753,11 +4851,11 @@ fun InsightsView(viewModel: RelateViewModel) {
                         )
                     }
                 }
-            }
+            })
 
             // ── 11. 通話統計 ──
             if (b.calls.total > 0) {
-                item {
+                sections.add(Sec("calls", "通話統計") {
                     Panel {
                         SectionHead("通話統計")
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -4783,12 +4881,12 @@ fun InsightsView(viewModel: RelateViewModel) {
                             )
                         }
                     }
-                }
+                })
             }
 
             // ── 12. 訊息長度分佈 ──
             if (b.lengths.isNotEmpty()) {
-                item {
+                sections.add(Sec("lengths", "訊息長度分佈") {
                     Panel {
                         SectionHead("訊息長度分佈") {
                             Text("平均 ${b.extras.avgWordsPerMsg} 字／則", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
@@ -4817,12 +4915,12 @@ fun InsightsView(viewModel: RelateViewModel) {
                             )
                         }
                     }
-                }
+                })
             }
 
             // ── 13. 連續互動排行 ──
             if (b.streaks.isNotEmpty()) {
-                item {
+                sections.add(Sec("streaks", "連續互動排行") {
                     Panel {
                         SectionHead("連續互動天數") {
                             Text("到今天為止", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
@@ -4832,12 +4930,12 @@ fun InsightsView(viewModel: RelateViewModel) {
                             DataRow(name = name, dotColor = AppColors.Positive, progress = days / maxS, primary = "$days 天")
                         }
                     }
-                }
+                })
             }
 
             // ── 14. 跨平台聯絡 ──
             if (b.cross.isNotEmpty()) {
-                item {
+                sections.add(Sec("cross", "跨平台聯絡") {
                     Panel {
                         SectionHead("跨平台聯絡") {
                             Text("同時用多個 App", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
@@ -4846,11 +4944,11 @@ fun InsightsView(viewModel: RelateViewModel) {
                             DataRow(name = name, dotColor = AppColors.FamilyText, progress = n / 4f, primary = "$n 個平台")
                         }
                     }
-                }
+                })
             }
 
             // ── 15. 社交人格 ──
-            item {
+            sections.add(Sec("persona", "社交人格") {
                 val persona = b.persona
                 Panel {
                     SectionHead("社交人格")
@@ -4863,11 +4961,11 @@ fun InsightsView(viewModel: RelateViewModel) {
                         }
                     }
                 }
-            }
+            })
 
             // ── 16. 關係變化 ──
             if (b.churn.newcomers.isNotEmpty() || b.churn.dormant.isNotEmpty()) {
-                item {
+                sections.add(Sec("churn", "關係變化") {
                     Panel {
                         SectionHead("關係變化")
                         if (b.churn.newcomers.isNotEmpty()) {
@@ -4887,6 +4985,26 @@ fun InsightsView(viewModel: RelateViewModel) {
                             }
                         }
                     }
+                })
+            }
+
+            // 依存檔順序排；沒排到的（新版新增的區塊）接在後面
+            val byId = sections.associateBy { it.id }
+            val ordered = (secOrder.mapNotNull { byId[it] } + sections.filter { it.id !in secOrder })
+            ordered.filter { it.id !in secHidden }.forEach { sc -> item(key = sc.id) { sc.body() } }
+
+            item {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(AppColors.Surface)
+                        .border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp))
+                        .clickable { showSectionEditor = true }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("調整區塊順序 / 隱藏", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -7138,6 +7256,83 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+}
+
+/**
+ * 洞察區塊的排序 / 隱藏。
+ *
+ * 用上下箭頭而不是拖曳：拖曳在對話框裡跟外層的捲動會互搶手勢，
+ * 而且要多帶一個排序函式庫；箭頭一次移一格，行為明確也按得準。
+ */
+@Composable
+fun SectionOrderDialog(
+    sections: List<Pair<String, String>>,
+    hidden: Set<String>,
+    onMove: (String, Int) -> Unit,
+    onToggle: (String) -> Unit,
+    onReset: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("區塊順序", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text("用箭頭上下移動；點眼睛可以隱藏不想看的區塊",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
+            }
+        },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                itemsIndexed(sections, key = { _, it -> it.first }) { idx, (id, label) ->
+                    val isHidden = id in hidden
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            label,
+                            fontSize = T.Body,
+                            fontWeight = FontWeight.Medium,
+                            color = if (isHidden) AppColors.TextTertiary else AppColors.TextPrimary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            if (isHidden) "隱藏中" else "顯示",
+                            fontSize = T.Micro,
+                            color = if (isHidden) AppColors.TextTertiary else AppColors.Positive,
+                            fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                            modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                .clickable { onToggle(id) }
+                                .padding(horizontal = 8.dp, vertical = 8.dp)
+                        )
+                        Text(
+                            "↑", fontSize = 17.sp, textAlign = TextAlign.Center,
+                            color = if (idx > 0) AppColors.ActiveBlue else AppColors.BorderStrong,
+                            modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                .clickable(enabled = idx > 0) { onMove(id, -1) }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                        Text(
+                            "↓", fontSize = 17.sp, textAlign = TextAlign.Center,
+                            color = if (idx < sections.size - 1) AppColors.ActiveBlue else AppColors.BorderStrong,
+                            modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                .clickable(enabled = idx < sections.size - 1) { onMove(id, 1) }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)) {
+                Text("完成")
+            }
+        },
+        dismissButton = { TextButton(onClick = onReset) { Text("回到預設", color = AppColors.TextSecondary) } }
     )
 }
 
