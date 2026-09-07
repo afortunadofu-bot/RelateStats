@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 24-25 沒有 adaptive-icon，改用 layer-list 疊同一組向量。
+  前景在 108 畫布上只佔中央 72（給遮罩留的安全區），舊系統不會套遮罩，
+  直接疊會顯得很小 —— 所以用負 inset 把前景放大回來填滿。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_launcher_background" />
+    <item
+        android:drawable="@drawable/ic_launcher_foreground"
+        android:left="-14dp"
+        android:top="-14dp"
+        android:right="-14dp"
+        android:bottom="-14dp" />
+</layer-list>

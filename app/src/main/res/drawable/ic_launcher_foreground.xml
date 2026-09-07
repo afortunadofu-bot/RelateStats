@@ -1,74 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  三根遞增的膠囊 ＝ 統計；最高那根頂端的圓點 ＝ 你花最多注意力的那個人。
+
+  ⚠️ 所有圖形都必須落在 108 畫布的中央 72x72 安全區（18..90）內，
+     否則不同廠商的圓形／方形遮罩會把邊緣切掉。
+  ⚠️ 只用兩個顏色、沒有漸層與陰影：縮到 24px 時任何裝飾都會糊成雜訊。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="512"
-    android:viewportHeight="512">
-  <group android:scaleX="0.7"
-      android:scaleY="0.7"
-      android:translateX="76.8"
-      android:translateY="76.8">
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 膠囊寬 13、基線 y=78；三根 x 中心 34.5 / 53.5 / 72.5 -->
     <path
-        android:pathData="M115,0L397,0A115,115 0,0 1,512 115L512,397A115,115 0,0 1,397 512L115,512A115,115 0,0 1,0 397L0,115A115,115 0,0 1,115 0z">
-      <aapt:attr name="android:fillColor">
-        <gradient
-            android:startX="-0"
-            android:startY="0"
-            android:endX="512"
-            android:endY="512"
-            android:type="linear">
-          <item android:offset="0" android:color="#FF1E293B"/>
-          <item android:offset="1" android:color="#FF0F172A"/>
-        </gradient>
-      </aapt:attr>
-    </path>
+        android:fillColor="#F8FAFC"
+        android:fillAlpha="0.55"
+        android:pathData="M34.5,64m-6.5,0a6.5,6.5 0,1 1,13 0l0,7.5a6.5,6.5 0,1 1,-13 0z" />
     <path
-        android:pathData="M156,116L356,116A80,80 0,0 1,436 196L436,276A80,80 0,0 1,356 356L156,356A80,80 0,0 1,76 276L76,196A80,80 0,0 1,156 116z"
-        android:fillColor="#FFFFFF"/>
+        android:fillColor="#F8FAFC"
+        android:fillAlpha="0.8"
+        android:pathData="M53.5,54m-6.5,0a6.5,6.5 0,1 1,13 0l0,17.5a6.5,6.5 0,1 1,-13 0z" />
     <path
-        android:pathData="M156,320L156,410C156,425 175,430 185,418L256,340Z"
-        android:fillColor="#FFFFFF"/>
+        android:fillColor="#F8FAFC"
+        android:pathData="M72.5,44m-6.5,0a6.5,6.5 0,1 1,13 0l0,27.5a6.5,6.5 0,1 1,-13 0z" />
+    <!-- 節點：比膠囊寬，蓋在最高那根頂端，像一根被標記的指標 -->
     <path
-        android:pathData="M178,236L194,236A12,12 0,0 1,206 248L206,274A12,12 0,0 1,194 286L178,286A12,12 0,0 1,166 274L166,248A12,12 0,0 1,178 236z">
-      <aapt:attr name="android:fillColor">
-        <gradient
-            android:startX="166"
-            android:startY="236"
-            android:endX="166"
-            android:endY="286"
-            android:type="linear">
-          <item android:offset="0" android:color="#FF60A5FA"/>
-          <item android:offset="1" android:color="#FF3B82F6"/>
-        </gradient>
-      </aapt:attr>
-    </path>
-    <path
-        android:pathData="M248,196L264,196A12,12 0,0 1,276 208L276,274A12,12 0,0 1,264 286L248,286A12,12 0,0 1,236 274L236,208A12,12 0,0 1,248 196z">
-      <aapt:attr name="android:fillColor">
-        <gradient
-            android:startX="236"
-            android:startY="196"
-            android:endX="236"
-            android:endY="286"
-            android:type="linear">
-          <item android:offset="0" android:color="#FFA78BFA"/>
-          <item android:offset="1" android:color="#FF8B5CF6"/>
-        </gradient>
-      </aapt:attr>
-    </path>
-    <path
-        android:pathData="M318,146L334,146A12,12 0,0 1,346 158L346,274A12,12 0,0 1,334 286L318,286A12,12 0,0 1,306 274L306,158A12,12 0,0 1,318 146z">
-      <aapt:attr name="android:fillColor">
-        <gradient
-            android:startX="306"
-            android:startY="146"
-            android:endX="306"
-            android:endY="286"
-            android:type="linear">
-          <item android:offset="0" android:color="#FF34D399"/>
-          <item android:offset="1" android:color="#FF10B981"/>
-        </gradient>
-      </aapt:attr>
-    </path>
-  </group>
+        android:fillColor="#3B82F6"
+        android:pathData="M72.5,30m-9,0a9,9 0,1 0,18 0a9,9 0,1 0,-18 0z" />
 </vector>

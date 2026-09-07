@@ -77,6 +77,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -556,6 +557,11 @@ fun startOfDayMs(ts: Long): Long = Calendar.getInstance().apply {
     set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
     set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
 }.timeInMillis
+
+fun isWeekend(ts: Long): Boolean {
+    val d = Calendar.getInstance().apply { timeInMillis = ts }.get(Calendar.DAY_OF_WEEK)
+    return d == Calendar.SATURDAY || d == Calendar.SUNDAY
+}
 
 /** 活躍密度的一格：某一天的互動次數與聊天人數 */
 data class ContribDay(val dayStart: Long, val count: Int, val people: Int)
@@ -2854,6 +2860,8 @@ class RelateViewModel : ViewModel() {
         val avgDurPerActiveDay: Long = 0L,
         val busiestDayLabel: String = "—",
         val busiestDayCount: Int = 0,
+        // 下鑽需要實際日期，label 只是「8/12」這種字串，回推不回去
+        val busiestDayStart: Long = 0L,
         val longestSessionSec: Long = 0L,
         val weekdayMsgs: Int = 0,
         val weekendMsgs: Int = 0,
@@ -2894,6 +2902,7 @@ class RelateViewModel : ViewModel() {
             avgDurPerActiveDay = scoped.sumOf { it.durationSeconds.toLong() } / activeDays,
             busiestDayLabel = label,
             busiestDayCount = busiest?.value ?: 0,
+            busiestDayStart = busiest?.key ?: 0L,
             longestSessionSec = longest,
             weekdayMsgs = weekday,
             weekendMsgs = weekend,
@@ -3255,12 +3264,32 @@ fun MainAppContent(viewModel: RelateViewModel) {
         topBar = {
             Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface).statusBarsPadding().padding(top = 8.dp)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(horizontal = D.Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier.size(26.dp)
-                            .background(AppColors.BrandPrimary, RoundedCornerShape(7.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("R", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Black, maxLines = 1, softWrap = false)
+                    // 跟 App icon 同一個記號：三根遞增膠囊 + 頂端節點
+                    Canvas(modifier = Modifier.size(26.dp)) {
+                        val r = size.minDimension * 0.26f
+                        drawRoundRect(
+                            color = AppColors.BrandPrimary,
+                            cornerRadius = CornerRadius(r, r)
+                        )
+                        val w = size.width * 0.12f
+                        val base = size.height * 0.72f
+                        val xs = listOf(0.32f, 0.5f, 0.68f)
+                        val tops = listOf(0.53f, 0.44f, 0.35f)
+                        val alphas = listOf(0.55f, 0.8f, 1f)
+                        xs.forEachIndexed { i, cx ->
+                            val left = size.width * cx - w / 2
+                            drawRoundRect(
+                                color = Color.White.copy(alpha = alphas[i]),
+                                topLeft = Offset(left, size.height * tops[i]),
+                                size = Size(w, base - size.height * tops[i]),
+                                cornerRadius = CornerRadius(w / 2, w / 2)
+                            )
+                        }
+                        drawCircle(
+                            color = AppColors.ActiveBlue,
+                            radius = w * 0.72f,
+                            center = Offset(size.width * 0.68f, size.height * 0.28f)
+                        )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("RelateStats", color = AppColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.4).sp)
@@ -4034,7 +4063,10 @@ fun SegBar(options: List<Pair<String, String>>, current: String, onSelect: (Stri
 
 /** KPI 方塊 */
 @Composable
-fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier: Modifier = Modifier) {
+fun KpiTile(
+    label: String, value: String, sub: String?, accent: Color,
+    modifier: Modifier = Modifier, onClick: (() -> Unit)? = null
+) {
     // ⚠️ 不可以寫死 .height()。方塊高度是 dp、裡面的字是 sp，
     //    使用者把系統字體放大時 sp 會變大、dp 不會，第三行就會被裁掉。
     //    改成內容決定高度；同列要等高，由外層 Row 的 IntrinsicSize.Min + fillMaxHeight 負責。
@@ -4042,8 +4074,10 @@ fun KpiTile(label: String, value: String, sub: String?, accent: Color, modifier:
         modifier = modifier
             .fillMaxHeight()
             .heightIn(min = 76.dp)
-            .background(AppColors.Surface, RoundedCornerShape(D.Radius))
+            .clip(RoundedCornerShape(D.Radius))
+            .background(AppColors.Surface)
             .border(1.dp, AppColors.BorderLight, RoundedCornerShape(D.Radius))
+            .let { m -> if (onClick != null) m.clickable { onClick() } else m }
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -4119,9 +4153,26 @@ fun DeltaBadge(pct: Int?) {
 
 /** 兩欄小統計 */
 @Composable
-fun StatPair(label: String, value: String, sub: String? = null, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 7.dp)) {
-        Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+fun StatPair(
+    label: String, value: String, sub: String? = null,
+    modifier: Modifier = Modifier, onClick: (() -> Unit)? = null
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(AppColors.SurfaceAlt)
+            .let { m -> if (onClick != null) m.clickable { onClick() } else m }
+            .padding(horizontal = 9.dp, vertical = 7.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            // 可以點的要看得出來，否則使用者不會知道還有東西
+            if (onClick != null) {
+                Spacer(modifier = Modifier.width(3.dp))
+                Text("›", fontSize = T.Body, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+            }
+        }
         Text(value, fontSize = T.KpiSm, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         // ⚠️ 副標一定要畫，沒有就畫空字串。這個元件都是兩兩並排，
         //    只要一格有副標、另一格沒有，兩格高度就會差一行，看起來就是跑版。
@@ -4292,21 +4343,47 @@ fun ContributionGrid(data: List<ContribDay>) {
 
 /** 水平比例條（群組 vs 個人之類的二分佔比） */
 @Composable
-fun SplitBar(leftLabel: String, leftValue: Long, rightLabel: String, rightValue: Long, leftColor: Color, rightColor: Color, fmt: (Long) -> String) {
+fun SplitBar(
+    leftLabel: String, leftValue: Long, rightLabel: String, rightValue: Long,
+    leftColor: Color, rightColor: Color,
+    // ⚠️ fmt 必須留在最後一個參數：呼叫端都是用尾隨 lambda 傳它的，
+    //    把別的參數排在它後面會讓尾隨 lambda 改綁到那個參數上。
+    onLeftClick: (() -> Unit)? = null, onRightClick: (() -> Unit)? = null,
+    fmt: (Long) -> String
+) {
     val total = (leftValue + rightValue).coerceAtLeast(1L)
+    // 長條與底下的圖例都可點：使用者想點哪邊看哪邊，兩處都要有反應
     Column {
-        Row(modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
-            Box(modifier = Modifier.weight(leftValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight().background(leftColor))
-            Box(modifier = Modifier.weight(rightValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight().background(rightColor))
+        Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp))) {
+            Box(
+                modifier = Modifier.weight(leftValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight()
+                    .background(leftColor)
+                    .let { m -> if (onLeftClick != null) m.clickable { onLeftClick() } else m }
+            )
+            Box(
+                modifier = Modifier.weight(rightValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight()
+                    .background(rightColor)
+                    .let { m -> if (onRightClick != null) m.clickable { onRightClick() } else m }
+            )
         }
         Spacer(modifier = Modifier.height(6.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                    .let { m -> if (onLeftClick != null) m.clickable { onLeftClick() } else m }
+                    .padding(vertical = 3.dp, horizontal = 2.dp)
+            ) {
                 Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(leftColor))
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("$leftLabel ${fmt(leftValue)} · ${(leftValue * 100 / total)}%", fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                    .let { m -> if (onRightClick != null) m.clickable { onRightClick() } else m }
+                    .padding(vertical = 3.dp, horizontal = 2.dp)
+            ) {
                 Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(rightColor))
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("$rightLabel ${fmt(rightValue)} · ${(rightValue * 100 / total)}%", fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
@@ -4329,6 +4406,14 @@ fun InsightsView(viewModel: RelateViewModel) {
     val filter by viewModel.timeFilter.collectAsState()
     val weekStartDay by viewModel.weekStartDay.collectAsState()
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+    // 圖表點下去要看得到「是哪些人」，不能只給一個總數
+    var drill by remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
+
+    /** 從目前篩選範圍內挑出符合條件的紀錄，算成排行後開對話框 */
+    fun drillInto(title: String, predicate: (InteractionRecord) -> Boolean) {
+        val rs = viewModel.getFilteredRecords(records, filter).filter(predicate)
+        drill = title to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats)
+    }
 
     // 十幾項統計一次算完並丟到背景執行緒；同步做會直接凍住畫面
     val b by produceState(
@@ -4340,6 +4425,10 @@ fun InsightsView(viewModel: RelateViewModel) {
         value = withContext(Dispatchers.Default) {
             viewModel.buildInsights(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
         }
+    }
+
+    drill?.let { (title, stats) ->
+        OverviewDetailDialog(title = title, stats = stats) { drill = null }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -4417,7 +4506,12 @@ fun InsightsView(viewModel: RelateViewModel) {
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatPair("最忙的一天", b.extras.busiestDayLabel, "${b.extras.busiestDayCount} 則", Modifier.weight(1f))
+                        StatPair("最忙的一天", b.extras.busiestDayLabel, "${b.extras.busiestDayCount} 則", Modifier.weight(1f)) {
+                            val day = b.extras.busiestDayStart
+                            drillInto("${b.extras.busiestDayLabel} 的互動對象") { r ->
+                                startOfDayMs(r.timestamp) == day
+                            }
+                        }
                         StatPair("最長單次停留", formatDuration(b.extras.longestSessionSec), null, Modifier.weight(1f))
                     }
                 }
@@ -4493,8 +4587,12 @@ fun InsightsView(viewModel: RelateViewModel) {
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatPair("被動接收", "${b.extras.weekdayMsgs + b.extras.weekendMsgs} 則", "通知攔截", Modifier.weight(1f))
-                        StatPair("主動開啟", "${b.extras.openedChats} 次", "進入聊天室", Modifier.weight(1f))
+                        StatPair("被動接收", "${b.extras.weekdayMsgs + b.extras.weekendMsgs} 則", "通知攔截", Modifier.weight(1f)) {
+                            drillInto("被動接收（通知攔截）") { r -> r.isIncoming && !r.isCall }
+                        }
+                        StatPair("主動開啟", "${b.extras.openedChats} 次", "進入聊天室", Modifier.weight(1f)) {
+                            drillInto("主動開啟（進入聊天室）") { r -> r.durationSeconds > 0 }
+                        }
                     }
                 }
             }
@@ -4503,8 +4601,12 @@ fun InsightsView(viewModel: RelateViewModel) {
             item {
                 Panel {
                     SectionHead("平日 vs 週末")
-                    SplitBar("平日", b.extras.weekdayMsgs.toLong(), "週末", b.extras.weekendMsgs.toLong(),
-                        AppColors.ActiveBlue, AppColors.WorkText) { "$it 則" }
+                    SplitBar(
+                        "平日", b.extras.weekdayMsgs.toLong(), "週末", b.extras.weekendMsgs.toLong(),
+                        AppColors.ActiveBlue, AppColors.WorkText,
+                        onLeftClick = { drillInto("平日的互動對象") { r -> !isWeekend(r.timestamp) } },
+                        onRightClick = { drillInto("週末的互動對象") { r -> isWeekend(r.timestamp) } }
+                    ) { "$it 則" }
                 }
             }
 
@@ -4512,11 +4614,19 @@ fun InsightsView(viewModel: RelateViewModel) {
             item {
                 Panel {
                     SectionHead("群組 vs 個人")
-                    SplitBar("群組", b.split.groupMsgs.toLong(), "個人", b.split.personMsgs.toLong(),
-                        AppColors.GroupText, AppColors.ActiveBlue) { "$it 則" }
+                    SplitBar(
+                        "群組", b.split.groupMsgs.toLong(), "個人", b.split.personMsgs.toLong(),
+                        AppColors.GroupText, AppColors.ActiveBlue,
+                        onLeftClick = { drillInto("群組") { r -> r.isGroup } },
+                        onRightClick = { drillInto("個人") { r -> !r.isGroup } }
+                    ) { "$it 則" }
                     Spacer(modifier = Modifier.height(10.dp))
-                    SplitBar("群組停留", b.split.groupDuration, "個人停留", b.split.personDuration,
-                        AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f)) { formatDuration(it) }
+                    SplitBar(
+                        "群組停留", b.split.groupDuration, "個人停留", b.split.personDuration,
+                        AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f),
+                        onLeftClick = { drillInto("群組停留") { r -> r.isGroup && r.durationSeconds > 0 } },
+                        onRightClick = { drillInto("個人停留") { r -> !r.isGroup && r.durationSeconds > 0 } }
+                    ) { formatDuration(it) }
                 }
             }
 
@@ -4586,13 +4696,27 @@ fun InsightsView(viewModel: RelateViewModel) {
                         SectionHead("訊息長度分佈") {
                             Text("平均 ${b.extras.avgWordsPerMsg} 字／則", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                         }
-                        b.lengths.forEach { (label, count, pct) ->
+                        b.lengths.forEachIndexed { i, triple ->
+                            val (label, count, pct) = triple
+                            // 五個級距對應的字數區間，點下去看是誰在傳這種長度的訊息
+                            val range = when (i) {
+                                0 -> 1..5
+                                1 -> 6..15
+                                2 -> 16..40
+                                3 -> 41..100
+                                else -> 101..Int.MAX_VALUE
+                            }
                             DataRow(
                                 name = label,
                                 dotColor = AppColors.ActiveBlue,
                                 progress = pct,
                                 primary = "$count 則",
-                                secondary = "${(pct * 100).toInt()}%"
+                                secondary = "${(pct * 100).toInt()}%",
+                                onClick = {
+                                    drillInto("$label 的訊息來自") { r ->
+                                        r.isIncoming && !r.isCall && r.wordCount in range
+                                    }
+                                }
                             )
                         }
                     }
@@ -4823,16 +4947,24 @@ fun OverviewView(viewModel: RelateViewModel) {
                 // IntrinsicSize.Min：先量兩格各自需要的高度，取較高者當整列高度。
                 // 這樣字體放大時整列一起長高，既不裁字也不會兩格高低不齊。
                 Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
-                    KpiTile("接收訊息", "$totalNotifs 則", "來自 ${leaderboard.size} 位對象", AppColors.Positive, Modifier.weight(1f))
-                    KpiTile("停留時間", formatDuration(totalTimeSec), if (screenPct > 0) "佔手機用量 $screenPct%" else "開啟聊天室的時間", AppColors.ActiveBlue, Modifier.weight(1f))
+                    KpiTile("接收訊息", "$totalNotifs 則", "來自 ${leaderboard.size} 位對象", AppColors.Positive, Modifier.weight(1f)) {
+                        setActiveDetailDialog("依訊息數排序" to leaderboard.sortedByDescending { it.msgCount })
+                    }
+                    KpiTile("停留時間", formatDuration(totalTimeSec), if (screenPct > 0) "佔手機用量 $screenPct%" else "開啟聊天室的時間", AppColors.ActiveBlue, Modifier.weight(1f)) {
+                        setActiveDetailDialog("依停留時間排序" to leaderboard.sortedByDescending { it.totalDurationSeconds })
+                    }
                 }
                 Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(D.Gap)) {
                     val topByMsg = leaderboard.maxByOrNull { it.msgCount }
                     KpiTile("訊息最多", topByMsg?.unifiedName ?: "—", topByMsg?.let { "${it.msgCount} 則" } ?: "尚無資料",
-                        AppColors.FamilyText, Modifier.weight(1f))
+                        AppColors.FamilyText, Modifier.weight(1f)) {
+                        topByMsg?.let { overviewDetailTarget = it }
+                    }
                     val topByTime = leaderboard.maxByOrNull { it.totalDurationSeconds }
                     KpiTile("停留最久", topByTime?.unifiedName ?: "—", topByTime?.let { formatDuration(it.totalDurationSeconds) } ?: "尚無資料",
-                        AppColors.WorkText, Modifier.weight(1f))
+                        AppColors.WorkText, Modifier.weight(1f)) {
+                        topByTime?.let { overviewDetailTarget = it }
+                    }
                 }
             }
         }
@@ -5110,21 +5242,38 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
                 Text("這段期間沒有互動紀錄", fontSize = T.Label, color = AppColors.TextSecondary)
                 return@Panel
             }
-            Spacer(modifier = Modifier.height(10.dp))
+            // 選中的格子（星期, 小時）
+            var picked by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+            Box(modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp), contentAlignment = Alignment.CenterStart) {
+                val p = picked
+                if (p != null) {
+                    Text(
+                        days[p.first] + " " + String.format(Locale.US, "%02d:00-%02d:59", p.second, p.second) +
+                            " · " + grid[p.first][p.second] + " 次",
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
+                    )
+                } else {
+                    Text("點格子看那個時段的次數", fontSize = T.Micro, color = AppColors.TextTertiary)
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
             // 標籤欄寬必須跟下方時間軸的 padding 用同一個值，否則兩排會對不齊
             val labelW = 20.dp
             grid.forEachIndexed { d, row ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
                     Text(days[d], fontSize = T.Micro, color = AppColors.TextTertiary,
                         modifier = Modifier.widthIn(min = labelW), textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
-                    row.forEach { v ->
+                    row.forEachIndexed { h, v ->
                         val alpha = if (v == 0) 0f else 0.2f + 0.8f * (v.toFloat() / max)
+                        val on = picked?.first == d && picked?.second == h
                         Box(
                             modifier = Modifier.weight(1f).aspectRatio(1f).padding(0.5.dp)
                                 .background(
                                     if (v == 0) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.ActiveBlue.copy(alpha = alpha),
                                     RoundedCornerShape(2.dp)
                                 )
+                                .then(if (on) Modifier.border(1.5.dp, AppColors.BrandPrimary, RoundedCornerShape(2.dp)) else Modifier)
+                                .clickable { picked = if (on) null else (d to h) }
                         )
                     }
                 }
@@ -5143,6 +5292,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>) {
 fun TopWordsCard(wordFreq: Map<String, Int>) {
     // 預設看 3 字：2 字組合太容易切出「送了」「了貼」這種跨詞邊界的碎片
     var mode by remember { mutableStateOf("3") }
+    var picked by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val top = remember(wordFreq, mode) {
         wordFreq.entries.asSequence()
             .filter { e ->
@@ -5173,17 +5323,32 @@ fun TopWordsCard(wordFreq: Map<String, Int>) {
                 return@Panel
             }
             val maxCount = top.first().second.coerceAtLeast(1)
+            picked?.let { (w, c) ->
+                val share = (c * 100f / top.sumOf { it.second }.coerceAtLeast(1)).let { "%.1f".format(it) }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                        .background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("「$w」", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    Text("$c 次 · 佔榜上 $share%", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                }
+            }
             top.chunked(3).forEach { rowWords ->
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     rowWords.forEach { (word, count) ->
                         val ratio = count.toFloat() / maxCount
+                        val rank = top.indexOfFirst { it.first == word } + 1
                         Column(
                             modifier = Modifier.weight(1f)
-                                .background(AppColors.ActiveBlue.copy(alpha = 0.08f + 0.22f * ratio), RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(AppColors.ActiveBlue.copy(alpha = 0.08f + 0.22f * ratio))
+                                .clickable { picked = if (picked?.first == word) null else (word to count) }
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                         ) {
                             Text(word, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("$count 次", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                            Text("$count 次 · 第 $rank", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                         }
                     }
                     repeat(3 - rowWords.size) { Spacer(modifier = Modifier.weight(1f)) }
