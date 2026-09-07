@@ -1,30 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  三根遞增的膠囊 ＝ 統計；最高那根頂端的圓點 ＝ 你花最多注意力的那個人。
+  三個大小遞增、彼此交疊的圓 ＝ 人，以及你跟他們重疊多少。
+  圓越大表示佔掉你越多注意力；最大的那個用品牌藍點出重點。
 
   ⚠️ 所有圖形都必須落在 108 畫布的中央 72x72 安全區（18..90）內，
      否則不同廠商的圓形／方形遮罩會把邊緣切掉。
-  ⚠️ 只用兩個顏色、沒有漸層與陰影：縮到 24px 時任何裝飾都會糊成雜訊。
+  ⚠️ 只用實心形狀，不用細線與細環：縮到 16px 時 1px 以下的線會整條消失，
+     連接關係只能靠「交疊」來表達。
+  繪製順序：小 → 大。最大的藍圓最後畫，蓋住部分白圓，
+  交疊處自然形成層次，不需要額外的描邊或陰影。
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 膠囊寬 13、基線 y=78；三根 x 中心 34.5 / 53.5 / 72.5 -->
     <path
         android:fillColor="#F8FAFC"
         android:fillAlpha="0.55"
-        android:pathData="M34.5,64m-6.5,0a6.5,6.5 0,1 1,13 0l0,7.5a6.5,6.5 0,1 1,-13 0z" />
+        android:pathData="M30,54m-9,0a9,9 0,1 0,18 0a9,9 0,1 0,-18 0z" />
     <path
         android:fillColor="#F8FAFC"
-        android:fillAlpha="0.8"
-        android:pathData="M53.5,54m-6.5,0a6.5,6.5 0,1 1,13 0l0,17.5a6.5,6.5 0,1 1,-13 0z" />
-    <path
-        android:fillColor="#F8FAFC"
-        android:pathData="M72.5,44m-6.5,0a6.5,6.5 0,1 1,13 0l0,27.5a6.5,6.5 0,1 1,-13 0z" />
-    <!-- 節點：比膠囊寬，蓋在最高那根頂端，像一根被標記的指標 -->
+        android:fillAlpha="0.85"
+        android:pathData="M48,54m-13,0a13,13 0,1 0,26 0a13,13 0,1 0,-26 0z" />
     <path
         android:fillColor="#3B82F6"
-        android:pathData="M72.5,30m-9,0a9,9 0,1 0,18 0a9,9 0,1 0,-18 0z" />
+        android:pathData="M70,54m-18,0a18,18 0,1 0,36 0a18,18 0,1 0,-36 0z" />
 </vector>

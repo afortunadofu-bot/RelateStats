@@ -159,6 +159,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - `mipmap-anydpi-v26/` 是 adaptive-icon；`mipmap-anydpi/` 是 API 24-25 的 layer-list 後備，
   後備用負 inset 把前景放大回來（舊系統不套遮罩，不放大會顯得很小）。
 - 標題列的 logo 是 Compose Canvas 畫的同一個記號，改圖示時記得一起改。
+- **不要用細線或細環**。圖示縮到 16px 時，108 畫布上小於約 10 單位的形狀
+  不到 1.5px，線會整條消失。「關係」這種概念只能用**實心形狀的交疊**來表達，
+  不能用連線。
 
 ### 資料安全
 
@@ -245,6 +248,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v2.8.1 | 2026-09-07 | 圖示改成人際關係的語彙（遞增交疊圓） |
 | v2.8 | 2026-09-07 | 洞察頁 16 個區塊可自行排序與隱藏 |
 | v2.7 | 2026-09-07 | 活躍密度自適應週數與月份刻度；刪過的對象又凒出來會問，可永不記錄 |
 | v2.6 | 2026-09-07 | 全新 App 圖示；圖表與圖例全面可點下鑽 |

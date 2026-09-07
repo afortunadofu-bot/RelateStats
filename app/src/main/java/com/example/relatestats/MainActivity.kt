@@ -3391,32 +3391,24 @@ fun MainAppContent(viewModel: RelateViewModel) {
         topBar = {
             Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface).statusBarsPadding().padding(top = 8.dp)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(horizontal = D.Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    // 跟 App icon 同一個記號：三根遞增膠囊 + 頂端節點
+                    // 跟 App icon 同一個記號：三個遞增、彼此交疊的圓
                     Canvas(modifier = Modifier.size(26.dp)) {
-                        val r = size.minDimension * 0.26f
-                        drawRoundRect(
-                            color = AppColors.BrandPrimary,
-                            cornerRadius = CornerRadius(r, r)
+                        val corner = size.minDimension * 0.26f
+                        drawRoundRect(color = AppColors.BrandPrimary, cornerRadius = CornerRadius(corner, corner))
+                        val cy = size.height * 0.5f
+                        // 比例與 ic_launcher_foreground.xml 一致（108 畫布上的 30/48/70 與 9/13/18）
+                        val spec = listOf(
+                            Triple(0.278f, 0.083f, 0.55f),
+                            Triple(0.444f, 0.120f, 0.85f),
+                            Triple(0.648f, 0.167f, -1f)
                         )
-                        val w = size.width * 0.12f
-                        val base = size.height * 0.72f
-                        val xs = listOf(0.32f, 0.5f, 0.68f)
-                        val tops = listOf(0.53f, 0.44f, 0.35f)
-                        val alphas = listOf(0.55f, 0.8f, 1f)
-                        xs.forEachIndexed { i, cx ->
-                            val left = size.width * cx - w / 2
-                            drawRoundRect(
-                                color = Color.White.copy(alpha = alphas[i]),
-                                topLeft = Offset(left, size.height * tops[i]),
-                                size = Size(w, base - size.height * tops[i]),
-                                cornerRadius = CornerRadius(w / 2, w / 2)
+                        spec.forEach { (cx, rr, alpha) ->
+                            drawCircle(
+                                color = if (alpha < 0f) AppColors.ActiveBlue else Color.White.copy(alpha = alpha),
+                                radius = size.minDimension * rr,
+                                center = Offset(size.width * cx, cy)
                             )
                         }
-                        drawCircle(
-                            color = AppColors.ActiveBlue,
-                            radius = w * 0.72f,
-                            center = Offset(size.width * 0.68f, size.height * 0.28f)
-                        )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("RelateStats", color = AppColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.4).sp)
