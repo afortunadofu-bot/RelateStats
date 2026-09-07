@@ -215,8 +215,17 @@ data class ContactCategory(val id: String, val label: String, val colorInt: Int,
     }
 }
 
-enum class FilterType { SPECIFIC_DAY, WEEK, ALL }
-data class DateFilter(val type: FilterType, val timestamp: Long = System.currentTimeMillis()) {
+enum class FilterType { SPECIFIC_DAY, WEEK, RANGE, ALL }
+
+/**
+ * @param timestamp SPECIFIC_DAY/WEEK 是「這一天」；RANGE 是區間起點。
+ * @param endTimestamp 只有 RANGE 會用到，區間終點（含）。
+ */
+data class DateFilter(
+    val type: FilterType,
+    val timestamp: Long = System.currentTimeMillis(),
+    val endTimestamp: Long = System.currentTimeMillis()
+) {
     fun isSameDay(otherTime: Long): Boolean {
         val cal1 = Calendar.getInstance().apply { timeInMillis = this@DateFilter.timestamp }
         val cal2 = Calendar.getInstance().apply { timeInMillis = otherTime }
@@ -522,6 +531,35 @@ data class SenderStat(
 // ── 深度分析用的模型 ──
 data class TrendPoint(val label: String, val dayStart: Long, val durationSeconds: Long, val msgCount: Int)
 
+/**
+ * 釘在列表頂端的日期列。
+ *
+ * 往下滑之後還是要看得出「現在在看哪一天」，否則捲到一半根本忘了範圍。
+ * 背景必須不透明並帶下緣分隔線，不然捲動的內容會從底下透出來。
+ */
+@Composable
+fun StickyDateBar(filter: DateFilter, onChange: (DateFilter) -> Unit, weekStartDay: Int) {
+    Column(
+        modifier = Modifier.fillMaxWidth()
+            .background(AppColors.Background)
+            .padding(bottom = 8.dp)
+    ) {
+        TimeFilterSelector(filter, onChange, weekStartDay)
+        Spacer(modifier = Modifier.height(6.dp))
+        HorizontalDivider(color = AppColors.BorderLight)
+    }
+}
+
+/** 頂層版的當日零點；ViewModel 內另有一份私有實作 */
+fun startOfDayMs(ts: Long): Long = Calendar.getInstance().apply {
+    timeInMillis = ts
+    set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+    set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+}.timeInMillis
+
+/** 活躍密度的一格：某一天的互動次數與聊天人數 */
+data class ContribDay(val dayStart: Long, val count: Int, val people: Int)
+
 data class PeriodDelta(val current: Long, val previous: Long) {
     /** 與上一個同長度區間相比的變化百分比；上期為 0 時無法計算成長率 */
     val deltaPct: Int? get() = if (previous <= 0L) null else (((current - previous) * 100.0) / previous).toInt()
@@ -682,6 +720,7 @@ object DataRepository {
         ioScope.launch {
             runOneTimeCleanupIfNeeded(appContext)
             runWordPurgeIfNeeded()
+            purgeExpiredTrash()
             performAutoBackupIfNeeded(appContext)
         }
     }
@@ -801,6 +840,74 @@ object DataRepository {
             _categories.update { it + (unifiedName to cat) }
         }
         saveData()
+    }
+
+    // ── 紀錄垃圾桶 ──────────────────────────────────────────
+    // snapshotForUndo 只有「上一步」一份。刪錯東西常常過幾天才發現，
+    // 所以刪掉的紀錄再另存一份，保留 7 天，可個別還原。
+    private const val TRASH_PREFIX = "RelateStats_Trash_"
+    private const val TRASH_KEEP_MS = 7L * 86_400_000L
+
+    data class TrashBatch(val file: String, val deletedAt: Long, val label: String, val count: Int)
+
+    private fun trashDir(): File? = appContext?.filesDir
+
+    /** 刪除前呼叫：把即將消失的紀錄存進垃圾桶 */
+    fun moveToTrash(label: String, records: List<InteractionRecord>) {
+        if (records.isEmpty()) return
+        val dir = trashDir() ?: return
+        runCatching {
+            val now = System.currentTimeMillis()
+            // 檔名自帶時間與標籤，列表不用另外存索引
+            val safe = label.replace(Regex("[^\\u4e00-\\u9fa5A-Za-z0-9]"), "")
+            File(dir, TRASH_PREFIX + now + "_" + safe + ".txt")
+                .writeText(records.joinToString("\n") { it.toCsvString() })
+        }
+    }
+
+    fun listTrash(): List<TrashBatch> {
+        val dir = trashDir() ?: return emptyList()
+        return runCatching {
+            (dir.listFiles { f -> f.name.startsWith(TRASH_PREFIX) } ?: emptyArray()).mapNotNull { f ->
+                val body = f.name.removePrefix(TRASH_PREFIX).removeSuffix(".txt")
+                val ts = body.substringBefore('_').toLongOrNull() ?: return@mapNotNull null
+                val label = body.substringAfter('_', "").ifBlank { "刪除紀錄" }
+                TrashBatch(f.name, ts, label, f.readLines().count { it.isNotBlank() })
+            }.sortedByDescending { it.deletedAt }
+        }.getOrDefault(emptyList())
+    }
+
+    /** @return 還原了幾筆 */
+    fun restoreTrash(fileName: String): Int {
+        val dir = trashDir() ?: return 0
+        return runCatching {
+            val f = File(dir, fileName)
+            if (!f.exists()) return 0
+            val recs = f.readLines().mapNotNull { InteractionRecord.fromCsvString(it) }
+            // 用 id 去重，重複按還原不會變成兩份
+            val existing = _interactions.value.mapTo(HashSet()) { it.id }
+            val fresh = recs.filter { it.id !in existing }
+            if (fresh.isNotEmpty()) {
+                _interactions.update { (it + fresh).sortedBy { r -> r.timestamp } }
+                saveData(immediate = true)
+            }
+            f.delete()
+            fresh.size
+        }.getOrDefault(0)
+    }
+
+    fun purgeTrash(fileName: String) {
+        val dir = trashDir() ?: return
+        runCatching { File(dir, fileName).delete() }
+    }
+
+    /** 每次啟動清掉超過 7 天的批次 */
+    fun purgeExpiredTrash() {
+        val dir = trashDir() ?: return
+        val cutoff = System.currentTimeMillis() - TRASH_KEEP_MS
+        runCatching {
+            listTrash().filter { it.deletedAt < cutoff }.forEach { File(dir, it.file).delete() }
+        }
     }
 
     /** 批次新增：匯入時用，避免每筆都觸發一次存檔與分類建立 */
@@ -1061,6 +1168,12 @@ object DataRepository {
         saveData(immediate = true)
     }
 
+    fun deleteContactsWithTrash(names: Set<String>): Int {
+        val doomed = _interactions.value.filter { (_aliases.value[it.rawSenderName] ?: it.rawSenderName) in names }
+        moveToTrash("刪除聯絡人", doomed)
+        return deleteContacts(names)
+    }
+
     fun deleteContacts(names: Set<String>): Int {
         if (names.isEmpty()) return 0
         snapshotForUndo("刪除 ${names.size} 位聯絡人")
@@ -1230,6 +1343,37 @@ object DataRepository {
         }
         saveData(immediate = true)
     }
+
+    /**
+     * 依「範圍 + 要保留的對象」清除紀錄。
+     * 使用者常常只想清掉某幾個對象在某段時間的資料，全刪太粗暴。
+     * @param keep 這些歸戶名稱的紀錄不動
+     * @return 實際刪掉幾筆
+     */
+    fun clearInteractionsInRange(start: Long, end: Long, keep: Set<String>): Int {
+        snapshotForUndo("清除區間資料")
+        val before = _interactions.value.size
+        val doomed = _interactions.value.filter { r ->
+            val nm = _aliases.value[r.rawSenderName] ?: r.rawSenderName
+            r.timestamp in start..end && nm !in keep
+        }
+        moveToTrash("清除區間", doomed)
+        _interactions.update { list ->
+            list.filterNot { r ->
+                val nm = _aliases.value[r.rawSenderName] ?: r.rawSenderName
+                r.timestamp in start..end && nm !in keep
+            }
+        }
+        val removed = before - _interactions.value.size
+        if (removed > 0) saveData(immediate = true)
+        return removed
+    }
+
+    /** 預覽某個區間內、每位對象各有幾筆紀錄 */
+    fun previewRange(start: Long, end: Long): List<Pair<String, Int>> =
+        _interactions.value.filter { it.timestamp in start..end }
+            .groupingBy { _aliases.value[it.rawSenderName] ?: it.rawSenderName }
+            .eachCount().entries.sortedByDescending { it.value }.map { it.key to it.value }
 
     fun clearInteractionsByDate(timestamp: Long) {
         snapshotForUndo("清除指定日期資料")
@@ -2033,6 +2177,11 @@ class RelateViewModel : ViewModel() {
                 val end = getEndOfWeekTimestamp(filter.timestamp, weekStartDay.value)
                 records.filter { it.timestamp in start..end }
             }
+            FilterType.RANGE -> {
+                val start = startOfDay(minOf(filter.timestamp, filter.endTimestamp))
+                val end = startOfDay(maxOf(filter.timestamp, filter.endTimestamp)) + 86_399_999L
+                records.filter { it.timestamp in start..end }
+            }
             FilterType.ALL -> records
         }
     }
@@ -2227,6 +2376,8 @@ class RelateViewModel : ViewModel() {
     fun rangeOf(filter: DateFilter, weekStart: Int): Pair<Long, Long>? = when (filter.type) {
         FilterType.SPECIFIC_DAY -> startOfDay(filter.timestamp).let { it to it + 86_399_999L }
         FilterType.WEEK -> getStartOfWeekTimestamp(filter.timestamp, weekStart) to getEndOfWeekTimestamp(filter.timestamp, weekStart)
+        FilterType.RANGE -> startOfDay(minOf(filter.timestamp, filter.endTimestamp)) to
+            (startOfDay(maxOf(filter.timestamp, filter.endTimestamp)) + 86_399_999L)
         FilterType.ALL -> null
     }
 
@@ -2355,16 +2506,27 @@ class RelateViewModel : ViewModel() {
     }
 
     /** 近 N 週的每日活躍度，用於貢獻圖 */
-    fun getContributionMap(records: List<InteractionRecord>, weeks: Int = 17): List<Pair<Long, Int>> {
+    /**
+     * 活躍密度用的資料。除了次數，也要帶當天「跟幾個人聊過」——
+     * 一天 50 則全來自同一個人，跟來自 10 個人，意義完全不同。
+     */
+    fun getContributionMap(
+        records: List<InteractionRecord>, aliasMap: Map<String, String>, weeks: Int = 17
+    ): List<ContribDay> {
         val today = startOfDay(System.currentTimeMillis())
         val days = weeks * 7
         val start = today - (days - 1L) * 86_400_000L
         val counts = IntArray(days)
+        val people = Array(days) { HashSet<String>() }
         records.forEach { r ->
             val idx = ((startOfDay(r.timestamp) - start) / 86_400_000L).toInt()
-            if (idx in 0 until days) counts[idx]++
+            if (idx in 0 until days) {
+                counts[idx]++
+                val nm = aliasMap[r.rawSenderName] ?: r.rawSenderName
+                if (!isNonPersonContact(nm)) people[idx].add(nm)
+            }
         }
-        return (0 until days).map { (start + it * 86_400_000L) to counts[it] }
+        return (0 until days).map { ContribDay(start + it * 86_400_000L, counts[it], people[it].size) }
     }
 
     fun getCallSummary(records: List<InteractionRecord>, filter: DateFilter): CallSummary {
@@ -2650,7 +2812,7 @@ class RelateViewModel : ViewModel() {
         val churn: ChurnStat = ChurnStat(emptyList(), emptyList()),
         val nightPct: Int = 0,
         val streaks: List<Pair<String, Int>> = emptyList(),
-        val contrib: List<Pair<Long, Int>> = emptyList(),
+        val contrib: List<ContribDay> = emptyList(),
         val calls: CallSummary = CallSummary(0, 0, 0, 0L),
         val lengths: List<Triple<String, Int, Float>> = emptyList(),
         val cross: List<Pair<String, Int>> = emptyList(),
@@ -2674,7 +2836,7 @@ class RelateViewModel : ViewModel() {
             churn = getChurn(records, aliasMap, filter, weekStart),
             nightPct = nightPctOf(scoped),
             streaks = getStreaks(records, aliasMap),
-            contrib = getContributionMap(records),
+            contrib = getContributionMap(records, aliasMap),
             calls = callSummaryOf(scoped),
             lengths = lengthBucketsOf(scoped),
             cross = getCrossPlatform(records, aliasMap),
@@ -2816,6 +2978,9 @@ class RelateViewModel : ViewModel() {
     fun forceRefresh() { DataRepository.loadData() }
     fun clearInteractions(scope: String) { DataRepository.clearInteractions(scope) }
     fun clearInteractionsByDate(timestamp: Long) { DataRepository.clearInteractionsByDate(timestamp) }
+    fun previewRange(start: Long, end: Long) = DataRepository.previewRange(start, end)
+    fun clearInteractionsInRange(start: Long, end: Long, keep: Set<String>) =
+        DataRepository.clearInteractionsInRange(start, end, keep)
     fun mergeContact(rawName: String, unifiedName: String) { DataRepository.setAlias(rawName, unifiedName) }
     fun renameContact(oldName: String, newName: String) = DataRepository.renameContact(oldName, newName)
     val lastCleanupRemoved = DataRepository.lastCleanupRemoved
@@ -2839,7 +3004,10 @@ class RelateViewModel : ViewModel() {
         if (name.isEmpty()) return
         DataRepository.addCustomCategory(ContactCategory(UUID.randomUUID().toString(), name, colorInt, bgColorInt))
     }
-    fun deleteContacts(names: Set<String>) = DataRepository.deleteContacts(names)
+    fun deleteContacts(names: Set<String>) = DataRepository.deleteContactsWithTrash(names)
+    fun listTrash() = DataRepository.listTrash()
+    fun restoreTrash(f: String) = DataRepository.restoreTrash(f)
+    fun purgeTrash(f: String) = DataRepository.purgeTrash(f)
     fun listJunkContacts() = DataRepository.listJunkContacts()
     val undoAvailable = DataRepository.undoAvailable
     val undoLabel = DataRepository.undoLabel
@@ -2867,6 +3035,15 @@ fun getDeviceUsageTimeSec(context: Context, filter: DateFilter, weekStartDay: In
             s to (s + 86_399_999L)
         }
         FilterType.WEEK -> getStartOfWeekTimestamp(filter.timestamp, weekStartDay) to getEndOfWeekTimestamp(filter.timestamp, weekStartDay)
+        FilterType.RANGE -> {
+            val cal = Calendar.getInstance()
+            fun dayStart(t: Long) = cal.apply {
+                timeInMillis = t
+                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            dayStart(minOf(filter.timestamp, filter.endTimestamp)) to
+                (dayStart(maxOf(filter.timestamp, filter.endTimestamp)) + 86_399_999L)
+        }
         // 「全部」以最早一筆紀錄為起點
         FilterType.ALL -> {
             if (allRangeStart <= 0L) return 0L
@@ -3189,25 +3366,68 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
 @Composable
 fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -> Unit, weekStartDay: Int) {
     val (showCalendar, setShowCalendar) = remember { mutableStateOf(false) }
+    // 選區間時要記住現在在挑起點還是終點
+    var pickingEnd by remember { mutableStateOf(false) }
+    val mdFmt = remember { SimpleDateFormat("M/d", Locale.US) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(10.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp)).padding(3.dp)) {
-            val types = listOf(FilterType.SPECIFIC_DAY to "單日", FilterType.WEEK to "單週", FilterType.ALL to "全部")
+            val types = listOf(
+                FilterType.SPECIFIC_DAY to "單日",
+                FilterType.WEEK to "單週",
+                FilterType.RANGE to "區間",
+                FilterType.ALL to "全部"
+            )
             types.forEach { (type, label) ->
                 val isSelected = currentFilter.type == type
                 Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(7.dp)).background(if (isSelected) AppColors.BrandPrimary else Color.Transparent)
                     .clickable {
                         // ⚠️ 保留目前停在哪一天。舊版一律帶 System.currentTimeMillis()，
                         //    所以往回翻到 8/10 再按「單週」會跳回本週，翻到一半就被拉走。
-                        onFilterChange(DateFilter(type, currentFilter.timestamp))
-                        setShowCalendar(false)
+                        if (type == FilterType.RANGE) {
+                            // 進區間模式時給一個合理預設：從 7 天前到今天
+                            val end = currentFilter.timestamp
+                            val start = end - 6L * 86_400_000L
+                            onFilterChange(DateFilter(type, start, end))
+                            pickingEnd = false
+                            setShowCalendar(true)
+                        } else {
+                            onFilterChange(DateFilter(type, currentFilter.timestamp, currentFilter.timestamp))
+                            setShowCalendar(false)
+                        }
                     }.padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
                     Text(label, color = if (isSelected) Color.White else AppColors.TextSecondary, fontSize = T.Body, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
                 }
             }
         }
 
-        if (currentFilter.type != FilterType.ALL) {
+        if (currentFilter.type == FilterType.RANGE) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                listOf(false to "起", true to "迄").forEach { (isEnd, tag) ->
+                    val active = pickingEnd == isEnd
+                    val ts = if (isEnd) currentFilter.endTimestamp else currentFilter.timestamp
+                    Row(
+                        modifier = Modifier.weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (active) AppColors.ActiveBlue.copy(alpha = 0.12f) else AppColors.Surface)
+                            .border(1.dp, if (active) AppColors.ActiveBlue else AppColors.BorderLight, RoundedCornerShape(8.dp))
+                            .clickable { pickingEnd = isEnd; setShowCalendar(true) }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(tag, fontSize = T.Micro, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(mdFmt.format(Date(ts)), fontSize = T.Body, fontWeight = FontWeight.Bold,
+                            color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                    }
+                }
+            }
+            val days = (((startOfDayMs(maxOf(currentFilter.timestamp, currentFilter.endTimestamp)) -
+                startOfDayMs(minOf(currentFilter.timestamp, currentFilter.endTimestamp))) / 86_400_000L) + 1).toInt()
+            Text("共 $days 天　·　點上面的日期再從下方月曆挑",
+                fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
+        } else if (currentFilter.type != FilterType.ALL) {
             Spacer(modifier = Modifier.height(6.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = {
@@ -3257,8 +3477,12 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
 
         AnimatedVisibility(visible = showCalendar, enter = expandVertically(), exit = shrinkVertically()) {
             Box(modifier = Modifier.padding(top = 12.dp)) {
-                MinimalCalendar(selectedTime = currentFilter.timestamp, onDateSelected = {
-                    onFilterChange(currentFilter.copy(timestamp = it))
+                MinimalCalendar(selectedTime = if (pickingEnd) currentFilter.endTimestamp else currentFilter.timestamp, onDateSelected = {
+                    onFilterChange(
+                        if (currentFilter.type == FilterType.RANGE && pickingEnd) currentFilter.copy(endTimestamp = it)
+                        else if (currentFilter.type == FilterType.RANGE) currentFilter.copy(timestamp = it)
+                        else currentFilter.copy(timestamp = it, endTimestamp = it)
+                    )
                     setShowCalendar(false)
                 }, weekStartDay = weekStartDay)
             }
@@ -3964,26 +4188,26 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
 
 /** 近數週每日活躍密度圖 */
 @Composable
-fun ContributionGrid(data: List<Pair<Long, Int>>) {
+fun ContributionGrid(data: List<ContribDay>) {
     if (data.isEmpty()) return
-    val max = data.maxOf { it.second }.coerceAtLeast(1)
+    val max = data.maxOf { it.count }.coerceAtLeast(1)
     val cal = remember { Calendar.getInstance() }
 
     // 對齊星期：第一欄可能不是完整的一週，前面補空格
     val firstDow = remember(data) {
-        cal.timeInMillis = data.first().first
+        cal.timeInMillis = data.first().dayStart
         (cal.get(Calendar.DAY_OF_WEEK) - Calendar.SUNDAY + 7) % 7
     }
-    val cells: List<Pair<Long, Int>?> = remember(data, firstDow) {
+    val cells: List<ContribDay?> = remember(data, firstDow) {
         List(firstDow) { null } + data
     }
     val weekLabels = listOf("日", "一", "二", "三", "四", "五", "六")
 
-    var picked by remember { mutableStateOf<Pair<Long, Int>?>(null) }
+    var picked by remember { mutableStateOf<ContribDay?>(null) }
     val dayFmt = remember { SimpleDateFormat("M/d（E）", Locale.TAIWAN) }
 
     Column {
-        Text("每一格是一天，顏色越深代表互動越多；點格子看當天數字",
+        Text("直排是星期（上到下 日→六），橫排是週；顏色越深互動越多。點格子看那天的數字",
             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
         Spacer(modifier = Modifier.height(8.dp))
         // ⚠️ 星期標籤與格子的邊長必須是「同一個數字」。
@@ -4010,8 +4234,8 @@ fun ContributionGrid(data: List<Pair<Long, Int>>) {
                     weeks.forEach { week ->
                         Column(verticalArrangement = Arrangement.spacedBy(gap)) {
                             week.forEach { cellData ->
-                                val c = cellData?.second
-                                val on = cellData != null && picked?.first == cellData.first
+                                val c = cellData?.count
+                                val on = cellData != null && picked?.dayStart == cellData.dayStart
                                 val bg = when {
                                     cellData == null -> Color.Transparent
                                     c == 0 -> AppColors.BorderLight.copy(alpha = 0.5f)
@@ -4030,14 +4254,18 @@ fun ContributionGrid(data: List<Pair<Long, Int>>) {
                 }
             }
         }
-        picked?.let { (ts, count) ->
+        picked?.let { d ->
             Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth().background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
                 horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(dayFmt.format(Date(ts)), fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                Text("$count 次互動", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.Positive, maxLines = 1, softWrap = false)
+                Text(dayFmt.format(Date(d.dayStart)), fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                Text(
+                    // 次數＋人數一起看才有意義：50 則全來自同一人 vs 來自 10 個人差很多
+                    "${d.count} 次 · ${d.people} 人",
+                    fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.Positive, maxLines = 1, softWrap = false
+                )
             }
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -4053,6 +4281,11 @@ fun ContributionGrid(data: List<Pair<Long, Int>>) {
             }
             Spacer(modifier = Modifier.width(2.dp))
             Text("多（最高 $max 次／天）", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+        }
+        val avgPeople = data.filter { it.count > 0 }.let { d -> if (d.isEmpty()) 0 else d.sumOf { it.people } / d.size }
+        if (avgPeople > 0) {
+            Text("有互動的日子平均跟 $avgPeople 個人聊天", fontSize = T.Micro, color = AppColors.TextTertiary,
+                modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -4087,6 +4320,7 @@ fun SplitBar(leftLabel: String, leftValue: Long, rightLabel: String, rightValue:
 // ══════════════════════════════════════════
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun InsightsView(viewModel: RelateViewModel) {
     val records by viewModel.interactions.collectAsState()
     val aliases by viewModel.aliases.collectAsState()
@@ -4115,7 +4349,7 @@ fun InsightsView(viewModel: RelateViewModel) {
             verticalArrangement = Arrangement.spacedBy(D.Gap)
         ) {
             item { ServiceAlertBanner() }
-            item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
+            stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
 
             if (!b.ready) {
                 item {
@@ -4444,6 +4678,7 @@ fun InsightsView(viewModel: RelateViewModel) {
 // ══════════════════════════════════════════
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun OverviewView(viewModel: RelateViewModel) {
     val records by viewModel.interactions.collectAsState()
     val categoriesMap by viewModel.categories.collectAsState()
@@ -4510,7 +4745,7 @@ fun OverviewView(viewModel: RelateViewModel) {
         verticalArrangement = Arrangement.spacedBy(D.Gap)
     ) {
         item { ServiceAlertBanner() }
-        item { TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay) }
+        stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
 
         if (!bundle.ready) {
             item {
@@ -5225,6 +5460,7 @@ fun RankRow(rank: Int, stat: SenderStat, maxScore: Float, sortType: SortType, on
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun LeaderboardView(viewModel: RelateViewModel) {
     val records by viewModel.interactions.collectAsState()
     val categoriesMap by viewModel.categories.collectAsState()
@@ -5277,9 +5513,9 @@ fun LeaderboardView(viewModel: RelateViewModel) {
         contentPadding = PaddingValues(start = D.Gutter, end = D.Gutter, top = D.Gutter, bottom = if (selectionMode) 76.dp else D.Gutter),
         modifier = Modifier.fillMaxSize()
     ) {
-        item {
-            Column {
-                TimeFilterSelector(filter, viewModel::setTimeFilter, weekStartDay)
+        stickyHeader {
+            Column(modifier = Modifier.background(AppColors.Background)) {
+                StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay)
                 if (!lb.ready) {
                     Spacer(modifier = Modifier.height(D.Gap))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
@@ -6449,12 +6685,189 @@ fun CategoryEditDialog(initial: ContactCategory?, onConfirm: (String, Int, Int) 
     )
 }
 
+/**
+ * 刪除前的逐項確認。
+ *
+ * 直接「確定 → 全刪」太危險：使用者常常只是想清掉某幾個對象，
+ * 卻連想留的一起沒了，而且刪完才發現。這裡先把範圍內每位對象與筆數列出來，
+ * 預設全勾（＝全刪），取消勾選的那幾位會被保留。
+ */
+@Composable
+fun ClearPreviewDialog(
+    title: String,
+    rows: List<Pair<String, Int>>,
+    onConfirm: (keep: Set<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // 這裡存的是「要保留的人」，取消勾選就加進來
+    val keep = remember { mutableStateListOf<String>() }
+    val total = rows.sumOf { it.second }
+    val willDelete = rows.filter { it.first !in keep }.sumOf { it.second }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text("將刪除 $willDelete 筆／共 $total 筆　·　取消勾選就保留",
+                    fontSize = T.Label, color = if (willDelete > 0) AppColors.WorkText else AppColors.TextSecondary,
+                    fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            if (rows.isEmpty()) {
+                Text("這個範圍內沒有任何紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
+            } else {
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("全部勾選" to true, "全部取消" to false).forEach { (lbl, checkAll) ->
+                            Box(
+                                modifier = Modifier.weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(AppColors.Background)
+                                    .clickable {
+                                        keep.clear()
+                                        if (!checkAll) keep.addAll(rows.map { it.first })
+                                    }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(lbl, fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                    LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                        items(rows, key = { it.first }) { (name, count) ->
+                            val checked = name !in keep
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { if (checked) keep.add(name) else keep.remove(name) }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = checked, onCheckedChange = { on -> if (on) keep.remove(name) else keep.add(name) })
+                                Text(name, fontSize = T.Body, color = if (checked) AppColors.TextPrimary else AppColors.TextTertiary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Text("$count 筆", fontSize = T.Label,
+                                    color = if (checked) AppColors.WorkText else AppColors.TextTertiary,
+                                    fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(keep.toSet()) },
+                enabled = willDelete > 0,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)
+            ) { Text("刪除 $willDelete 筆", maxLines = 1) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+    )
+}
+
+/** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
+@Composable
+fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var batches by remember { mutableStateOf(viewModel.listTrash()) }
+    val fmt = remember { SimpleDateFormat("M/d HH:mm", Locale.US) }
+    val now = System.currentTimeMillis()
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("最近刪除", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text("刪掉的紀錄會在這裡保留 7 天，之後自動永久移除",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
+            }
+        },
+        text = {
+            if (batches.isEmpty()) {
+                Text("目前沒有可還原的紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(batches, key = { it.file }) { b ->
+                        val daysLeft = (7 - ((now - b.deletedAt) / 86_400_000L)).coerceAtLeast(0L)
+                        Column(
+                            modifier = Modifier.fillMaxWidth()
+                                .background(AppColors.Background, RoundedCornerShape(10.dp))
+                                .padding(10.dp)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Text(b.label, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                    color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f))
+                                Text("${b.count} 筆", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                            }
+                            Text(fmt.format(Date(b.deletedAt)) + " 刪除　·　剩 $daysLeft 天",
+                                fontSize = T.Micro, color = AppColors.TextTertiary)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Box(
+                                    modifier = Modifier.weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(AppColors.ActiveBlue.copy(alpha = 0.12f))
+                                        .clickable {
+                                            val n = viewModel.restoreTrash(b.file)
+                                            batches = viewModel.listTrash()
+                                            Toast.makeText(context, "已還原 $n 筆", Toast.LENGTH_SHORT).show()
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("還原", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                                }
+                                Box(
+                                    modifier = Modifier.weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(AppColors.Background)
+                                        .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            viewModel.purgeTrash(b.file)
+                                            batches = viewModel.listTrash()
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("永久刪除", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+}
+
 @Composable
 fun AdvancedDataManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val weekStartDay by viewModel.weekStartDay.collectAsState()
     var pendingClearScope by remember { mutableStateOf<String?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
+    // 選好範圍後先給預覽：標題、起、迄
+    var previewRange by remember { mutableStateOf<Triple<String, Long, Long>?>(null) }
+
+    fun scopeRange(scope: String, day: Long = System.currentTimeMillis()): Triple<String, Long, Long> = when (scope) {
+        "TODAY" -> Triple("清除今日資料", startOfDayMs(day), startOfDayMs(day) + 86_399_999L)
+        "WEEK" -> Triple(
+            "清除本週資料",
+            getStartOfWeekTimestamp(day, weekStartDay),
+            getEndOfWeekTimestamp(day, weekStartDay)
+        )
+        "DAY" -> Triple("清除該日資料", startOfDayMs(day), startOfDayMs(day) + 86_399_999L)
+        else -> Triple("清除所有歷史紀錄", 0L, Long.MAX_VALUE)
+    }
 
     if (showDatePicker) {
         AlertDialog(
@@ -6462,31 +6875,34 @@ fun AdvancedDataManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit)
             title = { Text("請選擇要清除的日期", fontWeight = FontWeight.Bold) },
             text = {
                 Box(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    // ⚠️ 以前點下去就直接刪，沒有任何確認。改成先進預覽。
                     MinimalCalendar(weekStartDay = weekStartDay, selectedTime = System.currentTimeMillis(), onDateSelected = { timestamp ->
-                        viewModel.clearInteractionsByDate(timestamp)
-                        Toast.makeText(context, "已清除該日資料", Toast.LENGTH_SHORT).show()
+                        previewRange = scopeRange("DAY", timestamp)
                         showDatePicker = false
                     })
                 }
             },
             confirmButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消", color = AppColors.TextSecondary) } }
         )
-    } else if (pendingClearScope != null) {
-        val label = when(pendingClearScope) { "TODAY" -> "今日"; "WEEK" -> "本週"; else -> "所有歷史" }
-        AlertDialog(
-            containerColor = AppColors.Surface, onDismissRequest = { pendingClearScope = null },
-            title = { Text("確認清除 $label 資料？", fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            text = { Text("清除後，系統將無法回朔您在該時段內的通訊紀錄。\n此操作無法復原。") },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.clearInteractions(pendingClearScope!!)
-                    Toast.makeText(context, "已成功清除", Toast.LENGTH_SHORT).show()
-                    pendingClearScope = null
-                    onDismiss()
-                }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)) { Text("確認清除", maxLines = 1) }
+    } else if (previewRange != null) {
+        val (title, start, end) = previewRange!!
+        val rows = remember(start, end) { viewModel.previewRange(start, end) }
+        ClearPreviewDialog(
+            title = title,
+            rows = rows,
+            onConfirm = { keep ->
+                val n = viewModel.clearInteractionsInRange(start, end, keep)
+                Toast.makeText(context, "已刪除 $n 筆（可在設定頁復原）", Toast.LENGTH_SHORT).show()
+                previewRange = null
+                onDismiss()
             },
-            dismissButton = { TextButton(onClick = { pendingClearScope = null }) { Text("取消", color = AppColors.TextSecondary) } }
+            onDismiss = { previewRange = null }
         )
+    } else if (pendingClearScope != null) {
+        LaunchedEffect(pendingClearScope) {
+            previewRange = scopeRange(pendingClearScope!!)
+            pendingClearScope = null
+        }
     } else {
         AlertDialog(
             containerColor = AppColors.Surface, onDismissRequest = onDismiss,
@@ -6552,6 +6968,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showRecordManager by remember { mutableStateOf(false) }
     var confirmAction by remember { mutableStateOf<String?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
+    var showTrash by remember { mutableStateOf(false) }
     val wordFreqNow by viewModel.wordFreq.collectAsState()
     val undoAvailable by viewModel.undoAvailable.collectAsState()
     val undoLabel by viewModel.undoLabel.collectAsState()
@@ -6762,6 +7179,17 @@ fun SettingsView(viewModel: RelateViewModel) {
 
                     Spacer(modifier = Modifier.height(6.dp))
                     OutlinedButton(
+                        onClick = { showTrash = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = AppColors.TextSecondary)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("最近刪除（保留 7 天，可還原）", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
                         onClick = { setShowDataManager(true) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
@@ -6860,6 +7288,16 @@ fun SettingsView(viewModel: RelateViewModel) {
 
     if (showCategoryManager) {
         CategoryManagerDialog(viewModel, availableCats) { showCategoryManager = false }
+    }
+
+    // ⚠️ 以前只有 setShowDataManager(true)，卻沒有任何地方讀這個旗標 ——
+    //    「清除資料」按了完全沒反應。
+    if (showDataManager) {
+        AdvancedDataManagerDialog(viewModel) { setShowDataManager(false) }
+    }
+
+    if (showTrash) {
+        TrashDialog(viewModel) { showTrash = false }
     }
 
     if (showRecordManager) {
