@@ -607,7 +607,7 @@ val INSIGHT_SECTIONS: List<Pair<String, String>> = listOf(
     "streaks" to "連續互動排行",
     "cross" to "跨平台聯絡",
     "persona" to "社交人格",
-    "churn" to "關係變化"
+    "churn" to "新出現的人"
 )
 
 /** 活躍密度的一格：某一天的互動次數與聊天人數 */
@@ -811,11 +811,24 @@ object DataRepository {
         autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
         lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
 
-        _interactions.value = runCatching {
-            (p.getStringSet("interactions", emptySet()) ?: emptySet())
-                .mapNotNull { InteractionRecord.fromCsvString(it) }
-                .sortedBy { it.timestamp }
-        }.getOrDefault(emptyList())
+        // 先讀新的檔案；沒有就從舊版的 SharedPreferences 搬過來（只會發生一次）
+        val fromFile = readRecordsFile()
+        if (fromFile != null) {
+            _interactions.value = fromFile.sortedBy { it.timestamp }
+            // 剛從檔案讀進來，內容跟檔案一致，不需要立刻回寫
+            lastWrittenRecords = _interactions.value
+        } else {
+            _interactions.value = runCatching {
+                (p.getStringSet("interactions", emptySet()) ?: emptySet())
+                    .mapNotNull { InteractionRecord.fromCsvString(it) }
+                    .sortedBy { it.timestamp }
+            }.getOrDefault(emptyList())
+            if (_interactions.value.isNotEmpty()) {
+                writeRecordsFile()
+                // 搬完就把舊鍵拿掉，否則每次啟動都要多解析一次幾萬筆
+                runCatching { p.edit().remove("interactions").apply() }
+            }
+        }
 
         _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
         _blockedNames.value = runCatching { p.getStringSet("blocked_names", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
@@ -890,22 +903,64 @@ object DataRepository {
             ioScope.launch { writeToDisk() }
         } else {
             pendingSaveJob = ioScope.launch {
-                delay(1500)
+                // 4 秒：訊息常常是一串一串進來，合併成一次寫入
+                delay(4000)
                 writeToDisk()
             }
         }
     }
 
+    /**
+     * ⚠️ 互動紀錄**不能**放 SharedPreferences。
+     *
+     * 舊版每次存檔都把全部紀錄（實測 55,000+ 筆）轉成 CSV、丟進 HashSet、
+     * 再交給 SharedPreferences 寫 XML —— 光序列化就要好幾秒，而通知一來
+     * 就觸發一次（1.5 秒防抖），所以「每次通知跳出來 App 都會 LAG」。
+     *
+     * 改成單一純文字檔：一行一筆，順序寫入，沒有 XML 跳脫也沒有 HashSet。
+     * 另外加 dirty 旗標，紀錄沒變動時連檔案都不碰。
+     */
+    private const val RECORDS_FILE = "RelateStats_Records.txt"
+
+    /**
+     * 上次寫進檔案的那份清單「本身」。
+     *
+     * ⚠️ 用參考比對而不是手動的 dirty 旗標：紀錄有十幾個地方會被改
+     * （新增、批次匯入、刪除、還原、清理、匯入備份…），
+     * 漏標任何一個就是資料沒存到。每次修改都會產生新的 List 實例，
+     * 所以 `!==` 一定抓得到，而且是 O(1)。
+     */
+    private var lastWrittenRecords: List<InteractionRecord>? = null
+
+    private fun writeRecordsFile() {
+        val ctx = appContext ?: return
+        val snapshot = _interactions.value
+        runCatching {
+            File(ctx.filesDir, RECORDS_FILE).bufferedWriter().use { w ->
+                snapshot.forEach { w.write(it.toCsvString()); w.newLine() }
+            }
+            lastWrittenRecords = snapshot
+        }
+    }
+
+    private fun readRecordsFile(): List<InteractionRecord>? {
+        val ctx = appContext ?: return null
+        return runCatching {
+            val f = File(ctx.filesDir, RECORDS_FILE)
+            if (!f.exists()) return null
+            f.readLines().mapNotNull { InteractionRecord.fromCsvString(it) }
+        }.getOrNull()
+    }
+
     private fun writeToDisk() {
         val p = prefs ?: return
+        if (_interactions.value !== lastWrittenRecords) writeRecordsFile()
         runCatching {
-            val records = _interactions.value.map { it.toCsvString() }.toSet()
             val aliases = _aliases.value.map { "${it.key}|=|${it.value}" }.toSet()
             val cats = _categories.value.map { "${it.key}|=|${it.value}" }.toSet()
             val allCats = _availableCategories.value.joinToString("|;|") { it.toCsvString() }
             val words = _wordFreq.value.entries.map { "${it.key}|w|${it.value}" }.toSet()
             p.edit().apply {
-                putStringSet("interactions", records)
                 putStringSet("aliases", aliases)
                 putStringSet("categories", cats)
                 putString("all_categories", allCats)
@@ -2695,7 +2750,8 @@ class RelateViewModel : ViewModel() {
             byPerson.getOrPut(aliasMap[r.rawSenderName] ?: r.rawSenderName) { HashSet() }.add(startOfDay(r.timestamp))
         }
         return byPerson.mapNotNull { (name, days) ->
-            if (isNonPersonContact(name)) return@mapNotNull null
+            // 非真人、或被歸到「系統通知」標籤的都不該出現在連續互動排行
+            if (isExcludedFromStats(name, DataRepository.categories.value)) return@mapNotNull null
             // 最後一次互動必須落在這個區間裡，否則這個人跟本期無關
             val last = days.max()
             if (last < startOfDay(rangeStart) || last > anchor) return@mapNotNull null
@@ -4420,12 +4476,16 @@ fun DataRow(
             Box(modifier = Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(dotColor))
         }
         Spacer(modifier = Modifier.width(8.dp))
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(primary, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-            if (secondary != null) {
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(secondary, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
-            }
+        // ⚠️ 主／次數值各自給固定欄寬並靠右，整欄的數字才會對齊。
+        //    只用 Row 排在一起的話，名稱長度不同就會參差不齊。
+        Text(primary, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+            maxLines = 1, softWrap = false, textAlign = TextAlign.End,
+            modifier = Modifier.widthIn(min = 52.dp))
+        if (secondary != null) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(secondary, fontSize = T.Micro, color = AppColors.TextTertiary,
+                maxLines = 1, softWrap = false, textAlign = TextAlign.End,
+                modifier = Modifier.widthIn(min = 46.dp))
         }
     }
 }
@@ -5079,32 +5139,47 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             // ── 16. 關係變化 ──
-            if (b.churn.newcomers.isNotEmpty() || b.churn.dormant.isNotEmpty()) {
-                sections.add(Sec("churn", "關係變化") {
+            if (b.churn.newcomers.isNotEmpty()) {
+                sections.add(Sec("churn", "新出現的人") {
                     Panel {
-                        SectionHead("關係變化") {
+                        // 「已沉寂」拿掉了：那份名單動輒數十人、只是提醒你很久沒聯絡誰，
+                        // 對「這段期間發生什麼」沒有幫助，反而把卡片撐得又長又亂。
+                        SectionHead("新出現的人") {
+                            Text("${b.churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                color = AppColors.Positive, maxLines = 1, softWrap = false)
+                            Spacer(modifier = Modifier.width(4.dp))
                             InfoDot(
-                                "關係變化怎麼算",
-                                "「新出現」與「已沉寂」都跟隨上方的日期範圍，但判斷「新不新」必須回頭看完整歷史 —— " +
-                                    "一個人是不是本期才第一次出現，只有看過去所有紀錄才知道。\n\n" +
-                                    "沉寂的定義是超過 14 天沒有任何互動。"
+                                "怎麼算「新出現」",
+                                "本期第一次出現在紀錄裡的人。\n\n" +
+                                    "判斷「新不新」必須回頭看完整歷史 —— 一個人是不是本期才第一次出現，" +
+                                    "只有看過去所有紀錄才知道；但列出來的範圍跟著上方的日期走。"
                             )
                         }
-                        if (b.churn.newcomers.isNotEmpty()) {
-                            Text("本期新出現 ${b.churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Positive)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(b.churn.newcomers.take(10).joinToString("、"), fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
-                            Spacer(modifier = Modifier.height(10.dp))
-                        }
-                        if (b.churn.dormant.isNotEmpty()) {
-                            Text("已沉寂（14 天以上沒互動）", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            b.churn.dormant.take(8).forEach { (name, days) ->
-                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text(name, fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp))
-                                    Text("$days 天前", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                        // 一個人一顆膠囊，比「頓號串成一長行」好讀，也點得到
+                        b.churn.newcomers.take(12).chunked(2).forEach { pairRow ->
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                pairRow.forEach { nm ->
+                                    Row(
+                                        modifier = Modifier.weight(1f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(AppColors.Positive.copy(alpha = 0.08f))
+                                            .clickable { drillInto("$nm 的互動") { r -> (aliases[r.rawSenderName] ?: r.rawSenderName) == nm } }
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(AppColors.Positive))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(nm, fontSize = T.Label, fontWeight = FontWeight.Medium,
+                                            color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
                                 }
+                                repeat(2 - pairRow.size) { Spacer(modifier = Modifier.weight(1f)) }
                             }
+                        }
+                        if (b.churn.newcomers.size > 12) {
+                            Text("＋其他 ${b.churn.newcomers.size - 12} 位", fontSize = T.Micro,
+                                color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
                         }
                     }
                 })
@@ -6354,6 +6429,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         if (cb.ready) resurrected = viewModel.resurrectedNames()
     }
     var showAutoMerge by remember { mutableStateOf(false) }
+    // 收起來就不再提醒，直到重開 App
+    var junkDismissed by remember { mutableStateOf(false) }
     val similarGroups = cb.similar
 
     var selectionMode by remember { mutableStateOf(false) }
@@ -6470,21 +6547,51 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 }
             }
 
-            if (junkContacts.isNotEmpty() && !selectionMode) {
+            // ⚠️ 垃圾聯絡人大多是系統通知，「刪除」沒有用 —— 對方下次再推播就會重建，
+            //    使用者等於每隔幾天就要清一次。所以主要動作改成**標為系統通知**：
+            //    紀錄留著、但排行與統計都不算它，而且不會再冒出來。
+            //    刪除降為次要選項，整張卡也可以直接收起來不看。
+            if (junkContacts.isNotEmpty() && !selectionMode && !junkDismissed) {
                 item {
-                    Card(colors = CardDefaults.cardColors(containerColor = AppColors.WorkBg), shape = RoundedCornerShape(14.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(AppColors.WorkBg, RoundedCornerShape(14.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("${junkContacts.size} 個垃圾聯絡人", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("讚、追蹤者、串文、推播等非真人通知", fontSize = 11.sp, color = AppColors.WorkText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${junkContacts.size} 個非真人來源", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                    color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("讚、追蹤者、串文、推播", fontSize = T.Micro,
+                                    color = AppColors.WorkText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
+                            Text("✕", fontSize = 15.sp, color = AppColors.WorkText.copy(alpha = 0.6f),
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .clickable { junkDismissed = true }.padding(6.dp))
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Button(
-                                onClick = { pendingDelete = junkContacts.toSet() },
+                                onClick = {
+                                    viewModel.setCategories(junkContacts, ContactCategory.SYSTEM.id)
+                                    Toast.makeText(context, "已標為系統通知，統計不再算入", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.weight(1f),
                                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
                                 shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                            ) { Text("一鍵清除", fontSize = 12.sp, maxLines = 1, softWrap = false) }
+                                contentPadding = PaddingValues(vertical = 8.dp)
+                            ) { Text("標為系統通知", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = { pendingDelete = junkContacts.toSet() },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(vertical = 8.dp)
+                            ) { Text("直接刪除", fontSize = T.Label, color = AppColors.WorkText, maxLines = 1, softWrap = false) }
                         }
+                        Text("刪除後對方再推播還是會重建；標為系統通知才是一勞永逸",
+                            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.7f),
+                            lineHeight = 14.sp, modifier = Modifier.padding(top = 6.dp))
                     }
                 }
             }
@@ -6603,26 +6710,22 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                     Icon(Icons.Rounded.ArrowDropDown, contentDescription = "更換標籤",
                                         tint = currentCategory.color, modifier = Modifier.size(16.dp))
                                 }
-                            }
-                        }
-                        if (!selectionMode) {
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = AppColors.BorderLight)
-                            // ⚠️ 舊版只有 padding(vertical = 2.dp)，觸控區約 20dp 高又貼在卡片最底緣，
-                            //    低於系統最小觸控目標，稍微偏一點就打到卡片本身（卡片的 onClick
-                            //    在非選取模式下什麼都不做）—— 這就是「合併按不了」。
-                            Row(
-                                modifier = Modifier.fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(AppColors.ActiveBlue.copy(alpha = 0.08f))
-                                    .clickable { mergeSource = unifiedName }
-                                    .padding(horizontal = 10.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(15.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("綁定其他帳號到這個人", fontSize = T.Label, color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold)
+                                // 綁定帳號以前是每張卡片底部一整條，幾百張卡堆起來全是陣列雜訊。
+                                // 這個動作偶爾才用一次，收成標籤旁的圖示就好（長按選單裡也有）。
+                                Box(
+                                    modifier = Modifier.size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(AppColors.Background)
+                                        .clickable { mergeSource = unifiedName },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = "綁定其他帳號",
+                                        tint = AppColors.ActiveBlue, modifier = Modifier.size(16.dp))
+                                }
                             }
                         }
+
                     }
                 }
             }
@@ -7700,6 +7803,24 @@ fun ScopeTag(text: String) {
     }
 }
 
+/**
+ * 設定頁的區段標題。
+ * 卡片一張接一張沒有層次時，使用者只能一路往下掃；
+ * 分成幾個區段之後才看得出「這一塊是什麼」。
+ */
+@Composable
+fun SettingsSection(title: String) {
+    Text(
+        title,
+        fontSize = T.Micro,
+        fontWeight = FontWeight.Black,
+        color = AppColors.TextTertiary,
+        letterSpacing = 1.2.sp,
+        modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 2.dp),
+        maxLines = 1, softWrap = false
+    )
+}
+
 /** 設定頁的分組標題：一句話說清楚這一組在做什麼 */
 @Composable
 fun DataGroup(title: String, subtitle: String) {
@@ -8067,10 +8188,12 @@ fun SettingsView(viewModel: RelateViewModel) {
             }
         }
 
+        item { SettingsSection("偏好") }
+
         item {
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("自訂一週起始日", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("自訂一週起始日", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
                     Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
                         Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(weekStartDay == Calendar.MONDAY) AppColors.BrandPrimary else Color.Transparent).clickable{ viewModel.setWeekStartDay(Calendar.MONDAY) }.padding(horizontal=10.dp, vertical=6.dp)){
                             Text("週一", fontSize=12.sp, color=if(weekStartDay == Calendar.MONDAY) Color.White else AppColors.TextSecondary, fontWeight=if(weekStartDay == Calendar.MONDAY) FontWeight.Bold else FontWeight.Normal)
@@ -8084,10 +8207,10 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp), modifier = Modifier.clickable { showCategoryManager = true }) {
+            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp), modifier = Modifier.clickable { showCategoryManager = true }) {
                 Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("標籤管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("標籤管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
                         Text("改名、換色、調整順序、新增或刪除", fontSize = 11.sp, color = AppColors.TextSecondary)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -8103,7 +8226,7 @@ fun SettingsView(viewModel: RelateViewModel) {
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp)) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("備份與還原", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("備份與還原", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
                         Icon(Icons.Rounded.Lock, contentDescription = null, tint = AppColors.TextSecondary)
                     }
                     Text("所有資料只存在這支手機，換機或重灌前請務必先備份。", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
@@ -8145,6 +8268,8 @@ fun SettingsView(viewModel: RelateViewModel) {
 
         // 上次的閃退／計算錯誤放最上面：埋在診斷對話框裡使用者根本不會去看，
         // 而這是沒有裝置時唯一能定位問題的東西。
+        item { SettingsSection("資料") }
+
         crashReport?.let { report ->
             item {
                 Column(
@@ -8188,7 +8313,7 @@ fun SettingsView(viewModel: RelateViewModel) {
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("資料管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("資料管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
                         Text("${records.size} 筆紀錄", color = AppColors.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                     }
 
