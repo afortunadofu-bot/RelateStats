@@ -1432,10 +1432,19 @@ object DataRepository {
     }
 
     /** 目前被判定為垃圾的聯絡人（非真人通知，或已被歸到系統通知） */
+    /**
+     * 還沒處理的非真人來源。
+     *
+     * ⚠️ 條件是「是非真人」**而且**「還沒被標成系統通知」。
+     *    舊版寫成 `isNonPersonContact(it) || categories[it] == SYSTEM`：
+     *    用 or 又把「已標為系統通知」的算進來，等於標記完數字一個都不會少，
+     *    橫幅永遠關不掉 —— 使用者按了「標為系統通知」看起來完全沒反應。
+     *    定義跟 previewRetagTargets 保持一致。
+     */
     fun listJunkContacts(): List<String> =
         _interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName }
             .distinct()
-            .filter { isNonPersonContact(it) || _categories.value[it] == ContactCategory.SYSTEM.id }
+            .filter { isNonPersonContact(it) && _categories.value[it] != ContactCategory.SYSTEM.id }
 
     /** 預覽「整理系統通知」會影響哪些聯絡人（尚未歸類的） */
     fun previewRetagTargets(): List<String> =
@@ -3099,7 +3108,11 @@ class RelateViewModel : ViewModel() {
         val ready: Boolean = false
     )
 
-    fun buildContacts(records: List<InteractionRecord>, aliasMap: Map<String, String>): ContactsBundle {
+    /** @param catsMap 只是拿來當重算依據，內容由 listJunkContacts 直接讀 Repository */
+    fun buildContacts(
+        records: List<InteractionRecord>, aliasMap: Map<String, String>,
+        @Suppress("UNUSED_PARAMETER") catsMap: Map<String, String> = emptyMap()
+    ): ContactsBundle {
         val unified = (records.map { aliasMap[it.rawSenderName] ?: it.rawSenderName } + aliasMap.values).distinct()
         val appsOf = HashMap<String, MutableSet<String>>()
         records.forEach { r ->
@@ -6425,10 +6438,12 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     // ⚠️ 這裡本來有五次各自獨立的全表掃描（去重、計數、App 對應、
     //    垃圾聯絡人、相似分組）全部寫在 remember{}，也就是全部跑在主執行緒。
     //    findSimilarGroups 更是 O(n²)，800 位聯絡人就是 60 萬次比對。合併並丟到背景。
-    val cb by produceState(viewModel.cachedContacts, records, aliases) {
+    // ⚠️ key 一定要含 categoriesMap：垃圾來源清單、分類篩選都吃標籤，
+    //    少了它，標籤改完畫面不會更新（按「標為系統通知」像沒反應）。
+    val cb by produceState(viewModel.cachedContacts, records, aliases, categoriesMap) {
         delay(300)
         if (value.ready) value = value.copy(ready = false)
-        val next = withContext(Dispatchers.Default) { runCatching { viewModel.buildContacts(records, aliases) } }
+        val next = withContext(Dispatchers.Default) { runCatching { viewModel.buildContacts(records, aliases, categoriesMap) } }
         next.getOrNull()?.let { value = it }
             ?: next.exceptionOrNull()?.let { viewModel.recordError("buildContacts", it) }
     }
@@ -6442,7 +6457,11 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         unifiedNamesList.filter { name ->
             val matchSearch = searchQuery.isBlank() || name.contains(searchQuery, ignoreCase = true)
             val catId = categoriesMap[name] ?: ContactCategory.OTHER.id
-            val matchCat = activeCatFilterId == null || catId == activeCatFilterId
+            // 預設不顯示「系統通知」—— 跟排行頁的規則一致。
+            // 標為系統通知就是為了讓它們消失，留在清單上等於沒處理。
+            // 想看的話把標籤篩選切到「系統通知」即可。
+            val matchCat = if (activeCatFilterId == null) catId != ContactCategory.SYSTEM.id
+                           else catId == activeCatFilterId
             val matchApp = appFilter == null || contactApps[name]?.contains(appFilter) == true
             matchSearch && matchCat && matchApp
         }.let { list ->
@@ -6567,8 +6586,15 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
 
             item {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("聯絡人", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
-                        color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("聯絡人", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
+                            color = AppColors.TextPrimary)
+                        Text(
+                            if (catFilter == null) "${filteredContacts.size} 位　·　已隱藏系統通知"
+                            else "${filteredContacts.size} 位",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false
+                        )
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Box(
                             modifier = Modifier.clip(RoundedCornerShape(10.dp))
