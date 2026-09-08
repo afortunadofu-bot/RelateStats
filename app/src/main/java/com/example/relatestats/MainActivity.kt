@@ -6448,12 +6448,13 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 14.dp, bottom = if (selectionMode) 92.dp else 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            // 0dp：聯絡人列彼此相連成一張卡，間距由各列自己的分隔線負責
+            verticalArrangement = Arrangement.spacedBy(0.dp)
         ) {
             if (resurrected.isNotEmpty()) {
                 item {
                     Column(
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
                             .background(AppColors.WorkBg, RoundedCornerShape(12.dp))
                             .padding(12.dp)
                     ) {
@@ -6512,7 +6513,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             if (similarGroups.isNotEmpty() && !selectionMode) {
                 item {
                     Row(
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(AppColors.ActiveBlue.copy(alpha = 0.12f))
                             .clickable { showAutoMerge = true }
@@ -6531,7 +6532,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
 
             item {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("聯絡人整合", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
+                    Text("聯絡人", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
+                        color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Box(
                             modifier = Modifier.clip(RoundedCornerShape(10.dp))
@@ -6554,8 +6556,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             if (junkContacts.isNotEmpty() && !selectionMode && !junkDismissed) {
                 item {
                     Column(
-                        modifier = Modifier.fillMaxWidth()
-                            .background(AppColors.WorkBg, RoundedCornerShape(14.dp))
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
+                            .background(AppColors.WorkBg, RoundedCornerShape(12.dp))
                             .padding(12.dp)
                     ) {
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -6597,7 +6599,11 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             }
 
             item {
-                Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(14.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(14.dp)).padding(12.dp)) {
+                // ⚠️ LazyColumn 的 spacedBy 已改成 0（讓聯絡人列黏成一張卡），
+                //    所以頭部這幾張卡要自己帶下方留白。
+                Column(modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
+                    .background(AppColors.Surface, RoundedCornerShape(12.dp))
+                    .border(1.dp, AppColors.BorderLight, RoundedCornerShape(12.dp)).padding(12.dp)) {
                     OutlinedTextField(
                         value = searchQuery, onValueChange = viewModel::setContactsSearch,
                         placeholder = { Text("搜尋名字...", fontSize = 14.sp) }, singleLine = true,
@@ -6651,81 +6657,85 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 item { Text("沒有符合的聯絡人", color = AppColors.TextSecondary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 20.dp)) }
             }
 
-            items(filteredContacts, key = { it }) { unifiedName ->
+            // ⚠️ 舊版每位聯絡人是一張獨立的圓角外框卡，幾百張堆起來全是框線；
+            //    平台又用四個彩色膠囊呈現，使用者把系統字體放大後（實測約 1.8 倍）
+            //    9sp 變成 16sp，四顆膠囊直接撐爆父容器，Row 不裁切所以溢出被切掉。
+            //
+            //    改成銀行 App 那種做法：整份清單是一張白卡，列與列之間用細分隔線，
+            //    平台改成一行灰字（LINE · IG · Messenger），顏色只留給標籤。
+            //    密度高、框線少、放大字體也不會爆。
+            itemsIndexed(filteredContacts, key = { _, it -> it }) { idx, unifiedName ->
                 val catId = categoriesMap[unifiedName] ?: ContactCategory.OTHER.id
                 val currentCategory = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
                 val isSel = selected.contains(unifiedName)
-
                 val rawNamesForThis = cb.rawByUnified[unifiedName] ?: listOf(unifiedName)
+                val isFirst = idx == 0
+                val isLast = idx == filteredContacts.lastIndex
+                val shape = RoundedCornerShape(
+                    topStart = if (isFirst) 12.dp else 0.dp, topEnd = if (isFirst) 12.dp else 0.dp,
+                    bottomStart = if (isLast) 12.dp else 0.dp, bottomEnd = if (isLast) 12.dp else 0.dp
+                )
 
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = if (isSel) AppColors.ActiveBlue.copy(alpha = 0.08f) else AppColors.Surface),
-                    border = BorderStroke(1.dp, if (isSel) AppColors.ActiveBlue else AppColors.BorderLight),
-                    shape = RoundedCornerShape(14.dp),
-                    // 長按叫出操作選單（改名／綁定／刪除）；選取模式下維持單擊勾選
-                    modifier = Modifier.combinedClickable(
-                        onClick = { if (selectionMode) toggleSelect(unifiedName) },
-                        onLongClick = { if (!selectionMode) longPressTarget = unifiedName }
-                    )
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .clip(shape)
+                        .background(if (isSel) AppColors.ActiveBlue.copy(alpha = 0.06f) else AppColors.Surface)
+                        .combinedClickable(
+                            onClick = { if (selectionMode) toggleSelect(unifiedName) },
+                            onLongClick = { if (!selectionMode) longPressTarget = unifiedName }
+                        )
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            if (selectionMode) {
-                                Checkbox(checked = isSel, onCheckedChange = { toggleSelect(unifiedName) }, modifier = Modifier.size(22.dp))
-                                Spacer(modifier = Modifier.width(10.dp))
-                            }
-                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text(unifiedName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (rawNamesForThis.isNotEmpty() && rawNamesForThis.first() != unifiedName) {
-                                    Text("包含: ${rawNamesForThis.joinToString()}", fontSize = 11.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                contactApps[unifiedName]?.takeIf { it.isNotEmpty() }?.let { apps ->
-                                    Row(modifier = Modifier.padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        apps.take(4).forEach { a ->
-                                            val brand = AppColors.AppBrands[a] ?: AppColors.TextSecondary
-                                            Text(a, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = brand, maxLines = 1, softWrap = false,
-                                                modifier = Modifier.background(brand.copy(alpha = 0.10f), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 1.dp))
+                    if (!isFirst) HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(start = 14.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (selectionMode) {
+                            Checkbox(checked = isSel, onCheckedChange = { toggleSelect(unifiedName) })
+                            Spacer(modifier = Modifier.width(6.dp))
+                        }
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(unifiedName, fontWeight = FontWeight.Bold, fontSize = T.Body,
+                                color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            // 平台與合併來源合成一行灰字，字體再大也只是換行不會爆版
+                            val apps = contactApps[unifiedName].orEmpty()
+                            val merged = rawNamesForThis.size > 1
+                            if (apps.isNotEmpty() || merged) {
+                                Text(
+                                    buildString {
+                                        append(apps.joinToString(" · ") { shortAppName(it) })
+                                        if (merged) {
+                                            if (isNotEmpty()) append("　")
+                                            append("已合併 ${rawNamesForThis.size} 個帳號")
                                         }
-                                    }
-                                }
-                            }
-                            if (selectionMode) {
-                                Box(modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 3.dp)) {
-                                    Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, maxLines = 1, softWrap = false)
-                                }
-                            } else {
-                                // 以前是 DropdownMenu：選項小、要對準、還會被畫面邊界擠掉。
-                                // 改用跟總覽同一個 QuickTagDialog —— 大塊、一按就好。
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(currentCategory.bgColor)
-                                        .clickable { quickTagTarget = unifiedName }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Spacer(modifier = Modifier.width(3.dp))
-                                    Icon(Icons.Rounded.ArrowDropDown, contentDescription = "更換標籤",
-                                        tint = currentCategory.color, modifier = Modifier.size(16.dp))
-                                }
-                                Spacer(modifier = Modifier.width(6.dp))
-                                // 綁定帳號以前是每張卡片底部一整條，幾百張卡堆起來全是陣列雜訊。
-                                // 這個動作偶爾才用一次，收成標籤旁的圖示就好（長按選單裡也有）。
-                                Box(
-                                    modifier = Modifier.size(30.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(AppColors.Background)
-                                        .clickable { mergeSource = unifiedName },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.Add, contentDescription = "綁定其他帳號",
-                                        tint = AppColors.ActiveBlue, modifier = Modifier.size(16.dp))
-                                }
+                                    },
+                                    fontSize = T.Micro, color = AppColors.TextTertiary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
                             }
                         }
-
+                        if (selectionMode) {
+                            Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold,
+                                fontSize = T.Micro, maxLines = 1, softWrap = false,
+                                modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp))
+                        } else {
+                            Row(
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .background(currentCategory.bgColor)
+                                    .clickable { quickTagTarget = unifiedName }
+                                    .padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold,
+                                    fontSize = T.Micro, maxLines = 1, softWrap = false)
+                                Icon(Icons.Rounded.ArrowDropDown, contentDescription = "更換標籤",
+                                    tint = currentCategory.color, modifier = Modifier.size(14.dp))
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("›", fontSize = 17.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                        }
                     }
                 }
             }
@@ -7778,6 +7788,16 @@ fun rotatedWeekLabels(weekStartDay: Int): List<String> {
     return (0..6).map { base[(it + offset) % 7] }
 }
 
+/** 平台名縮寫：清單列的空間有限，Instagram/Messenger 全名會把名字擠掉 */
+fun shortAppName(name: String): String = when (name) {
+    "Instagram" -> "IG"
+    "Messenger" -> "Messenger"
+    "Facebook" -> "FB"
+    "WhatsApp" -> "WA"
+    "Telegram" -> "TG"
+    else -> name
+}
+
 /** 早晨 05-11 / 下午 12-17 / 夜晚 18-04 */
 fun periodPredicate(name: String): (InteractionRecord) -> Boolean = { r ->
     val h = Calendar.getInstance().apply { timeInMillis = r.timestamp }.get(Calendar.HOUR_OF_DAY)
@@ -7853,7 +7873,7 @@ fun SettingsDivider() {
 @Composable
 fun SettingsRow(
     title: String,
-    subtitle: String,
+    subtitle: String? = null,
     danger: Boolean = false,
     accent: Boolean = false,
     onClick: () -> Unit
@@ -7871,9 +7891,13 @@ fun SettingsRow(
         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
             Text(title, fontSize = T.Body, fontWeight = FontWeight.Bold, color = tint,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+            // 副標只寫在「光看名字猜不出會發生什麼」的項目上。
+            // 每一列都掛一句說明，整頁會變成一面文字牆，反而更難掃。
+            if (subtitle != null) {
+                Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+            }
         }
-        Text("›", fontSize = 18.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+        Text("›", fontSize = 17.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
     }
 }
 /** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
@@ -8203,10 +8227,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                         modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp)
                     )
                 }
-            }
-        }
-        item {
-            SettingsCard {
+                SettingsDivider()
                 SettingsRow("運作原理", "訊息與停留時間各自怎麼來的") { setShowGuideDialog(true) }
             }
         }
@@ -8418,7 +8439,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                         color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                 }
                 SettingsDivider()
-                SettingsRow("匯入手機通話紀錄", "補齊真實通話時長，可重複執行不會重複計入") {
+                SettingsRow("匯入手機通話紀錄", "補齊真實通話時長") {
                     if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
                         == PackageManager.PERMISSION_GRANTED
                     ) runCallImport() else callLogLauncher.launch(Manifest.permission.READ_CALL_LOG)
@@ -8428,9 +8449,9 @@ fun SettingsView(viewModel: RelateViewModel) {
                         modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp), lineHeight = 14.sp)
                 }
                 SettingsDivider()
-                SettingsRow("整理系統通知", "把讚、追蹤、推播歸到「系統通知」標籤") { confirmAction = "retag" }
+                SettingsRow("整理系統通知", "把讚、追蹤、推播歸到「系統通知」") { confirmAction = "retag" }
                 SettingsDivider()
-                SettingsRow("清掉常用詞裡的雜訊", "移除系統通知與人名碎片，其他累積保留") {
+                SettingsRow("清掉常用詞裡的雜訊", "移除系統通知與人名碎片") {
                     val n = viewModel.purgeJunkWords()
                     Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
                 }
@@ -8439,25 +8460,21 @@ fun SettingsView(viewModel: RelateViewModel) {
 
         item {
             SettingsCard {
-                SettingsRow("最近刪除", "保留 7 天，可展開看內容再決定還原") { showTrash = true }
+                SettingsRow("最近刪除", "保留 7 天，可還原") { showTrash = true }
                 SettingsDivider()
-                SettingsRow("逐筆檢視紀錄", "看每一筆互動，可勾選刪除") { showRecordManager = true }
+                SettingsRow("逐筆檢視紀錄") { showRecordManager = true }
                 if (blockedNow.isNotEmpty()) {
                     SettingsDivider()
-                    SettingsRow("永不記錄名單", "${blockedNow.size} 位，可隨時解除") { showBlocked = true }
+                    SettingsRow("永不記錄名單", "${blockedNow.size} 位") { showBlocked = true }
                 }
                 SettingsDivider()
-                SettingsRow("偵測診斷", "服務有沒有在跑、抓到什麼", accent = true) { showDiagnostics = true }
-            }
-        }
-
-        item {
-            SettingsCard {
-                SettingsRow("清除資料", "今日／本週／指定日期／全部，刪除前可逐項取消勾選", danger = true) {
+                SettingsRow("偵測診斷", accent = true) { showDiagnostics = true }
+                SettingsDivider()
+                SettingsRow("清除資料", "今日／本週／指定日期／全部", danger = true) {
                     setShowDataManager(true)
                 }
                 SettingsDivider()
-                SettingsRow("清除常用詞", "${wordFreqNow.size} 個詞全部歸零，互動紀錄不受影響", danger = true) {
+                SettingsRow("清除常用詞", "${wordFreqNow.size} 個詞全部歸零", danger = true) {
                     confirmAction = "words"
                 }
             }
