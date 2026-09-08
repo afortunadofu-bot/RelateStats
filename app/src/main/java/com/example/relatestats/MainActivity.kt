@@ -709,6 +709,28 @@ object DataRepository {
         }
     }
 
+    /**
+     * 記錄「有接住、但不該發生」的例外。
+     *
+     * 統計算到一半丟例外時，如果讓它往上冒就是整個 App 閃退，
+     * 而且沒有裝置在手邊根本無從得知是哪一行。改成接住 + 寫檔，
+     * 使用者只要到設定頁按「複製」就能把堆疊給我。
+     */
+    fun recordError(tag: String, err: Throwable) {
+        val ctx = appContext ?: return
+        runCatching {
+            val sw = java.io.StringWriter()
+            err.printStackTrace(java.io.PrintWriter(sw))
+            val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+            File(ctx.filesDir, CRASH_FILE).writeText(
+                "時間：$stamp\n版本：${BuildConfig.VERSION_NAME}\n位置：$tag（已接住，未閃退）\n\n$sw"
+            )
+        }
+        lastErrorTag.value = tag
+    }
+
+    val lastErrorTag = MutableStateFlow<String?>(null)
+
     fun readLastCrash(): String? {
         val ctx = appContext ?: return null
         return runCatching {
@@ -964,6 +986,26 @@ object DataRepository {
             f.delete()
             fresh.size
         }.getOrDefault(0)
+    }
+
+    /** 某一批垃圾桶裡有哪些對象、各幾筆、時間範圍 —— 不還原也要看得到內容 */
+    fun peekTrash(fileName: String): List<Triple<String, Int, String>> {
+        val dir = trashDir() ?: return emptyList()
+        return runCatching {
+            val f = File(dir, fileName)
+            if (!f.exists()) return emptyList()
+            val recs = f.readLines().mapNotNull { InteractionRecord.fromCsvString(it) }
+            val fmt = SimpleDateFormat("M/d", Locale.US)
+            recs.groupBy { _aliases.value[it.rawSenderName] ?: it.rawSenderName }
+                .map { (name, list) ->
+                    val from = list.minOf { it.timestamp }
+                    val to = list.maxOf { it.timestamp }
+                    val span = if (fmt.format(Date(from)) == fmt.format(Date(to))) fmt.format(Date(from))
+                    else fmt.format(Date(from)) + "-" + fmt.format(Date(to))
+                    Triple(name, list.size, span)
+                }
+                .sortedByDescending { it.second }
+        }.getOrDefault(emptyList())
     }
 
     fun purgeTrash(fileName: String) {
@@ -3183,6 +3225,8 @@ class RelateViewModel : ViewModel() {
     fun clearDetectLog() = DataRepository.clearDetectLog()
     val lastServiceBeat = DataRepository.lastServiceBeat
     fun readLastCrash() = DataRepository.readLastCrash()
+    val lastErrorTag = DataRepository.lastErrorTag
+    fun recordError(tag: String, e: Throwable) = DataRepository.recordError(tag, e)
     fun clearLastCrash() = DataRepository.clearLastCrash()
     fun setCategories(names: Collection<String>, categoryId: String) = DataRepository.updateCategories(names, categoryId)
     fun updateCategoryMeta(id: String, label: String, colorInt: Int, bgColorInt: Int) = DataRepository.updateCategoryMeta(id, label, colorInt, bgColorInt)
@@ -3207,6 +3251,7 @@ class RelateViewModel : ViewModel() {
     fun listTrash() = DataRepository.listTrash()
     fun restoreTrash(f: String) = DataRepository.restoreTrash(f)
     fun purgeTrash(f: String) = DataRepository.purgeTrash(f)
+    fun peekTrash(f: String) = DataRepository.peekTrash(f)
     fun listJunkContacts() = DataRepository.listJunkContacts()
     val undoAvailable = DataRepository.undoAvailable
     val undoLabel = DataRepository.undoLabel
@@ -4282,8 +4327,7 @@ fun DonutChart(
             if (slices.size > 6) {
                 Text("＋其他 ${slices.size - 6} 項", fontSize = T.Micro, color = AppColors.TextTertiary)
             }
-            Text("點看比例 · 長按看是誰", fontSize = T.Micro, color = AppColors.TextTertiary,
-                modifier = Modifier.padding(top = 2.dp))
+
         }
     }
 }
@@ -4450,8 +4494,6 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
                     dayFmt.format(Date(p.dayStart)) + " · " + p.msgCount + " 則 · 停留 " + formatDuration(p.durationSeconds),
                     fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
                 )
-            } else {
-                Text("點長條看當天", fontSize = T.Micro, color = AppColors.TextTertiary)
             }
         }
         Row(
@@ -4713,9 +4755,13 @@ fun InsightsView(viewModel: RelateViewModel) {
     ) {
         delay(300)
         if (value.ready) value = value.copy(ready = false)
-        value = withContext(Dispatchers.Default) {
-            viewModel.buildInsights(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
+        val next = withContext(Dispatchers.Default) {
+            runCatching {
+                viewModel.buildInsights(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
+            }
         }
+        next.getOrNull()?.let { value = it }
+            ?: next.exceptionOrNull()?.let { viewModel.recordError("buildInsights", it) }
     }
 
     drill?.let { (title, stats) ->
@@ -4756,9 +4802,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("時間上的規律、跟過去比、關係的變化",
-                        fontSize = T.Micro, color = AppColors.TextTertiary,
-                        modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(modifier = Modifier.weight(1f))
                     Row(
                         modifier = Modifier.clip(RoundedCornerShape(8.dp))
                             .background(AppColors.Surface)
@@ -5102,9 +5146,15 @@ fun OverviewView(viewModel: RelateViewModel) {
         // 不做合併的話每則訊息都會觸發一次全表重算，直接把 CPU 吃滿。
         delay(300)
         if (value.ready) value = value.copy(ready = false)
-        value = withContext(Dispatchers.Default) {
-            viewModel.buildOverview(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
+        // ⚠️ 統計丟例外不能讓整個 App 掛掉。接住、記下堆疊、保留上一份資料，
+        //    使用者才有機會把原因回報出來（設定頁最上方會出現紅色區塊）。
+        val next = withContext(Dispatchers.Default) {
+            runCatching {
+                viewModel.buildOverview(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
+            }
         }
+        next.getOrNull()?.let { value = it }
+            ?: next.exceptionOrNull()?.let { viewModel.recordError("buildOverview", it) }
     }
     val filteredRecords = bundle.scoped
     val appStats = bundle.appStats
@@ -5158,8 +5208,7 @@ fun OverviewView(viewModel: RelateViewModel) {
         stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
         // 兩頁的分工要寫出來：使用者問過「洞察跟總覽的用意差在哪」
         item {
-            Text("這段期間有多少、誰佔多少",
-                fontSize = T.Micro, color = AppColors.TextTertiary)
+
         }
 
         if (!bundle.ready) {
@@ -5517,8 +5566,6 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                             " · " + grid[p.first][p.second] + " 次",
                         fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
                     )
-                } else {
-                    Text("點格子看時段", fontSize = T.Micro, color = AppColors.TextTertiary)
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
@@ -5795,8 +5842,6 @@ fun ContactDetailDialog(
                             val (lbl, n) = insight.weekly[pw]
                             Text("$lbl · $n 則", fontSize = T.Label, fontWeight = FontWeight.Bold,
                                 color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
-                        } else {
-                            Text("點長條看那一週", fontSize = T.Micro, color = AppColors.TextTertiary)
                         }
                     }
                     Row(modifier = Modifier.fillMaxWidth().height(72.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -5840,8 +5885,6 @@ fun ContactDetailDialog(
                                 (if (hs.missedCalls > 0) " · " + hs.missedCalls + " 通未接" else ""),
                                 color = AppColors.TextSecondary, fontSize = T.Label)
                         }
-                    } else {
-                        Text("點下方長條看該時段的數字", color = AppColors.TextSecondary, fontSize = T.Body)
                     }
                 }
                 Box(modifier = Modifier.fillMaxWidth().height(100.dp).padding(top = 10.dp)) {
@@ -5985,9 +6028,13 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     ) {
         delay(300)
         if (value.ready) value = value.copy(ready = false)
-        value = withContext(Dispatchers.Default) {
-            viewModel.buildLeaderboard(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter)
+        val next = withContext(Dispatchers.Default) {
+            runCatching {
+                viewModel.buildLeaderboard(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter)
+            }
         }
+        next.getOrNull()?.let { value = it }
+            ?: next.exceptionOrNull()?.let { viewModel.recordError("buildLeaderboard", it) }
     }
     val leaderboard = lb.list
     val availableApps = lb.apps
@@ -6271,7 +6318,9 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     val cb by produceState(viewModel.cachedContacts, records, aliases) {
         delay(300)
         if (value.ready) value = value.copy(ready = false)
-        value = withContext(Dispatchers.Default) { viewModel.buildContacts(records, aliases) }
+        val next = withContext(Dispatchers.Default) { runCatching { viewModel.buildContacts(records, aliases) } }
+        next.getOrNull()?.let { value = it }
+            ?: next.exceptionOrNull()?.let { viewModel.recordError("buildContacts", it) }
     }
     val unifiedNamesList = cb.unifiedNames
     val interactionCounts = cb.counts
@@ -7651,6 +7700,51 @@ fun ScopeTag(text: String) {
     }
 }
 
+/** 設定頁的分組標題：一句話說清楚這一組在做什麼 */
+@Composable
+fun DataGroup(title: String, subtitle: String) {
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp)) {
+        Text(title, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
+            maxLines = 1, softWrap = false)
+        Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+    }
+    HorizontalDivider(color = AppColors.BorderLight)
+}
+
+/**
+ * 設定頁的一個動作。
+ * 標題一行、說明一行 —— 以前每顆按鈕只有一行標題，光看「整理系統通知」
+ * 猜不出它會做什麼，只好都不敢按。
+ */
+@Composable
+fun DataAction(
+    title: String,
+    subtitle: String,
+    danger: Boolean = false,
+    accent: Boolean = false,
+    onClick: () -> Unit
+) {
+    val tint = when {
+        danger -> AppColors.WorkText
+        accent -> AppColors.ActiveBlue
+        else -> AppColors.TextPrimary
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onClick() }
+            .padding(vertical = 10.dp, horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, fontSize = T.Body, fontWeight = FontWeight.Bold, color = tint,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+        }
+        Text("›", fontSize = 18.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+    }
+}
+
 /** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
 @Composable
 fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
@@ -7665,7 +7759,7 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         title = {
             Column {
                 Text("最近刪除", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
-                Text("刪掉的紀錄會在這裡保留 7 天，之後自動永久移除",
+                Text("保留 7 天後自動永久移除　·　點一批看內容",
                     fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
             }
         },
@@ -7676,20 +7770,54 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                 LazyColumn(modifier = Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(batches, key = { it.file }) { b ->
                         val daysLeft = (7 - ((now - b.deletedAt) / 86_400_000L)).coerceAtLeast(0L)
+                        // 展開才去讀檔：一批可能上千筆，全部先讀會拖慢開啟
+                        var expanded by remember(b.file) { mutableStateOf(false) }
+                        val detail = remember(b.file, expanded) {
+                            if (expanded) viewModel.peekTrash(b.file) else emptyList()
+                        }
                         Column(
                             modifier = Modifier.fillMaxWidth()
                                 .background(AppColors.Background, RoundedCornerShape(10.dp))
                                 .padding(10.dp)
                         ) {
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+                                    .clickable { expanded = !expanded },
+                                horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text(b.label, fontSize = T.Body, fontWeight = FontWeight.Bold,
                                     color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f))
                                 Text("${b.count} 筆", fontSize = T.Label, fontWeight = FontWeight.Bold,
                                     color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (expanded) "▲" else "▼", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                             }
                             Text(fmt.format(Date(b.deletedAt)) + " 刪除　·　剩 $daysLeft 天",
                                 fontSize = T.Micro, color = AppColors.TextTertiary)
+                            if (expanded) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                if (detail.isEmpty()) {
+                                    Text("讀不到這一批的內容（檔案可能已損毀）", fontSize = T.Micro, color = AppColors.TextTertiary)
+                                } else {
+                                    detail.take(30).forEach { (name, cnt, span) ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(name, fontSize = T.Label, color = AppColors.TextPrimary,
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                            Text(span, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("$cnt 筆", fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                                color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                                        }
+                                    }
+                                    if (detail.size > 30) {
+                                        Text("＋其他 ${detail.size - 30} 位", fontSize = T.Micro, color = AppColors.TextTertiary)
+                                    }
+                                }
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Box(
@@ -7851,6 +7979,10 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showDiagnostics by remember { mutableStateOf(false) }
     var showTrash by remember { mutableStateOf(false) }
     var showBlocked by remember { mutableStateOf(false) }
+    // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
+    val errTag by viewModel.lastErrorTag.collectAsState()
+    var crashReport by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(errTag) { crashReport = viewModel.readLastCrash() }
     val blockedNow by viewModel.blockedNames.collectAsState()
     val wordFreqNow by viewModel.wordFreq.collectAsState()
     val undoAvailable by viewModel.undoAvailable.collectAsState()
@@ -8011,6 +8143,47 @@ fun SettingsView(viewModel: RelateViewModel) {
             }
         }
 
+        // 上次的閃退／計算錯誤放最上面：埋在診斷對話框裡使用者根本不會去看，
+        // 而這是沒有裝置時唯一能定位問題的東西。
+        crashReport?.let { report ->
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(AppColors.WorkBg, RoundedCornerShape(16.dp))
+                        .padding(14.dp)
+                ) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("上次發生錯誤", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.WorkText, modifier = Modifier.weight(1f))
+                    }
+                    Text(report.lineSequence().take(4).joinToString("\n"),
+                        fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 14.sp,
+                        modifier = Modifier.padding(top = 6.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                cm?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 錯誤紀錄", report))
+                                Toast.makeText(context, "已複製，貼給開發者即可", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
+                            shape = RoundedCornerShape(10.dp)
+                        ) { Text("複製錯誤紀錄", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                        OutlinedButton(
+                            onClick = { viewModel.clearLastCrash(); crashReport = null },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp)
+                        ) { Text("忽略", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false) }
+                    }
+                }
+            }
+        }
+
+        // ⚠️ 這張卡以前是七顆長得一模一樣的按鈕排成一直排，
+        //    「匯入」「清理」「刪除」「復原」「診斷」混在一起，找不到東西。
+        //    改成分組 + 每組一句說明；破壞性的動作集中在最下面並用警示色。
         item {
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -8023,7 +8196,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                         Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).background(AppColors.FriendBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.Top) {
                             Icon(Icons.Rounded.Info, contentDescription = null, tint = AppColors.FriendText, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤留下的異常紀錄，清理前的原始資料已另存一份在 App 內部空間。", color = AppColors.FriendText, fontSize = 12.sp, lineHeight = 17.sp)
+                            Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤留下的異常紀錄，原始資料已另存一份。", color = AppColors.FriendText, fontSize = 12.sp, lineHeight = 17.sp)
                         }
                     }
 
@@ -8031,7 +8204,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                         Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).background(AppColors.WorkBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.Top) {
                             Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("偵測到 $abnormalCount 筆異常紀錄：單筆停留時間超過 30 分鐘上限，是舊版計時錯誤的產物，會讓總時長暴增到不合理的數字。", color = AppColors.WorkText, fontSize = 12.sp, lineHeight = 17.sp)
+                            Text("偵測到 $abnormalCount 筆異常紀錄：單筆停留超過 30 分鐘上限，是舊版計時錯誤的產物。", color = AppColors.WorkText, fontSize = 12.sp, lineHeight = 17.sp)
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
@@ -8042,98 +8215,37 @@ fun SettingsView(viewModel: RelateViewModel) {
                         ) { Text("清理 $abnormalCount 筆異常紀錄", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(
-                        onClick = {
-                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
-                                == PackageManager.PERMISSION_GRANTED
-                            ) runCallImport() else callLogLauncher.launch(Manifest.permission.READ_CALL_LOG)
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Rounded.Phone, contentDescription = null, modifier = Modifier.size(16.dp), tint = AppColors.TextSecondary)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("匯入手機通話紀錄（補齊真實通話時長）", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // ── 補資料 ──
+                    DataGroup("補資料", "把系統裡拿得到、但通知抓不到的東西補進來")
+                    DataAction("匯入手機通話紀錄", "補齊真實通話時長，可重複執行不會重複計入") {
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
+                            == PackageManager.PERMISSION_GRANTED
+                        ) runCallImport() else callLogLauncher.launch(Manifest.permission.READ_CALL_LOG)
                     }
                     callImportMsg?.let {
-                        Text(it, fontSize = T.Label, color = AppColors.FriendText, modifier = Modifier.padding(top = 6.dp), lineHeight = 16.sp)
+                        Text(it, fontSize = T.Label, color = AppColors.FriendText, modifier = Modifier.padding(start = 2.dp, top = 4.dp), lineHeight = 16.sp)
                     }
 
+                    // ── 整理 ──
+                    DataGroup("整理", "不刪紀錄，只把分類與詞頻整理乾淨")
+                    DataAction("整理系統通知", "把讚、追蹤、推播這類非真人的來源歸到「系統通知」標籤") {
+                        confirmAction = "retag"
+                    }
+                    DataAction("清掉常用詞裡的系統通知與人名", "只移除雜訊，其他累積保留") {
+                        val n = viewModel.purgeJunkWords()
+                        Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
+                    }
+
+                    // ── 檢視與還原 ──
+                    DataGroup("檢視與還原", "刪掉的東西還在這裡，七天內都救得回來")
+                    DataAction("最近刪除", "保留 7 天，可逐批展開查看內容再決定還原或永久刪除") { showTrash = true }
+                    DataAction("逐筆檢視紀錄", "看每一筆互動，可勾選刪除") { showRecordManager = true }
                     if (blockedNow.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        OutlinedButton(
-                            onClick = { showBlocked = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("永不記錄名單（${blockedNow.size} 位）", fontSize = 12.sp,
-                                color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
+                        DataAction("永不記錄名單", "${blockedNow.size} 位，可隨時解除") { showBlocked = true }
                     }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedButton(
-                        onClick = { showTrash = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = AppColors.TextSecondary)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("最近刪除（保留 7 天，可還原）", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    DataAction("停留時間偵測診斷", "服務有沒有在跑、抓到什麼、上次閃退的原因", accent = true) {
+                        showDiagnostics = true
                     }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedButton(
-                        onClick = { setShowDataManager(true) },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Rounded.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = AppColors.TextSecondary)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("清除資料（今日／本週／指定日期／全部）", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(
-                            onClick = { confirmAction = "retag" },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)
-                        ) { Text("整理系統通知", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-
-                        OutlinedButton(
-                            onClick = { confirmAction = "words" },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)
-                        ) { Text("清除常用詞", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedButton(
-                        onClick = {
-                            val n = viewModel.purgeJunkWords()
-                            Toast.makeText(
-                                context,
-                                if (n > 0) "已清掉 $n 個系統通知與人名碎片" else "沒有找到需要清的詞",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Text("只清常用詞裡的系統通知與人名（不歸零）",
-                            fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedButton(
-                        onClick = { showRecordManager = true },
-                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
-                    ) { Text("逐筆檢視／勾選刪除紀錄", fontSize = T.Body, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedButton(
-                        onClick = { showDiagnostics = true },
-                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
-                    ) { Text("停留時間偵測診斷", fontSize = T.Body, color = AppColors.ActiveBlue, maxLines = 1, overflow = TextOverflow.Ellipsis) }
 
                     if (undoAvailable) {
                         Spacer(modifier = Modifier.height(10.dp))
@@ -8157,6 +8269,15 @@ fun SettingsView(viewModel: RelateViewModel) {
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                             ) { Text("復原", fontSize = 12.sp, maxLines = 1, softWrap = false) }
                         }
+                    }
+
+                    // ── 刪除（放最後、用警示色，避免誤觸）──
+                    DataGroup("刪除", "會真的移除紀錄，但都會先進垃圾桶")
+                    DataAction("清除資料", "今日／本週／指定日期／全部，刪除前可逐項取消勾選", danger = true) {
+                        setShowDataManager(true)
+                    }
+                    DataAction("清除常用詞", "詞頻全部歸零重新累積，互動紀錄不受影響", danger = true) {
+                        confirmAction = "words"
                     }
                 }
             }
