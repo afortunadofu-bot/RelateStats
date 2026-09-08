@@ -7821,24 +7821,37 @@ fun SettingsSection(title: String) {
     )
 }
 
-/** 設定頁的分組標題：一句話說清楚這一組在做什麼 */
+/**
+ * 設定頁唯一的容器。
+ *
+ * 整頁只用這一種卡：Surface 底、1dp 邊框、14dp 圓角、無陰影、內容自己控制內距。
+ * 以前每張卡各自寫 `Card(colors=…, border=…, shape=…)`，圓角 14/16 混用、
+ * 內距 14/16 混用，看起來就是拼湊出來的。
+ */
 @Composable
-fun DataGroup(title: String, subtitle: String) {
-    Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp)) {
-        Text(title, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
-            maxLines = 1, softWrap = false)
-        Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
-    }
-    HorizontalDivider(color = AppColors.BorderLight)
+fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(AppColors.Surface)
+            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(14.dp)),
+        content = content
+    )
+}
+
+/** 卡片內兩列之間的分隔線；縮排讓它從文字起點開始，不要貼滿整張卡 */
+@Composable
+fun SettingsDivider() {
+    HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(start = 14.dp))
 }
 
 /**
- * 設定頁的一個動作。
- * 標題一行、說明一行 —— 以前每顆按鈕只有一行標題，光看「整理系統通知」
- * 猜不出它會做什麼，只好都不敢按。
+ * 設定頁的標準一列：標題 + 說明 + 右側箭號。
+ * 說明是必填的 —— 只有標題的話，「整理系統通知」這種名字猜不出會發生什麼事，
+ * 使用者就不敢按。
  */
 @Composable
-fun DataAction(
+fun SettingsRow(
     title: String,
     subtitle: String,
     danger: Boolean = false,
@@ -7851,10 +7864,8 @@ fun DataAction(
         else -> AppColors.TextPrimary
     }
     Row(
-        modifier = Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .clickable { onClick() }
-            .padding(vertical = 10.dp, horizontal = 2.dp),
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
@@ -7865,7 +7876,6 @@ fun DataAction(
         Text("›", fontSize = 18.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
     }
 }
-
 /** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
 @Composable
 fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
@@ -8157,81 +8167,109 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
     }
 
-    LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { Text("設定與服務", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = AppColors.TextPrimary, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) }
-
+    // 版面規則（整頁一致，不要再各寫各的）：
+    //   · 容器一律 SettingsCard —— Surface 底、1dp 邊框、14dp 圓角、無陰影
+    //   · 群組之間用 SettingsSection 的小標分隔，不靠留白硬撐
+    //   · 每一列 = 標題(14sp) + 說明(11sp) + 右側狀態或 ›
+    //   · 破壞性動作一律紅字並排在該區最後
+    LazyColumn(
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.ActiveBlue.copy(0.1f)), border = BorderStroke(1.dp, AppColors.ActiveBlue.copy(0.2f)), shape = RoundedCornerShape(16.dp), modifier = Modifier.clickable { setShowGuideDialog(true) }) {
-                Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Info, contentDescription = null, tint = AppColors.ActiveBlue)
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text("App 使用說明與核心邏輯", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold)
-                        Text("瞭解如何發揮最大效用", color = AppColors.ActiveBlue.copy(0.8f), fontSize = 12.sp)
-                    }
+            Text("設定", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
+                color = AppColors.TextPrimary, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
+        }
+
+        // ── 服務狀態：這是全 App 最重要的一張卡，關掉就什麼都不會記錄 ──
+        item { SettingsSection("服務") }
+        item {
+            SettingsCard {
+                PermissionRow("通知存取", "計算訊息數與字數", hasNotif) {
+                    context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                }
+                SettingsDivider()
+                PermissionRow("無障礙服務", "計算聊天室停留時間", hasAccel) {
+                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                SettingsDivider()
+                PermissionRow("使用紀錄存取", "計算手機總用量佔比", hasUsageStats) {
+                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                }
+                if (!hasUsageStats) {
+                    Text(
+                        "找不到本 App 的話，到系統「應用程式」裡點右上角「允許受限制的設定」",
+                        fontSize = T.Micro, color = AppColors.WorkText, lineHeight = 14.sp,
+                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp)
+                    )
                 }
             }
         }
-
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
-                Column {
-                    PermissionRow("通知存取 (計算字數與訊息量)", hasNotif) { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-                    HorizontalDivider(color = AppColors.BorderLight)
-                    PermissionRow("無障礙服務 (計算真實停留時間)", hasAccel) { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-                    HorizontalDivider(color = AppColors.BorderLight)
-                    Column {
-                        PermissionRow("使用紀錄存取 (計算手機總用量)", hasUsageStats) { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
-                        if(!hasUsageStats) { Text("＊若找不到此 App，請至系統「應用程式」內找到本 App，點擊右上角「允許受限制的設定」", fontSize = 10.sp, color = AppColors.WorkText, modifier = Modifier.padding(start=16.dp, bottom=12.dp, end=16.dp)) }
-                    }
-                }
+            SettingsCard {
+                SettingsRow("運作原理", "訊息與停留時間各自怎麼來的") { setShowGuideDialog(true) }
             }
         }
 
+        // ── 偏好 ──
         item { SettingsSection("偏好") }
-
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
-                Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("自訂一週起始日", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
-                    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
-                        Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(weekStartDay == Calendar.MONDAY) AppColors.BrandPrimary else Color.Transparent).clickable{ viewModel.setWeekStartDay(Calendar.MONDAY) }.padding(horizontal=10.dp, vertical=6.dp)){
-                            Text("週一", fontSize=12.sp, color=if(weekStartDay == Calendar.MONDAY) Color.White else AppColors.TextSecondary, fontWeight=if(weekStartDay == Calendar.MONDAY) FontWeight.Bold else FontWeight.Normal)
-                        }
-                        Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if(weekStartDay == Calendar.SUNDAY) AppColors.BrandPrimary else Color.Transparent).clickable{ viewModel.setWeekStartDay(Calendar.SUNDAY) }.padding(horizontal=10.dp, vertical=6.dp)){
-                            Text("週日", fontSize=12.sp, color=if(weekStartDay == Calendar.SUNDAY) Color.White else AppColors.TextSecondary, fontWeight=if(weekStartDay == Calendar.SUNDAY) FontWeight.Bold else FontWeight.Normal)
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp), modifier = Modifier.clickable { showCategoryManager = true }) {
-                Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            SettingsCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("標籤管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
-                        Text("改名、換色、調整順序、新增或刪除", fontSize = 11.sp, color = AppColors.TextSecondary)
+                        Text("一週起始日", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("影響單週範圍、活躍密度與熱力圖", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        availableCats.take(4).forEach { cat ->
-                            Box(modifier = Modifier.size(14.dp).background(cat.bgColor, CircleShape).border(1.dp, cat.color, CircleShape))
+                    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
+                        listOf(Calendar.MONDAY to "週一", Calendar.SUNDAY to "週日").forEach { (day, label) ->
+                            val on = weekStartDay == day
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                    .clickable { viewModel.setWeekStartDay(day) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(label, fontSize = T.Label,
+                                    color = if (on) Color.White else AppColors.TextSecondary,
+                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1, softWrap = false)
+                            }
                         }
                     }
+                }
+                SettingsDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { showCategoryManager = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("標籤管理", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("改名、換色、調整順序、新增或刪除", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        availableCats.take(4).forEach { cat ->
+                            Box(modifier = Modifier.size(12.dp).background(cat.bgColor, CircleShape).border(1.dp, cat.color, CircleShape))
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("›", fontSize = 18.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                 }
             }
         }
 
+        // ── 備份 ──
+        item { SettingsSection("備份") }
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(14.dp)) {
+            SettingsCard {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("備份與還原", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
-                        Icon(Icons.Rounded.Lock, contentDescription = null, tint = AppColors.TextSecondary)
-                    }
-                    Text("所有資料只存在這支手機，換機或重灌前請務必先備份。", fontSize = 12.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
-
-                    // 走系統分享選單，不需登入 Google 帳號
+                    Text("所有資料只存在這支手機。換機或重灌前請務必先備份。",
+                        fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
                     Button(
                         onClick = {
                             ioScope.launch {
@@ -8246,41 +8284,49 @@ fun SettingsView(viewModel: RelateViewModel) {
                         },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(vertical = 12.dp)
                     ) {
-                        Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("備份到 Google 雲端硬碟 / LINE Keep", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("分享備份檔", fontSize = T.Body, maxLines = 1, softWrap = false)
                     }
-
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { exportLauncher.launch("RelateStats_Backup.txt") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)) {
-                            Text("存成檔案", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        Button(onClick = { importLauncher.launch(arrayOf("text/plain")) }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue), shape = RoundedCornerShape(12.dp)) {
-                            Text("選擇檔案還原", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
+                        OutlinedButton(
+                            onClick = { exportLauncher.launch("RelateStats_Backup.txt") },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) { Text("存成檔案", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
+                        OutlinedButton(
+                            onClick = { importLauncher.launch(arrayOf("text/plain")) },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) { Text("從檔案還原", fontSize = T.Label, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false) }
                     }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("Android 自動備份也已啟用：綁定這支手機的 Google 帳號，重裝後會自動還原（系統上限 25MB）。",
+                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                 }
             }
         }
 
-        // 上次的閃退／計算錯誤放最上面：埋在診斷對話框裡使用者根本不會去看，
-        // 而這是沒有裝置時唯一能定位問題的東西。
+        // ── 資料 ──
         item { SettingsSection("資料") }
 
+        // 上次的閃退／計算錯誤放在資料區最上面：埋在診斷對話框裡使用者根本不會去看，
+        // 而這是沒有裝置時唯一能定位問題的東西。
         crashReport?.let { report ->
             item {
                 Column(
                     modifier = Modifier.fillMaxWidth()
-                        .background(AppColors.WorkBg, RoundedCornerShape(16.dp))
+                        .background(AppColors.WorkBg, RoundedCornerShape(14.dp))
                         .padding(14.dp)
                 ) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("上次發生錯誤", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.WorkText, modifier = Modifier.weight(1f))
+                        Text("上次發生錯誤", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText, modifier = Modifier.weight(1f))
                     }
                     Text(report.lineSequence().take(4).joinToString("\n"),
                         fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 14.sp,
@@ -8306,125 +8352,126 @@ fun SettingsView(viewModel: RelateViewModel) {
             }
         }
 
-        // ⚠️ 這張卡以前是七顆長得一模一樣的按鈕排成一直排，
-        //    「匯入」「清理」「刪除」「復原」「診斷」混在一起，找不到東西。
-        //    改成分組 + 每組一句說明；破壞性的動作集中在最下面並用警示色。
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.Surface), border = BorderStroke(1.dp, AppColors.BorderLight), shape = RoundedCornerShape(16.dp)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("資料管理", color = AppColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = (-0.2).sp)
-                        Text("${records.size} 筆紀錄", color = AppColors.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                    }
-
-                    if (autoCleanedCount > 0) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).background(AppColors.FriendBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.Top) {
-                            Icon(Icons.Rounded.Info, contentDescription = null, tint = AppColors.FriendText, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤留下的異常紀錄，原始資料已另存一份。", color = AppColors.FriendText, fontSize = 12.sp, lineHeight = 17.sp)
-                        }
-                    }
-
+        if (autoCleanedCount > 0 || abnormalCount > 0) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(if (abnormalCount > 0) AppColors.WorkBg else AppColors.FriendBg, RoundedCornerShape(14.dp))
+                        .padding(14.dp)
+                ) {
                     if (abnormalCount > 0) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).background(AppColors.WorkBg, RoundedCornerShape(8.dp)).padding(12.dp), verticalAlignment = Alignment.Top) {
-                            Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("偵測到 $abnormalCount 筆異常紀錄：單筆停留超過 30 分鐘上限，是舊版計時錯誤的產物。", color = AppColors.WorkText, fontSize = 12.sp, lineHeight = 17.sp)
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("$abnormalCount 筆異常紀錄", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
+                        Text("單筆停留超過 30 分鐘上限，是舊版計時錯誤的產物",
+                            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.85f), lineHeight = 14.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
                         Button(
                             onClick = { confirmAction = "abnormal" },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
-                            shape = RoundedCornerShape(12.dp)
-                        ) { Text("清理 $abnormalCount 筆異常紀錄", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            shape = RoundedCornerShape(10.dp)
+                        ) { Text("清理這 $abnormalCount 筆", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                    } else {
+                        Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤留下的異常紀錄",
+                            fontSize = T.Label, color = AppColors.FriendText, lineHeight = 16.sp)
                     }
+                }
+            }
+        }
 
-                    // ── 補資料 ──
-                    DataGroup("補資料", "把系統裡拿得到、但通知抓不到的東西補進來")
-                    DataAction("匯入手機通話紀錄", "補齊真實通話時長，可重複執行不會重複計入") {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
-                            == PackageManager.PERMISSION_GRANTED
-                        ) runCallImport() else callLogLauncher.launch(Manifest.permission.READ_CALL_LOG)
-                    }
-                    callImportMsg?.let {
-                        Text(it, fontSize = T.Label, color = AppColors.FriendText, modifier = Modifier.padding(start = 2.dp, top = 4.dp), lineHeight = 16.sp)
-                    }
-
-                    // ── 整理 ──
-                    DataGroup("整理", "不刪紀錄，只把分類與詞頻整理乾淨")
-                    DataAction("整理系統通知", "把讚、追蹤、推播這類非真人的來源歸到「系統通知」標籤") {
-                        confirmAction = "retag"
-                    }
-                    DataAction("清掉常用詞裡的系統通知與人名", "只移除雜訊，其他累積保留") {
-                        val n = viewModel.purgeJunkWords()
-                        Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
-                    }
-
-                    // ── 檢視與還原 ──
-                    DataGroup("檢視與還原", "刪掉的東西還在這裡，七天內都救得回來")
-                    DataAction("最近刪除", "保留 7 天，可逐批展開查看內容再決定還原或永久刪除") { showTrash = true }
-                    DataAction("逐筆檢視紀錄", "看每一筆互動，可勾選刪除") { showRecordManager = true }
-                    if (blockedNow.isNotEmpty()) {
-                        DataAction("永不記錄名單", "${blockedNow.size} 位，可隨時解除") { showBlocked = true }
-                    }
-                    DataAction("停留時間偵測診斷", "服務有沒有在跑、抓到什麼、上次閃退的原因", accent = true) {
-                        showDiagnostics = true
-                    }
-
-                    if (undoAvailable) {
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth().background(AppColors.FamilyBg, RoundedCornerShape(10.dp)).padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("可復原上一次刪除", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.FamilyText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (undoLabel.isNotBlank()) {
-                                    Text(undoLabel, fontSize = 11.sp, color = AppColors.FamilyText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
-                            Button(
-                                onClick = {
-                                    val ok = viewModel.undoLastDestructive()
-                                    Toast.makeText(context, if (ok) "已復原" else "復原失敗，快照可能已失效", Toast.LENGTH_SHORT).show()
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.FamilyText),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                            ) { Text("復原", fontSize = 12.sp, maxLines = 1, softWrap = false) }
+        if (undoAvailable) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(AppColors.FamilyBg, RoundedCornerShape(14.dp))
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("可復原上一次刪除", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.FamilyText,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (undoLabel.isNotBlank()) {
+                            Text(undoLabel, fontSize = T.Micro, color = AppColors.FamilyText.copy(alpha = 0.8f),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-
-                    // ── 刪除（放最後、用警示色，避免誤觸）──
-                    DataGroup("刪除", "會真的移除紀錄，但都會先進垃圾桶")
-                    DataAction("清除資料", "今日／本週／指定日期／全部，刪除前可逐項取消勾選", danger = true) {
-                        setShowDataManager(true)
-                    }
-                    DataAction("清除常用詞", "詞頻全部歸零重新累積，互動紀錄不受影響", danger = true) {
-                        confirmAction = "words"
-                    }
+                    Button(
+                        onClick = {
+                            val ok = viewModel.undoLastDestructive()
+                            Toast.makeText(context, if (ok) "已復原" else "復原失敗，快照可能已失效", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.FamilyText),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    ) { Text("復原", fontSize = T.Label, maxLines = 1, softWrap = false) }
                 }
             }
         }
 
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = AppColors.FriendBg.copy(alpha = 0.5f)), border = BorderStroke(1.dp, AppColors.FriendText.copy(alpha = 0.2f)), shape = RoundedCornerShape(14.dp)) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text("☁️ Google 帳號自動備份", color = AppColors.FriendText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("已啟用 Android 自動備份：資料會綁定這支手機登入的 Google 帳號，換機或重灌後重新安裝即可自動還原，不需手動操作。系統上限 25MB，超過時請改用上方的雲端備份。", fontSize = 11.sp, color = AppColors.FriendText.copy(alpha = 0.85f), lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
+            SettingsCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("紀錄總數", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                    Text("${records.size} 筆", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                }
+                SettingsDivider()
+                SettingsRow("匯入手機通話紀錄", "補齊真實通話時長，可重複執行不會重複計入") {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
+                        == PackageManager.PERMISSION_GRANTED
+                    ) runCallImport() else callLogLauncher.launch(Manifest.permission.READ_CALL_LOG)
+                }
+                callImportMsg?.let {
+                    Text(it, fontSize = T.Micro, color = AppColors.FriendText,
+                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp), lineHeight = 14.sp)
+                }
+                SettingsDivider()
+                SettingsRow("整理系統通知", "把讚、追蹤、推播歸到「系統通知」標籤") { confirmAction = "retag" }
+                SettingsDivider()
+                SettingsRow("清掉常用詞裡的雜訊", "移除系統通知與人名碎片，其他累積保留") {
+                    val n = viewModel.purgeJunkWords()
+                    Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
                 }
             }
         }
 
         item {
-            Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = 11.sp, color = AppColors.TextSecondary.copy(alpha = 0.7f), fontWeight = FontWeight.Medium)
-                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} RelateStats. All rights reserved.", fontSize = 10.sp, color = AppColors.TextSecondary.copy(alpha = 0.5f), modifier = Modifier.padding(top = 2.dp))
+            SettingsCard {
+                SettingsRow("最近刪除", "保留 7 天，可展開看內容再決定還原") { showTrash = true }
+                SettingsDivider()
+                SettingsRow("逐筆檢視紀錄", "看每一筆互動，可勾選刪除") { showRecordManager = true }
+                if (blockedNow.isNotEmpty()) {
+                    SettingsDivider()
+                    SettingsRow("永不記錄名單", "${blockedNow.size} 位，可隨時解除") { showBlocked = true }
+                }
+                SettingsDivider()
+                SettingsRow("偵測診斷", "服務有沒有在跑、抓到什麼", accent = true) { showDiagnostics = true }
             }
         }
 
-        item { Spacer(modifier = Modifier.height(24.dp)) }
+        item {
+            SettingsCard {
+                SettingsRow("清除資料", "今日／本週／指定日期／全部，刪除前可逐項取消勾選", danger = true) {
+                    setShowDataManager(true)
+                }
+                SettingsDivider()
+                SettingsRow("清除常用詞", "${wordFreqNow.size} 個詞全部歸零，互動紀錄不受影響", danger = true) {
+                    confirmAction = "words"
+                }
+            }
+        }
+
+        item {
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
+                    color = AppColors.TextTertiary, fontWeight = FontWeight.Medium)
+                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} RelateStats",
+                    fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(top = 2.dp))
+            }
+        }
     }
 
     if (showCategoryManager) {
@@ -8519,11 +8566,41 @@ fun SettingsView(viewModel: RelateViewModel) {
     }
 }
 
+/**
+ * 權限狀態列。
+ * 狀態用「色點 + 短字」而不是一行純文字 —— 三個權限並排時，
+ * 有沒有開必須一眼掃完，不能逐行讀。
+ */
 @Composable
-fun PermissionRow(title: String, isGranted: Boolean, onClick: () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(title, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary)
-        Text(if (isGranted) "已開啟" else "去設定", color = if (isGranted) AppColors.FriendText else AppColors.WorkText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+        }
+        Row(
+            modifier = Modifier
+                .background(
+                    if (isGranted) AppColors.Positive.copy(alpha = 0.1f) else AppColors.WorkText.copy(alpha = 0.1f),
+                    RoundedCornerShape(20.dp)
+                )
+                .padding(horizontal = 9.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.size(6.dp).clip(CircleShape)
+                .background(if (isGranted) AppColors.Positive else AppColors.WorkText))
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                if (isGranted) "已開啟" else "未開啟",
+                color = if (isGranted) AppColors.Positive else AppColors.WorkText,
+                fontWeight = FontWeight.Bold, fontSize = T.Micro, maxLines = 1, softWrap = false
+            )
+        }
     }
 }
 
