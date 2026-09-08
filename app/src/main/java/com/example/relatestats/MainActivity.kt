@@ -34,6 +34,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,6 +60,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -289,6 +291,22 @@ fun isNonPersonContact(name: String): Boolean {
     if (n.lowercase() in UI_LABEL_NAMES) return true
     if (NON_PERSON_PATTERNS.any { it.containsMatchIn(n) }) return true
     return NON_PERSON_EXTRA.any { it.containsMatchIn(n) }
+}
+
+/**
+ * 這個名稱為什麼被判成非真人 —— 給使用者看的白話版。
+ *
+ * ⚠️ 順序必須跟 isNonPersonContact 完全一致，否則理由會對不上實際命中的規則。
+ * 規則本來就有可能誤判（群組真的叫「推薦好物」就會中），
+ * 所以一定要把理由攤開來，使用者才有辦法判斷要不要放它一馬。
+ */
+fun junkReason(name: String): String {
+    val n = name.trim()
+    if (n.isEmpty()) return "名稱是空的"
+    if (n.lowercase() in UI_LABEL_NAMES) return "這是 App 介面上的字，不是聊天室"
+    if (NON_PERSON_PATTERNS.any { it.containsMatchIn(n) }) return "名稱符合系統通知格式（讚／追蹤／貼文／推播）"
+    if (NON_PERSON_EXTRA.any { it.containsMatchIn(n) }) return "名稱是數字型標籤（讚數、觀看次數等）"
+    return "手動標記"
 }
 
 /** 統計時要不要排除這個人：非真人，或被歸到「系統通知」標籤 */
@@ -564,7 +582,9 @@ fun StickyDateBar(
     Column(
         modifier = Modifier.fillMaxWidth()
             .background(AppColors.Background)
-            .padding(bottom = 8.dp)
+            // 上方留白：頂端標題列的分隔線緊貼著分頁列，看起來很擠。
+            // 背景寫在 padding 之前，捲動時內容才不會從留白處透出來。
+            .padding(top = 5.dp, bottom = 8.dp)
     ) {
         TimeFilterSelector(filter, onChange, weekStartDay, trailing)
         Spacer(modifier = Modifier.height(6.dp))
@@ -3601,7 +3621,28 @@ fun OnboardingScreen(onFinish: () -> Unit) {
 
 @Composable
 fun MainAppContent(viewModel: RelateViewModel) {
-    val (activeTab, setActiveTab) = remember { mutableStateOf("overview") }
+    /**
+     * 分頁的返回堆疊。
+     *
+     * ⚠️ 沒有這個，按實體返回鍵會直接退出 App —— 不管你在第幾層都一樣。
+     * 也不要改成「一律回概況」：那樣從排行→分析按返回會跳到概況，
+     * 使用者要的是回到剛剛那一頁。
+     * 切到已經在堆疊裡的分頁時先移除舊的再推入，堆疊才不會長出一堆重複項。
+     */
+    val tabStack = rememberSaveable(saver = listSaver(
+        save = { it.toList() },
+        restore = { it.toMutableStateList() }
+    )) { mutableStateListOf("overview") }
+    val activeTab = tabStack.last()
+    val setActiveTab: (String) -> Unit = { t ->
+        if (t != tabStack.last()) {
+            tabStack.remove(t)
+            tabStack.add(t)
+            // 只是為了「回上一頁」，不需要保留整段瀏覽史
+            while (tabStack.size > 6) tabStack.removeAt(0)
+        }
+    }
+    BackHandler(enabled = tabStack.size > 1) { tabStack.removeAt(tabStack.lastIndex) }
 
     Scaffold(
         containerColor = AppColors.Background,
@@ -6179,6 +6220,9 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     fun exitSelection() { selectionMode = false; picked.clear() }
 
+    // 多選中按返回＝取消多選，而不是離開這一頁。
+    BackHandler(enabled = selectionMode) { exitSelection() }
+
     // ⚠️ 千萬不要在 remember{} 裡直接算排行。
     //    getLeaderboard 會掃過全部紀錄（可以到數萬筆），remember 是同步的，
     //    等於在主執行緒做全表運算；而 key 包含 records，
@@ -6467,6 +6511,179 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     }
 }
 
+/** 逐筆確認畫面上的一列 */
+data class JunkEntry(
+    val name: String,
+    val count: Int,
+    val lastTs: Long,
+    val apps: Set<String>,
+    val rawNames: List<String>,
+    val reason: String
+)
+
+/**
+ * 非真人來源逐筆確認。
+ *
+ * ⚠️ 為什麼一定要有這一頁：橫幅只寫「202 個非真人來源」，
+ *    使用者無從判斷裡面有沒有誤判的真人，只能整批賭下去。
+ *    規則會誤判（群組名稱撞到關鍵字就會中），所以要能一列一列看、一列一列取消勾選。
+ *
+ * ⚠️ 本 App 不保存訊息原文，所以這裡能給的「是哪則通知」就是**通知標題本身**
+ *    （也就是聯絡人名稱）、平台、筆數、最近時間，以及命中的規則。
+ *    不要為了做這頁去存訊息內容 —— 那會直接破壞「不讀取訊息內容」這個前提。
+ */
+@Composable
+fun JunkReviewDialog(
+    names: List<String>,
+    records: List<InteractionRecord>,
+    aliases: Map<String, String>,
+    onApply: (List<String>) -> Unit,
+    onDelete: (List<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val dateFmt = remember { SimpleDateFormat("M/d HH:mm", Locale.US) }
+    // 預設全勾：多數情況判定是對的，使用者只要取消少數誤判。
+    val unchecked = remember { mutableStateListOf<String>() }
+
+    // ⚠️ 全表掃描，不能放在 remember{} 直接算 —— 那是主執行緒。
+    val entries by produceState(emptyList<JunkEntry>(), names, records, aliases) {
+        value = withContext(Dispatchers.Default) {
+            val wanted = names.toHashSet()
+            val counts = HashMap<String, Int>()
+            val last = HashMap<String, Long>()
+            val apps = HashMap<String, MutableSet<String>>()
+            val raws = HashMap<String, LinkedHashSet<String>>()
+            records.forEach { r ->
+                val u = aliases[r.rawSenderName] ?: r.rawSenderName
+                if (u in wanted) {
+                    counts[u] = (counts[u] ?: 0) + 1
+                    if (r.timestamp > (last[u] ?: 0L)) last[u] = r.timestamp
+                    apps.getOrPut(u) { HashSet() }.add(r.appName)
+                    raws.getOrPut(u) { LinkedHashSet() }.add(r.rawSenderName)
+                }
+            }
+            names.map { n ->
+                JunkEntry(
+                    n, counts[n] ?: 0, last[n] ?: 0L,
+                    apps[n] ?: emptySet(),
+                    (raws[n] ?: LinkedHashSet()).toList().ifEmpty { listOf(n) },
+                    junkReason(n)
+                )
+            }.sortedByDescending { it.count }
+        }
+    }
+    val picked = names.filter { it !in unchecked }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("確認非真人來源", fontWeight = FontWeight.Black, fontSize = 18.sp,
+                    letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
+                Text("下面是通知上顯示的名稱。取消勾選代表它其實是真人。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp)
+            }
+        },
+        text = {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("已勾選 ${picked.size} / ${names.size}", fontSize = T.Label,
+                        fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
+                        modifier = Modifier.weight(1f), maxLines = 1, softWrap = false)
+                    Text(if (unchecked.isEmpty()) "全部不選" else "全選",
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                if (unchecked.isEmpty()) { unchecked.clear(); unchecked.addAll(names) }
+                                else unchecked.clear()
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp))
+                }
+                if (entries.isEmpty()) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        horizontalArrangement = Arrangement.Center) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp,
+                            color = AppColors.ActiveBlue)
+                    }
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                        itemsIndexed(entries, key = { _, e -> e.name }) { idx, e ->
+                            val on = e.name !in unchecked
+                            if (idx > 0) HorizontalDivider(color = AppColors.BorderLight.copy(alpha = 0.6f))
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable {
+                                        if (on) unchecked.add(e.name) else unchecked.remove(e.name)
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = on, onCheckedChange = {
+                                    if (on) unchecked.add(e.name) else unchecked.remove(e.name)
+                                })
+                                Column(modifier = Modifier.weight(1f).padding(start = 2.dp)) {
+                                    Text(e.name, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                        color = AppColors.TextPrimary, maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        buildString {
+                                            if (e.apps.isNotEmpty()) {
+                                                append(e.apps.joinToString(" · ") { shortAppName(it) })
+                                                append("　")
+                                            }
+                                            append("${e.count} 則")
+                                            if (e.lastTs > 0L) append("　·　最近 ${dateFmt.format(Date(e.lastTs))}")
+                                        },
+                                        fontSize = T.Micro, color = AppColors.TextTertiary,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                    Text(e.reason, fontSize = T.Micro, color = AppColors.WorkText,
+                                        lineHeight = 14.sp, modifier = Modifier.padding(top = 2.dp))
+                                    // 合併過的人，通知上的原名跟顯示名稱會不一樣，要一起攤開
+                                    if (e.rawNames.size > 1 || e.rawNames.firstOrNull() != e.name) {
+                                        Text("通知原名：${e.rawNames.joinToString("、")}",
+                                            fontSize = T.Micro, color = AppColors.TextTertiary,
+                                            lineHeight = 14.sp, maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.padding(top = 2.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Text("標為系統通知：紀錄留著但統計不算，也不會再出現在清單上。\n直接刪除：對方下次推播還是會重建。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 8.dp))
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onApply(picked) },
+                enabled = picked.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("標為系統通知 (${picked.size})", fontSize = T.Label, maxLines = 1, softWrap = false) }
+        },
+        dismissButton = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { onDelete(picked) }, enabled = picked.isNotEmpty()) {
+                    Text("刪除", color = AppColors.WorkText, fontSize = T.Label, maxLines = 1, softWrap = false)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("取消", color = AppColors.TextSecondary, fontSize = T.Label, maxLines = 1, softWrap = false)
+                }
+            }
+        }
+    )
+}
+
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 fun ContactsCategoryView(viewModel: RelateViewModel) {
@@ -6531,6 +6748,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var showAutoMerge by remember { mutableStateOf(false) }
     // 收起來就不再提醒，直到重開 App
     var junkDismissed by remember { mutableStateOf(false) }
+    var showJunkReview by remember { mutableStateOf(false) }
     val similarGroups = cb.similar
 
     var selectionMode by remember { mutableStateOf(false) }
@@ -6544,6 +6762,9 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         if (selected.contains(name)) selected.remove(name) else selected.add(name)
     }
     fun exitSelection() { selectionMode = false; selected.clear() }
+
+    // 多選中按返回＝取消多選，而不是離開這一頁。
+    BackHandler(enabled = selectionMode) { exitSelection() }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -6668,11 +6889,23 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                             .padding(12.dp)
                     ) {
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("${junkContacts.size} 個非真人來源", fontSize = T.Body, fontWeight = FontWeight.Bold,
-                                    color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("讚、追蹤者、串文、推播", fontSize = T.Micro,
-                                    color = AppColors.WorkText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            // 整塊可點：先看清楚裡面是哪些通知，再決定整批處理。
+                            // ✕ 是內層自己的 clickable，會優先接到手勢，不會誤觸展開。
+                            Row(
+                                modifier = Modifier.weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { showJunkReview = true }
+                                    .padding(end = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 4.dp)) {
+                                    Text("${junkContacts.size} 個非真人來源", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                        color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("點開逐筆確認，可取消誤判的", fontSize = T.Micro,
+                                        color = AppColors.WorkText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                Text("›", fontSize = 17.sp, color = AppColors.WorkText,
+                                    maxLines = 1, softWrap = false)
                             }
                             Text("✕", fontSize = 15.sp, color = AppColors.WorkText.copy(alpha = 0.6f),
                                 maxLines = 1, softWrap = false,
@@ -6787,9 +7020,18 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                     modifier = Modifier.fillMaxWidth()
                         .clip(shape)
                         .background(if (isSel) AppColors.ActiveBlue.copy(alpha = 0.06f) else AppColors.Surface)
+                        // 手勢與排行頁一致：長按 = 進多選，點一下 = 開這個人的操作選單。
+                        // ⚠️ 以前長按開選單、點一下什麼都不做，
+                        //    結果捲到一半想批次分類時，唯一的入口（上方「選取」鈕）早就滑掉了。
                         .combinedClickable(
-                            onClick = { if (selectionMode) toggleSelect(unifiedName) },
-                            onLongClick = { if (!selectionMode) longPressTarget = unifiedName }
+                            onClick = {
+                                if (selectionMode) toggleSelect(unifiedName)
+                                else longPressTarget = unifiedName
+                            },
+                            onLongClick = {
+                                if (!selectionMode) selectionMode = true
+                                if (!selected.contains(unifiedName)) selected.add(unifiedName)
+                            }
                         )
                 ) {
                     if (!isFirst) HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(start = 14.dp))
@@ -6964,6 +7206,24 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 quickTagTarget = null
                 setShowAddCategoryDialog(true)
             }
+        )
+    }
+
+    if (showJunkReview) {
+        JunkReviewDialog(
+            names = junkContacts,
+            records = records,
+            aliases = aliases,
+            onApply = { list ->
+                viewModel.setCategories(list, ContactCategory.SYSTEM.id)
+                Toast.makeText(context, "已標記 ${list.size} 個，統計不再算入", Toast.LENGTH_SHORT).show()
+                showJunkReview = false
+            },
+            onDelete = { list ->
+                pendingDelete = list.toSet()
+                showJunkReview = false
+            },
+            onDismiss = { showJunkReview = false }
         )
     }
 
