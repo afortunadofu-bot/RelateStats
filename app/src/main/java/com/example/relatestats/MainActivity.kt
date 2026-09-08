@@ -7900,6 +7900,135 @@ fun SettingsRow(
         Text("›", fontSize = 17.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
     }
 }
+/** 使用說明的一個章節 */
+private class GuideSection(val no: String, val title: String, val paragraphs: List<String>)
+
+/**
+ * 使用說明。
+ *
+ * 寫成正式的說明文件而不是幾句提示：這個 App 的數字有不少「為什麼是這樣」
+ * 需要交代（訊息數與停留時間為何互補、哪些指標跟隨日期篩選、常用詞為何只能全期間），
+ * 使用者看不到解釋就會以為是算錯。
+ * 章節資料與畫面分開，之後要加一節只要往清單裡加一筆。
+ */
+private val USER_GUIDE = listOf(
+    GuideSection(
+        "1", "資料從哪裡來",
+        listOf(
+            "本 App 不讀取任何訊息內容，也不會連上伺服器。所有統計都由三項系統權限產生，缺一項就少一類資料。",
+            "通知存取：對方傳訊息跳出通知時，在背景取得發話者與字數。這是訊息數與字數的唯一來源。",
+            "無障礙服務：偵測你何時開啟、何時離開某個聊天室，據此計算停留時間。單次上限 30 分鐘，超過視為背景掛機不計入。",
+            "使用紀錄存取：取得手機總使用時間，用來換算「聊天佔手機用量的百分比」。"
+        )
+    ),
+    GuideSection(
+        "2", "訊息數與停留時間為什麼是兩回事",
+        listOf(
+            "兩者互補，不是同一件事的兩種寫法。",
+            "訊息數只有在你「沒開著聊天室」時才會累積——因為你人在聊天室裡，系統就不會跳通知。它代表被動接收的量。",
+            "停留時間只有在你「主動打開聊天室」時才會累積。它代表主動投入的注意力。",
+            "兩者相加才是完整的注意力。App 各處的預設指標是訊息數，因為它不需要無障礙服務就能取得，比較不會是空的。"
+        )
+    ),
+    GuideSection(
+        "3", "統計範圍與日期",
+        listOf(
+            "頁面頂端的日期列決定所有統計的範圍，可選單日、單週、自訂區間或全部。",
+            "原則上所有數字都跟隨這個範圍。少數刻意不跟隨的指標會在卡片標題旁標明範圍。",
+            "常用詞標示「全期間」：系統只儲存詞頻、不保留訊息原文，事後無法重新分期。",
+            "活躍密度是長期視圖，跟隨篩選會只剩一格，因此固定顯示最近數月。",
+            "連續互動天數是長期指標，但基準日會跟著你選的區間走，且只列出最後一次互動落在該區間內的人。"
+        )
+    ),
+    GuideSection(
+        "4", "聯絡人、標籤與群組",
+        listOf(
+            "同一個人在不同平台會被視為不同帳號。長按聯絡人可以「綁定其他帳號」把它們併成同一個人，之後所有統計都會合併計算。",
+            "長按聯絡人也可以修改顯示名稱、設定標籤或刪除。修改名稱只影響本 App 的顯示，不會動到 LINE 或 IG 上的名稱。",
+            "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」標籤，不列入任何排行與統計。",
+            "刪除這類來源沒有用——對方下次推播就會重新建立。請改用「標為系統通知」，紀錄會留著但統計不算，也不會再出現在清單上。"
+        )
+    ),
+    GuideSection(
+        "5", "通話統計",
+        listOf(
+            "未接來電由通知取得。",
+            "接通的通話時長無法由通知取得：Android 原生撥號 App 在通話結束後不會發出通知，因此系統上拿不到秒數。",
+            "若需要真實通話時長，請至「設定 → 匯入手機通話紀錄」。此功能會讀取系統通話紀錄並補齊過去所有通話，可重複執行，不會重複計入。"
+        )
+    ),
+    GuideSection(
+        "6", "常用詞",
+        listOf(
+            "僅統計詞頻，不保留任何訊息原文。",
+            "系統自動產生的文字（傳送了貼圖、標註了你的訊息、回覆了限時動態等）以及聯絡人名稱都會被排除。",
+            "由於不保留原文，事後無法重新切詞，因此固定為全期間累計，不隨日期篩選變動。"
+        )
+    ),
+    GuideSection(
+        "7", "資料保存與備份",
+        listOf(
+            "所有資料只存在這支手機，沒有雲端同步。換機或重灌前請務必先備份。",
+            "刪除的紀錄會先進入「最近刪除」保留 7 天，期間可展開查看內容並逐批還原，逾期自動永久移除。",
+            "另有「復原上一次刪除」可回復最近一次破壞性操作，但只保留一份快照，做了其他操作就會被覆蓋。",
+            "Android 系統自動備份已啟用，綁定本機登入的 Google 帳號，重新安裝後會自動還原，系統上限 25MB。"
+        )
+    ),
+    GuideSection(
+        "8", "常見狀況",
+        listOf(
+            "停留時間沒有累積：多半是無障礙服務被關閉。Android 在每次重新安裝 App 後都會自動停用它，需要手動重開。概況頁頂端會出現紅色警示。",
+            "重新安裝後服務被關：使用相同簽章的安裝檔（adb install -r）通常可以保留授權。",
+            "數字看起來不合理：請至「設定 → 偵測診斷」查看服務是否運作中與最近的偵測紀錄。",
+            "App 發生錯誤：設定頁最上方會出現錯誤紀錄與複製按鈕。"
+        )
+    )
+)
+
+@Composable
+fun UserGuideDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("使用說明", fontWeight = FontWeight.Black, fontSize = 18.sp,
+                    letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
+                Text("RelateStats v${BuildConfig.VERSION_NAME}",
+                    fontSize = T.Micro, color = AppColors.TextTertiary)
+            }
+        },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 460.dp)) {
+                itemsIndexed(USER_GUIDE, key = { _, sec -> sec.no }) { idx, sec ->
+                    if (idx > 0) {
+                        HorizontalDivider(color = AppColors.BorderLight,
+                            modifier = Modifier.padding(vertical = 14.dp))
+                    }
+                    Row(verticalAlignment = Alignment.Top) {
+                        Text(sec.no, fontSize = T.Label, fontWeight = FontWeight.Black,
+                            color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
+                            modifier = Modifier.widthIn(min = 18.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(sec.title, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                color = AppColors.TextPrimary, lineHeight = 20.sp)
+                            sec.paragraphs.forEach { p ->
+                                Text(p, fontSize = T.Label, color = AppColors.TextSecondary,
+                                    lineHeight = 19.sp, modifier = Modifier.padding(top = 6.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)) { Text("關閉") }
+        }
+    )
+}
+
 /** 最近刪除：保留 7 天，可個別還原或立刻永久刪除 */
 @Composable
 fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
@@ -8560,26 +8689,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     }
 
     if (showGuideDialog) {
-        AlertDialog(
-            containerColor = AppColors.Surface, onDismissRequest = { setShowGuideDialog(false) },
-            title = { Text("📖 App 核心運作邏輯", fontWeight = FontWeight.Bold) },
-            text = {
-                // heightIn(max)：內容本來就可捲動，固定高度只會在小螢幕/大字體時把按鈕頂掉
-                Column(modifier = Modifier.heightIn(max = 350.dp).padding(vertical = 8.dp)) {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        item { Text("1. 接收訊息怎麼算？", fontWeight = FontWeight.Bold, color = AppColors.TextPrimary) }
-                        item { Text("依賴「通知存取」權限。只要對方傳訊息來跳出通知，App 就會在背景攔截，計算字數，並自動切除 IG/LINE 煩人的系統標籤。", fontSize = 13.sp, color = AppColors.TextSecondary) }
-                        item { Text("2. 在聊天室內沒跳通知怎麼辦？", fontWeight = FontWeight.Bold, color = AppColors.TextPrimary) }
-                        item { Text("依賴「無障礙服務」。只要你點進對方的聊天畫面，系統就會默默啟動『精確碼錶』。當你跳出畫面，這段期間就會被精準算入『注意力停留時間』。", fontSize = 13.sp, color = AppColors.ActiveBlue) }
-                        item { Text("3. 為什麼有些數據沒出來？", fontWeight = FontWeight.Bold, color = AppColors.TextPrimary) }
-                        item { Text("請確保已開啟設定頁的三項權限，並保持 App 允許在背景執行。通話時間則是在掛斷後的通知中自動抓取。", fontSize = 13.sp, color = AppColors.TextSecondary) }
-                        item { Text("4. 時間區段如何定義？", fontWeight = FontWeight.Bold, color = AppColors.TextPrimary) }
-                        item { Text("早晨為 05:00-11:59，下午為 12:00-17:59，夜晚則是 18:00-04:59。", fontSize = 13.sp, color = AppColors.TextSecondary) }
-                    }
-                }
-            },
-            confirmButton = { Button(onClick = { setShowGuideDialog(false) }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.ActiveBlue)) { Text("我知道了") } }
-        )
+        UserGuideDialog { setShowGuideDialog(false) }
     }
 }
 
