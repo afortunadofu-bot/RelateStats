@@ -153,6 +153,15 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### 效能相關（閃退的主因）
 
+- ⚠️ **逐筆呼叫的函式裡絕對不能 `Calendar.getInstance()`。**
+  它會做時區與地區設定查詢並配置物件。`startOfDay` 曾經這樣寫，
+  而分析頁一次重算會經過 getStreaks / getContributionMap / extraStatsOf /
+  getDailyTrend / getCoverage 好幾條全表掃描，每條對五萬多筆各呼叫一次 ——
+  一次產生數十萬個 Calendar，這就是「分析要跑很久才出來」。
+- 現行做法：Calendar 放 `ThreadLocal` 重複使用，再加一格「上一天」快取（紀錄依時間排序，
+  相鄰筆數大多同一天，絕大部分呼叫會在第一個 if 就回傳）。
+  `isWeekend`、`periodPredicate` 同理。
+
 - ⚠️ **互動紀錄存在 `filesDir/RelateStats_Records.txt`，不是 SharedPreferences。**
   舊版每次存檔都把全部紀錄（實測 55,000+ 筆）轉 CSV、丟進 HashSet、再寫 XML，
   光序列化就要好幾秒；而通知一來就觸發一次，所以「每次通知跳出來 App 都會 LAG」。
@@ -344,6 +353,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.8 | 2026-09-08 | 修分析頁很慢（startOfDay 每次都 new Calendar）、復原收進最近刪除、權限狀態安靜化 |
 | v3.7 | 2026-09-08 | 錯誤紀錄與異常紀錄壓成一列，點開才展開 |
 | v3.6 | 2026-09-08 | 運作原理改寫成正式使用說明（八章節） |
 | v3.5 | 2026-09-08 | 修聯絡人頁大字體爆版；清單改成單卡＋分隔線；設定頁收斂 |

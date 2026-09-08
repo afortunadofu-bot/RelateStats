@@ -568,14 +568,23 @@ fun StickyDateBar(filter: DateFilter, onChange: (DateFilter) -> Unit, weekStartD
 }
 
 /** 頂層版的當日零點；ViewModel 內另有一份私有實作 */
-fun startOfDayMs(ts: Long): Long = Calendar.getInstance().apply {
-    timeInMillis = ts
-    set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
-    set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-}.timeInMillis
+private val topDayCal = ThreadLocal.withInitial { Calendar.getInstance() }
 
+fun startOfDayMs(ts: Long): Long {
+    val c = topDayCal.get()!!
+    c.timeInMillis = ts
+    c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
+    c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
+    return c.timeInMillis
+}
+
+private val dowCal = ThreadLocal.withInitial { Calendar.getInstance() }
+
+/** ⚠️ 會被逐筆呼叫，不能在裡面 new Calendar */
 fun isWeekend(ts: Long): Boolean {
-    val d = Calendar.getInstance().apply { timeInMillis = ts }.get(Calendar.DAY_OF_WEEK)
+    val c = dowCal.get()!!
+    c.timeInMillis = ts
+    val d = c.get(Calendar.DAY_OF_WEEK)
     return d == Calendar.SATURDAY || d == Calendar.SUNDAY
 }
 
@@ -2397,10 +2406,36 @@ class RelateViewModel : ViewModel() {
     fun setAutoBackup(enabled: Boolean, pwd: String) { DataRepository.setAutoBackup(enabled, pwd) }
     fun restoreAutoBackup(context: Context): Boolean { return DataRepository.restoreAutoBackup(context) }
 
-    private fun startOfDay(ts: Long): Long = Calendar.getInstance().apply {
-        timeInMillis = ts
-        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-    }.timeInMillis
+    /**
+     * ⚠️ 這個函式是分析頁效能的關鍵路徑。
+     *
+     * 舊版每次呼叫都 `Calendar.getInstance()` —— 那會做時區與地區設定查詢並配置物件。
+     * 分析頁一次重算會經過 getStreaks、getContributionMap、extraStatsOf、
+     * getDailyTrend、getCoverage 等好幾條全表掃描，每條都對五萬多筆各呼叫一次，
+     * 等於一次產生數十萬個 Calendar，這就是「分析要跑很久才出來」。
+     *
+     * 改法有二：
+     *  1. Calendar 放 ThreadLocal 重複使用，不再配置（背景執行緒各持一份，安全）
+     *  2. 加一格「上一天」快取 —— 紀錄依時間排序，相鄰筆數大多同一天，
+     *     絕大部分呼叫會在第一個 if 就回傳
+     */
+    private val dayCal = ThreadLocal.withInitial { Calendar.getInstance() }
+    private val dayLo = ThreadLocal.withInitial { 0L }
+    private val dayHi = ThreadLocal.withInitial { -1L }
+
+    private fun startOfDay(ts: Long): Long {
+        val lo = dayLo.get()!!
+        if (ts >= lo && ts < dayHi.get()!!) return lo
+        val c = dayCal.get()!!
+        c.timeInMillis = ts
+        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
+        c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
+        val start = c.timeInMillis
+        c.add(Calendar.DATE, 1)
+        dayLo.set(start)
+        dayHi.set(c.timeInMillis)
+        return start
+    }
 
     fun getFilteredRecords(records: List<InteractionRecord>, filter: DateFilter): List<InteractionRecord> {
         return when (filter.type) {
@@ -7800,7 +7835,9 @@ fun shortAppName(name: String): String = when (name) {
 
 /** 早晨 05-11 / 下午 12-17 / 夜晚 18-04 */
 fun periodPredicate(name: String): (InteractionRecord) -> Boolean = { r ->
-    val h = Calendar.getInstance().apply { timeInMillis = r.timestamp }.get(Calendar.HOUR_OF_DAY)
+    val c = dowCal.get()!!
+    c.timeInMillis = r.timestamp
+    val h = c.get(Calendar.HOUR_OF_DAY)
     when (name) {
         "早晨" -> h in 5..11
         "下午" -> h in 12..17
@@ -8034,6 +8071,9 @@ fun UserGuideDialog(onDismiss: () -> Unit) {
 fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var batches by remember { mutableStateOf(viewModel.listTrash()) }
+    val undoAvailable by viewModel.undoAvailable.collectAsState()
+    val undoLabel by viewModel.undoLabel.collectAsState()
+    LaunchedEffect(Unit) { viewModel.refreshUndoState() }
     val fmt = remember { SimpleDateFormat("M/d HH:mm", Locale.US) }
     val now = System.currentTimeMillis()
 
@@ -8048,6 +8088,34 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
             }
         },
         text = {
+            Column {
+            // 「復原上一次刪除」跟垃圾桶是同一件事的兩種粒度（整批快照 vs 逐批檔案），
+            // 分散在兩個地方使用者根本找不到。跟 Windows 一樣統一收在這裡。
+            if (undoAvailable) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
+                        .background(AppColors.FamilyBg, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("復原上一次操作", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.FamilyText,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(undoLabel.ifBlank { "回到最近一次刪除之前" }, fontSize = T.Micro,
+                            color = AppColors.FamilyText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text("復原", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = Color.White,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .background(AppColors.FamilyText)
+                            .clickable {
+                                val ok = viewModel.undoLastDestructive()
+                                Toast.makeText(context, if (ok) "已復原" else "復原失敗，快照可能已失效", Toast.LENGTH_SHORT).show()
+                                batches = viewModel.listTrash()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp))
+                }
+            }
             if (batches.isEmpty()) {
                 Text("目前沒有可還原的紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
             } else {
@@ -8136,6 +8204,7 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                         }
                     }
                 }
+            }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
@@ -8546,35 +8615,6 @@ fun SettingsView(viewModel: RelateViewModel) {
             }
         }
 
-        if (undoAvailable) {
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth()
-                        .background(AppColors.FamilyBg, RoundedCornerShape(14.dp))
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("可復原上一次刪除", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.FamilyText,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (undoLabel.isNotBlank()) {
-                            Text(undoLabel, fontSize = T.Micro, color = AppColors.FamilyText.copy(alpha = 0.8f),
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                    Button(
-                        onClick = {
-                            val ok = viewModel.undoLastDestructive()
-                            Toast.makeText(context, if (ok) "已復原" else "復原失敗，快照可能已失效", Toast.LENGTH_SHORT).show()
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.FamilyText),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                    ) { Text("復原", fontSize = T.Label, maxLines = 1, softWrap = false) }
-                }
-            }
-        }
-
         item {
             SettingsCard {
                 Row(
@@ -8607,7 +8647,10 @@ fun SettingsView(viewModel: RelateViewModel) {
 
         item {
             SettingsCard {
-                SettingsRow("最近刪除", "保留 7 天，可還原") { showTrash = true }
+                SettingsRow(
+                    "最近刪除",
+                    if (undoAvailable) "保留 7 天　·　有可復原的操作" else "保留 7 天，可還原"
+                ) { showTrash = true }
                 SettingsDivider()
                 SettingsRow("逐筆檢視紀錄") { showRecordManager = true }
                 if (blockedNow.isNotEmpty()) {
@@ -8728,23 +8771,19 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, onClick: 
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
         }
-        Row(
-            modifier = Modifier
-                .background(
-                    if (isGranted) AppColors.Positive.copy(alpha = 0.1f) else AppColors.WorkText.copy(alpha = 0.1f),
-                    RoundedCornerShape(20.dp)
-                )
-                .padding(horizontal = 9.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(modifier = Modifier.size(6.dp).clip(CircleShape)
-                .background(if (isGranted) AppColors.Positive else AppColors.WorkText))
-            Spacer(modifier = Modifier.width(5.dp))
-            Text(
-                if (isGranted) "已開啟" else "未開啟",
-                color = if (isGranted) AppColors.Positive else AppColors.WorkText,
-                fontWeight = FontWeight.Bold, fontSize = T.Micro, maxLines = 1, softWrap = false
-            )
+        // ⚠️ 不要用「綠色膠囊 + 色點」表示正常狀態。
+        //    正常本來就該安靜 —— 三個權限都開著時，三顆綠膠囊反而變成畫面上最搶眼的東西。
+        //    已開啟＝低調灰字；未開啟＝橘字加箭號，把注意力留給真正需要動作的那一行。
+        if (isGranted) {
+            Text("已開啟", color = AppColors.TextTertiary, fontSize = T.Label,
+                maxLines = 1, softWrap = false)
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("未開啟", color = AppColors.WorkText, fontWeight = FontWeight.Bold,
+                    fontSize = T.Label, maxLines = 1, softWrap = false)
+                Text("›", fontSize = 17.sp, color = AppColors.WorkText,
+                    maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 4.dp))
+            }
         }
     }
 }
