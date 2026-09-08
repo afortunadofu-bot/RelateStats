@@ -555,13 +555,18 @@ data class TrendPoint(val label: String, val dayStart: Long, val durationSeconds
  * 背景必須不透明並帶下緣分隔線，不然捲動的內容會從底下透出來。
  */
 @Composable
-fun StickyDateBar(filter: DateFilter, onChange: (DateFilter) -> Unit, weekStartDay: Int) {
+fun StickyDateBar(
+    filter: DateFilter,
+    onChange: (DateFilter) -> Unit,
+    weekStartDay: Int,
+    trailing: (@Composable () -> Unit)? = null
+) {
     Column(
         modifier = Modifier.fillMaxWidth()
             .background(AppColors.Background)
             .padding(bottom = 8.dp)
     ) {
-        TimeFilterSelector(filter, onChange, weekStartDay)
+        TimeFilterSelector(filter, onChange, weekStartDay, trailing)
         Spacer(modifier = Modifier.height(6.dp))
         HorizontalDivider(color = AppColors.BorderLight)
     }
@@ -3730,14 +3735,33 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
 }
 
 @Composable
-fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -> Unit, weekStartDay: Int) {
+fun TimeFilterSelector(
+    currentFilter: DateFilter,
+    onFilterChange: (DateFilter) -> Unit,
+    weekStartDay: Int,
+    /**
+     * 頁面專屬的按鈕，畫在「單日／單週／區間／全部」這一列的右邊。
+     *
+     * ⚠️ 為什麼要有這個插槽：像洞察頁的「排序」這種一頁只有一顆的入口，
+     *    自己站一整列會多吃掉一個列高（大字體下更明顯），但畫面上其實整列都是空的。
+     *    塞進本來就一定會出現的日期列，等於不花任何垂直空間。
+     *    不要改放在「‹ 日期 ›」那一列 —— 選「全部」時那一列根本不會出現，按鈕會跟著消失。
+     */
+    trailing: (@Composable () -> Unit)? = null
+) {
     val (showCalendar, setShowCalendar) = remember { mutableStateOf(false) }
     // 選區間時要記住現在在挑起點還是終點
     var pickingEnd by remember { mutableStateOf(false) }
     val mdFmt = remember { SimpleDateFormat("M/d", Locale.US) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(10.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp)).padding(3.dp)) {
+        // height(IntrinsicSize.Min) + fillMaxHeight()：讓右邊的按鈕自動長到跟分頁列一樣高。
+        // 寫死 dp 高度在大字體下一定會對不齊 —— 分頁列會被 sp 撐高，按鈕不會。
+        Row(
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+        Row(modifier = Modifier.weight(1f).background(AppColors.Surface, RoundedCornerShape(10.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp)).padding(3.dp)) {
             val types = listOf(
                 FilterType.SPECIFIC_DAY to "單日",
                 FilterType.WEEK to "單週",
@@ -3764,6 +3788,11 @@ fun TimeFilterSelector(currentFilter: DateFilter, onFilterChange: (DateFilter) -
                     }.padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
                     Text(label, color = if (isSelected) Color.White else AppColors.TextSecondary, fontSize = T.Body, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
                 }
+            }
+        }
+            if (trailing != null) {
+                Spacer(modifier = Modifier.width(6.dp))
+                trailing()
             }
         }
 
@@ -4902,25 +4931,22 @@ fun InsightsView(viewModel: RelateViewModel) {
             verticalArrangement = Arrangement.spacedBy(D.Gap)
         ) {
             item { ServiceAlertBanner() }
-            stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
-            item {
-                // 排序入口以前埋在整頁最下面，要滑到底才看得到 —— 改放這裡
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Spacer(modifier = Modifier.weight(1f))
+            // 排序入口以前埋在整頁最下面（要滑到底才看得到），
+            // 後來拉上來自己站一列，但整列只有右邊一顆按鈕，白白吃掉一個列高。
+            // 現在掛在日期列右邊，不佔任何額外垂直空間。
+            stickyHeader {
+                StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) {
                     Row(
-                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                        modifier = Modifier.fillMaxHeight()
+                            .clip(RoundedCornerShape(10.dp))
                             .background(AppColors.Surface)
-                            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+                            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp))
                             .clickable { showSectionEditor = true }
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                            .padding(horizontal = 11.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("☰", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-                        Spacer(modifier = Modifier.width(4.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text("排序", fontSize = T.Label, fontWeight = FontWeight.Bold,
                             color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                     }
@@ -6064,13 +6090,25 @@ fun ContactDetailDialog(
 
 /** 排行列：名次 + 名稱 + 標籤 + 迷你長條 + 雙欄數值。高度約為舊版卡片的三分之一。 */
 @Composable
-fun RankRow(rank: Int, stat: SenderStat, maxScore: Float, sortType: SortType, onClick: () -> Unit) {
+@OptIn(ExperimentalFoundationApi::class)
+fun RankRow(
+    rank: Int,
+    stat: SenderStat,
+    maxScore: Float,
+    sortType: SortType,
+    onLongClick: () -> Unit = {},
+    onClick: () -> Unit
+) {
     val score = if (sortType == SortType.TIME) stat.totalDurationSeconds.toFloat() else (stat.msgCount + stat.callCount).toFloat()
     val progress = if (maxScore > 0f) (score / maxScore).coerceIn(0f, 1f) else 0f
     val accent = if (stat.isGroup) AppColors.GroupText else stat.category.color
 
     Row(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 7.dp),
+        // ⚠️ 長按要寫在這裡，不能包在外面。
+        //    這一列自己就吃掉點擊事件了，外層再包 combinedClickable 收不到手勢。
+        modifier = Modifier.fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text("$rank", fontSize = T.Label, fontWeight = FontWeight.Black,
@@ -6365,7 +6403,15 @@ fun LeaderboardView(viewModel: RelateViewModel) {
                             Spacer(modifier = Modifier.width(8.dp))
                         }
                         Box(modifier = Modifier.weight(1f)) {
-                            RankRow(i + 1, stat, maxScore, sort) {
+                            RankRow(
+                                i + 1, stat, maxScore, sort,
+                                // 長按直接進多選並勾起這一位 —— 跟聯絡人頁同一個手勢。
+                                // 先按上面的「選取」再一個個勾，多了一步而且不直覺。
+                                onLongClick = {
+                                    if (!selectionMode) selectionMode = true
+                                    if (!picked.contains(stat.unifiedName)) picked.add(stat.unifiedName)
+                                }
+                            ) {
                                 if (selectionMode) {
                                     if (isSel) picked.remove(stat.unifiedName) else picked.add(stat.unifiedName)
                                 } else setSelectedContact(stat)
