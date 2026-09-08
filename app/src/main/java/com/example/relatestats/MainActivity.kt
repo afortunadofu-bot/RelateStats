@@ -8468,35 +8468,50 @@ fun SettingsView(viewModel: RelateViewModel) {
         // 而這是沒有裝置時唯一能定位問題的東西。
         crashReport?.let { report ->
             item {
+                // ⚠️ 這一塊本來是「標題 + 四行堆疊 + 兩顆整寬按鈕」，
+                //    在大字體下佔掉快半個螢幕，但它多數時候只是提醒你「有東西可回報」。
+                //    壓成一列：需要看細節再點開。
+                var open by remember { mutableStateOf(false) }
+                val firstLine = report.lineSequence().firstOrNull { it.startsWith("時間") }?.removePrefix("時間：") ?: ""
                 Column(
                     modifier = Modifier.fillMaxWidth()
-                        .background(AppColors.WorkBg, RoundedCornerShape(14.dp))
-                        .padding(14.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(AppColors.WorkBg)
                 ) {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("上次發生錯誤", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText, modifier = Modifier.weight(1f))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { open = !open }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("上次發生錯誤", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                            color = AppColors.WorkText, maxLines = 1, softWrap = false)
+                        if (firstLine.isNotBlank()) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(firstLine, fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.7f),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                        Text("複製", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = AppColors.WorkText,
+                            maxLines = 1, softWrap = false,
+                            modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 錯誤紀錄", report))
+                                    Toast.makeText(context, "已複製，貼給開發者即可", Toast.LENGTH_SHORT).show()
+                                }.padding(horizontal = 8.dp, vertical = 4.dp))
+                        Text("✕", fontSize = T.Label, color = AppColors.WorkText.copy(alpha = 0.6f),
+                            maxLines = 1, softWrap = false,
+                            modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                .clickable { viewModel.clearLastCrash(); crashReport = null }
+                                .padding(horizontal = 6.dp, vertical = 4.dp))
                     }
-                    Text(report.lineSequence().take(4).joinToString("\n"),
-                        fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 14.sp,
-                        modifier = Modifier.padding(top = 6.dp))
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
-                                cm?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 錯誤紀錄", report))
-                                Toast.makeText(context, "已複製，貼給開發者即可", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
-                            shape = RoundedCornerShape(10.dp)
-                        ) { Text("複製錯誤紀錄", fontSize = T.Label, maxLines = 1, softWrap = false) }
-                        OutlinedButton(
-                            onClick = { viewModel.clearLastCrash(); crashReport = null },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp)
-                        ) { Text("忽略", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false) }
+                    if (open) {
+                        Text(report, fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.85f),
+                            lineHeight = 14.sp,
+                            modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp))
                     }
                 }
             }
@@ -8506,23 +8521,26 @@ fun SettingsView(viewModel: RelateViewModel) {
             item {
                 Column(
                     modifier = Modifier.fillMaxWidth()
-                        .background(if (abnormalCount > 0) AppColors.WorkBg else AppColors.FriendBg, RoundedCornerShape(14.dp))
-                        .padding(14.dp)
+                        .background(if (abnormalCount > 0) AppColors.WorkBg else AppColors.FriendBg, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
                 ) {
                     if (abnormalCount > 0) {
-                        Text("$abnormalCount 筆異常紀錄", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
-                        Text("單筆停留超過 30 分鐘上限，是舊版計時錯誤的產物",
-                            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.85f), lineHeight = 14.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Button(
-                            onClick = { confirmAction = "abnormal" },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
-                            shape = RoundedCornerShape(10.dp)
-                        ) { Text("清理這 $abnormalCount 筆", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("$abnormalCount 筆異常紀錄", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
+                                Text("單筆停留超過 30 分鐘上限", fontSize = T.Micro,
+                                    color = AppColors.WorkText.copy(alpha = 0.8f), lineHeight = 14.sp)
+                            }
+                            Text("清理", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = Color.White,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .background(AppColors.WorkText)
+                                    .clickable { confirmAction = "abnormal" }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp))
+                        }
                     } else {
-                        Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤留下的異常紀錄",
-                            fontSize = T.Label, color = AppColors.FriendText, lineHeight = 16.sp)
+                        Text("已自動清理 $autoCleanedCount 筆舊版計時錯誤的異常紀錄",
+                            fontSize = T.Micro, color = AppColors.FriendText, lineHeight = 15.sp)
                     }
                 }
             }
