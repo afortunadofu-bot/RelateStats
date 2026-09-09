@@ -51,6 +51,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.combinedClickable
@@ -273,7 +274,14 @@ private val UI_LABEL_NAMES = setOf(
     "串文", "貼文", "限時動態", "探索", "個人檔案", "大頭貼照", "大頭照", "頭像",
     "留言", "珍藏", "摘要", "動態", "訊息要求", "已傳送", "傳送", "輸入訊息",
     "back", "close", "all", "more", "settings", "search", "home", "messages",
-    "reels", "explore", "profile", "story", "stories", "notifications"
+    "reels", "explore", "profile", "story", "stories", "notifications",
+    // 以下是實際在使用者機器上被誤收成「聯絡人」的介面字，逐一補進來。
+    // ⚠️ 只放「不可能有人叫這個名字」的字。像「回覆」「社群」這種兩字詞很安全，
+    //    但不要放「小明」「阿姨」這類可能是暱稱的字。
+    "回覆", "社群", "返回首頁", "關閉瀏覽器", "功能表", "相片預覽", "洞察報告",
+    "更多選項", "上一頁", "下一頁", "開啟", "展開", "收合", "選取", "全選",
+    "播放", "暫停", "靜音", "新增", "草稿", "已讀", "輸入中", "表情符號",
+    "相簿", "檔案", "位置資訊", "搜尋訊息", "封鎖", "檢舉", "說明", "隱私權", "服務條款"
 )
 
 private val NON_PERSON_EXTRA = listOf(
@@ -281,16 +289,35 @@ private val NON_PERSON_EXTRA = listOf(
     Regex("^[\\d.,]+\\s*(萬|k|K|M)?\\s*(個)?\\s*(讚|留言|次觀看|views|likes)"),
     Regex("^(按讚數|觀看次數|留言數|分享次數)"),
     // Reels / 貼文殘骸
-    Regex("(reels?|限時動態|連續短片)\\s*$", RegexOption.IGNORE_CASE)
+    Regex("(reels?|限時動態|連續短片)\\s*$", RegexOption.IGNORE_CASE),
+    // 機構／官方帳號：這些字出現在名稱裡幾乎都是推播來源。
+    // ⚠️ 這條規則比較寬，理論上會誤傷名字裡有「銀行」的群組。
+    //    可接受的原因是判定結果只是「歸到系統通知標籤」，不是刪除，隨時可以改回來。
+    Regex("(禮物通知|系統通知|安全通知|驗證碼|一次性密碼|銀行|人壽|產險|證券|信用卡|客服中心|官方)")
 )
 
-/** 判斷是否為非真人通知（讚、追蹤、推播、促銷、介面文字） */
+/**
+ * 判斷是否為非真人通知（讚、追蹤、推播、促銷、介面文字）。
+ *
+ * ⚠️ 這個函式是統計的熱點：活躍密度、新出現的人、連續互動都會**逐筆紀錄**呼叫它，
+ *    五萬多筆就是五萬多次、每次跑十幾條 Regex —— 這是「切日期要跑很久」的主因之一。
+ *    名稱其實只有幾百種，所以結果直接記憶化。
+ *    ConcurrentHashMap：統計跑在背景執行緒，通知服務也會呼叫，兩邊會同時進來。
+ */
+private val nonPersonCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
 fun isNonPersonContact(name: String): Boolean {
-    val n = name.trim()
-    if (n.isEmpty()) return true
-    if (n.lowercase() in UI_LABEL_NAMES) return true
-    if (NON_PERSON_PATTERNS.any { it.containsMatchIn(n) }) return true
-    return NON_PERSON_EXTRA.any { it.containsMatchIn(n) }
+    // 名稱數量正常是幾百個；真的爆掉就整個丟掉重算，不要無限長大
+    if (nonPersonCache.size > 8000) nonPersonCache.clear()
+    return nonPersonCache.getOrPut(name) {
+        val n = name.trim()
+        when {
+            n.isEmpty() -> true
+            n.lowercase() in UI_LABEL_NAMES -> true
+            NON_PERSON_PATTERNS.any { it.containsMatchIn(n) } -> true
+            else -> NON_PERSON_EXTRA.any { it.containsMatchIn(n) }
+        }
+    }
 }
 
 /**
@@ -590,6 +617,40 @@ fun StickyDateBar(
         Spacer(modifier = Modifier.height(6.dp))
         HorizontalDivider(color = AppColors.BorderLight)
     }
+}
+
+/**
+ * 左右滑動切換日期／週。
+ *
+ * ⚠️ 掛在整頁的容器上，不是掛在日期列上。
+ *    掛在日期列的話，分頁鈕與箭頭都有自己的 clickable，會先吃掉手勢，滑起來時靈時不靈。
+ * ⚠️ 垂直捲動不受影響：LazyColumn 只消費垂直方向的拖曳，
+ *    水平方向沒人消費，事件才會冒泡到這裡。頁面內用了 horizontalScroll 的橫向清單
+ *    （標籤列、平台列）會自己消費掉，滑那幾條不會誤觸換日期，這是對的。
+ * 「全部」與「區間」沒有上一期／下一期可言，直接不掛。
+ */
+fun Modifier.dateSwipe(filter: DateFilter, onChange: (DateFilter) -> Unit): Modifier =
+    if (filter.type == FilterType.ALL || filter.type == FilterType.RANGE) this
+    else this.pointerInput(filter) {
+        var total = 0f
+        detectHorizontalDragGestures(
+            onDragStart = { total = 0f },
+            onDragEnd = {
+                val step = if (filter.type == FilterType.SPECIFIC_DAY) 1 else 7
+                // 門檻要夠大，不然直向捲動時手指稍微歪掉就換日期
+                if (total <= -90f) onChange(filter.copy(timestamp = shiftDays(filter.timestamp, step)))
+                else if (total >= 90f) onChange(filter.copy(timestamp = shiftDays(filter.timestamp, -step)))
+            }
+        ) { _, dragAmount -> total += dragAmount }
+    }
+
+private val shiftCal = ThreadLocal.withInitial { Calendar.getInstance() }
+
+fun shiftDays(ts: Long, days: Int): Long {
+    val c = shiftCal.get()!!
+    c.timeInMillis = ts
+    c.add(Calendar.DATE, days)
+    return c.timeInMillis
 }
 
 /** 頂層版的當日零點；ViewModel 內另有一份私有實作 */
@@ -1097,6 +1158,31 @@ object DataRepository {
         }.getOrDefault(emptyList())
     }
 
+    /**
+     * 只還原某一批裡的特定對象，其餘留在垃圾桶。
+     *
+     * ⚠️ 還原完要把檔案「重寫成剩下的」而不是整個刪掉，
+     *    否則還原一個人等於順手永久刪掉同一批的其他人。
+     */
+    fun restoreTrashNames(fileName: String, names: Set<String>): Int {
+        val dir = trashDir() ?: return 0
+        return runCatching {
+            val f = File(dir, fileName)
+            if (!f.exists()) return 0
+            val recs = f.readLines().mapNotNull { InteractionRecord.fromCsvString(it) }
+            val (take, keep) = recs.partition { (_aliases.value[it.rawSenderName] ?: it.rawSenderName) in names }
+            if (take.isEmpty()) return 0
+            val existing = _interactions.value.mapTo(HashSet()) { it.id }
+            val fresh = take.filter { it.id !in existing }
+            if (fresh.isNotEmpty()) {
+                _interactions.update { (it + fresh).sortedBy { r -> r.timestamp } }
+                saveData(immediate = true)
+            }
+            if (keep.isEmpty()) f.delete() else f.writeText(keep.joinToString("\n") { it.toCsvString() })
+            fresh.size
+        }.getOrDefault(0)
+    }
+
     fun purgeTrash(fileName: String) {
         val dir = trashDir() ?: return
         runCatching { File(dir, fileName).delete() }
@@ -1253,22 +1339,39 @@ object DataRepository {
      *
      * @return 刪掉幾個詞
      */
-    fun purgeJunkWords(): Int {
-        val cur = _wordFreq.value
-        if (cur.isEmpty()) return 0
-
-        // 所有聯絡人名字的 2~4 字子字串
-        val nameFragments = HashSet<String>()
+    /** 所有聯絡人名字的 2~4 字子字串，用來認出被切碎的人名 */
+    private fun nameFragments(): HashSet<String> {
+        val out = HashSet<String>()
         val names = (_interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName } +
             _aliases.value.keys + _aliases.value.values).toHashSet()
         names.forEach { raw ->
             val nm = raw.trim()
             if (nm.length in 2..24) {
-                for (n in 2..4) for (i in 0..nm.length - n) nameFragments.add(nm.substring(i, i + n))
+                for (n in 2..4) for (i in 0..nm.length - n) out.add(nm.substring(i, i + n))
             }
         }
+        return out
+    }
 
-        val kept = cur.filterKeys { !isJunkWord(it) && it !in nameFragments }
+    /**
+     * 這次會被清掉哪些詞 —— 按出現次數由多到少。
+     *
+     * ⚠️ 一定要能先看再刪。這個動作一次會清掉幾百個詞而且無法復原，
+     *    只丟一句「已清掉 N 個」使用者根本不知道自己失去了什麼。
+     */
+    fun previewJunkWords(): List<Pair<String, Int>> {
+        val cur = _wordFreq.value
+        if (cur.isEmpty()) return emptyList()
+        val frags = nameFragments()
+        return cur.filterKeys { isJunkWord(it) || it in frags }
+            .toList().sortedByDescending { it.second }
+    }
+
+    fun purgeJunkWords(): Int {
+        val cur = _wordFreq.value
+        if (cur.isEmpty()) return 0
+        val frags = nameFragments()
+        val kept = cur.filterKeys { !isJunkWord(it) && it !in frags }
         val removed = cur.size - kept.size
         if (removed > 0) {
             _wordFreq.value = kept
@@ -2755,6 +2858,47 @@ class RelateViewModel : ViewModel() {
         return ConcentrationStat(n, top1, top3, gini)
     }
 
+    /**
+     * 「每個人的第一次／最後一次／活躍過哪些天」——三份跟日期篩選**完全無關**的索引。
+     *
+     * ⚠️ 這是效能的關鍵。新出現的人與連續互動各自掃過全表一次，
+     *    切一次日期就是兩趟五萬筆。但這三份索引只跟「紀錄」和「別名」有關，
+     *    換日期根本不會變，所以用引用比對（===）快取起來共用。
+     *    新紀錄進來時 _interactions 會換成新的 List 物件，引用自然對不上，快取就失效重算——
+     *    不需要另外維護任何 dirty flag。
+     * ⚠️ 統計跑在背景執行緒，洞察頁與排行頁可能同時進來，所以要同步。
+     */
+    private class FullScan(
+        val firstSeen: HashMap<String, Long>,
+        val lastSeen: HashMap<String, Long>,
+        val daysByPerson: HashMap<String, MutableSet<Long>>
+    )
+
+    private var scanRecords: List<InteractionRecord>? = null
+    private var scanAlias: Map<String, String>? = null
+    private var scanResult: FullScan? = null
+
+    @Synchronized
+    private fun fullScan(records: List<InteractionRecord>, aliasMap: Map<String, String>): FullScan {
+        val cached = scanResult
+        if (cached != null && records === scanRecords && aliasMap === scanAlias) return cached
+        val firstSeen = HashMap<String, Long>()
+        val lastSeen = HashMap<String, Long>()
+        val days = HashMap<String, MutableSet<Long>>()
+        records.forEach { r ->
+            val name = aliasMap[r.rawSenderName] ?: r.rawSenderName
+            val ts = r.timestamp
+            val f = firstSeen[name]
+            if (f == null || ts < f) firstSeen[name] = ts
+            val l = lastSeen[name]
+            if (l == null || ts > l) lastSeen[name] = ts
+            days.getOrPut(name) { HashSet() }.add(startOfDay(ts))
+        }
+        val res = FullScan(firstSeen, lastSeen, days)
+        scanRecords = records; scanAlias = aliasMap; scanResult = res
+        return res
+    }
+
     /** 本期新出現的人，以及已沉寂（超過 14 天沒互動）的人 */
     fun getChurn(records: List<InteractionRecord>, aliasMap: Map<String, String>, filter: DateFilter, weekStart: Int): ChurnStat {
         if (records.isEmpty()) return ChurnStat(emptyList(), emptyList())
@@ -2762,23 +2906,22 @@ class RelateViewModel : ViewModel() {
         // ⚠️ 基準是「區間結束日」不是今天。翻到上個月時，
         //    「沉寂了幾天」要以那個月底來算，否則所有人看起來都沉寂很久。
         val now = range?.second ?: System.currentTimeMillis()
-
-        val firstSeen = HashMap<String, Long>()
-        val lastSeen = HashMap<String, Long>()
-        records.forEach { r ->
-            val name = aliasMap[r.rawSenderName] ?: r.rawSenderName
-            // 「新朋友／久沒聯絡」裡混進系統通知完全沒有意義
-            if (isNonPersonContact(name)) return@forEach
-            firstSeen[name] = minOf(firstSeen[name] ?: Long.MAX_VALUE, r.timestamp)
-            lastSeen[name] = maxOf(lastSeen[name] ?: 0L, r.timestamp)
-        }
+        val scan = fullScan(records, aliasMap)
+        // ⚠️ 這裡要用 isExcludedFromStats 而不是 isNonPersonContact。
+        //    規則認不出的推播來源（銀行、官方帳號…）是靠使用者手動標成「系統通知」處理的，
+        //    只查規則的話，標記完它們照樣會出現在「新出現的人」裡。
+        val cats = categories.value
 
         val newcomers = if (range == null) emptyList() else
-            firstSeen.filter { it.value in range.first..range.second }.keys.sortedBy { firstSeen[it] }.takeLast(20).reversed()
+            scan.firstSeen.entries.asSequence()
+                .filter { it.value in range.first..range.second && !isExcludedFromStats(it.key, cats) }
+                .sortedBy { it.value }
+                .map { it.key }
+                .toList().takeLast(20).reversed()
 
-        val dormant = lastSeen
+        val dormant = scan.lastSeen.entries
             .mapNotNull { (name, ts) ->
-                if (ts > now) return@mapNotNull null
+                if (ts > now || isExcludedFromStats(name, cats)) return@mapNotNull null
                 val days = ((now - ts) / 86_400_000L).toInt()
                 if (days in 14..365) name to days else null
             }
@@ -2814,10 +2957,8 @@ class RelateViewModel : ViewModel() {
         val anchor = startOfDay(range?.second ?: System.currentTimeMillis())
         val rangeStart = range?.first ?: 0L
 
-        val byPerson = HashMap<String, MutableSet<Long>>()
-        records.forEach { r ->
-            byPerson.getOrPut(aliasMap[r.rawSenderName] ?: r.rawSenderName) { HashSet() }.add(startOfDay(r.timestamp))
-        }
+        // 跟「新出現的人」共用同一份索引，不再各掃一次全表
+        val byPerson = fullScan(records, aliasMap).daysByPerson
         return byPerson.mapNotNull { (name, days) ->
             // 非真人、或被歸到「系統通知」標籤的都不該出現在連續互動排行
             if (isExcludedFromStats(name, DataRepository.categories.value)) return@mapNotNull null
@@ -2836,10 +2977,20 @@ class RelateViewModel : ViewModel() {
      * 活躍密度用的資料。除了次數，也要帶當天「跟幾個人聊過」——
      * 一天 50 則全來自同一個人，跟來自 10 個人，意義完全不同。
      */
+    // 活躍密度固定看最近數月，跟日期篩選無關 —— 切日期不該重算。
+    // 快取鍵除了紀錄與別名，還要帶「今天」：跨日之後格子要往前推一格。
+    private var contribKey: Triple<List<InteractionRecord>?, Map<String, String>?, Long> = Triple(null, null, -1L)
+    private var contribResult: List<ContribDay> = emptyList()
+
+    @Synchronized
     fun getContributionMap(
         records: List<InteractionRecord>, aliasMap: Map<String, String>, weeks: Int = 17
     ): List<ContribDay> {
         val today = startOfDay(System.currentTimeMillis())
+        val key = Triple(records, aliasMap, today)
+        if (contribResult.isNotEmpty() &&
+            contribKey.first === records && contribKey.second === aliasMap && contribKey.third == today
+        ) return contribResult
         val days = weeks * 7
         val start = today - (days - 1L) * 86_400_000L
         val counts = IntArray(days)
@@ -2852,7 +3003,9 @@ class RelateViewModel : ViewModel() {
                 if (!isNonPersonContact(nm)) people[idx].add(nm)
             }
         }
-        return (0 until days).map { ContribDay(start + it * 86_400_000L, counts[it], people[it].size) }
+        val out = (0 until days).map { ContribDay(start + it * 86_400_000L, counts[it], people[it].size) }
+        contribKey = key; contribResult = out
+        return out
     }
 
     fun getCallSummary(records: List<InteractionRecord>, filter: DateFilter): CallSummary {
@@ -3347,6 +3500,7 @@ class RelateViewModel : ViewModel() {
     val wordFreq = DataRepository.wordFreq
     fun clearWordFreq() = DataRepository.clearWordFreq()
     fun purgeJunkWords() = DataRepository.purgeJunkWords()
+    fun previewJunkWords() = DataRepository.previewJunkWords()
     val lastWordPurge = DataRepository.lastWordPurge
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
     fun previewRetagTargets() = DataRepository.previewRetagTargets()
@@ -3378,6 +3532,7 @@ class RelateViewModel : ViewModel() {
     fun forgetDeleted(n: String) = DataRepository.forgetDeleted(n)
     fun unblockName(n: String) = DataRepository.unblockName(n)
     fun listTrash() = DataRepository.listTrash()
+    fun restoreTrashNames(file: String, names: Set<String>) = DataRepository.restoreTrashNames(file, names)
     fun restoreTrash(f: String) = DataRepository.restoreTrash(f)
     fun purgeTrash(f: String) = DataRepository.purgeTrash(f)
     fun peekTrash(f: String) = DataRepository.peekTrash(f)
@@ -4345,6 +4500,74 @@ fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> 
     )
 }
 
+/**
+ * 提醒卡：需要使用者處理、但還沒到「出事了」等級的通知。
+ *
+ * ⚠️ 不要再用「整塊粉紅底 + 兩顆整寬紅按鈕」。
+ *    那是警告等級的視覺語言，但這些其實只是待辦提醒；
+ *    滿版紅色一進聯絡人頁就搶走全部注意力，看起來像 App 壞了。
+ *    改成白底卡 + 左側一條細色帶 + 文字型動作，跟銀行 App 的通知列同一個調性。
+ * ⚠️ 左色帶用 height(IntrinsicSize.Min) + fillMaxHeight()，
+ *    不要寫死高度 —— 卡片高度會隨字體縮放改變。
+ */
+@Composable
+fun NoticeCard(
+    title: String,
+    subtitle: String? = null,
+    accent: Color = AppColors.WorkText,
+    onOpen: (() -> Unit)? = null,
+    onDismiss: (() -> Unit)? = null,
+    body: (@Composable ColumnScope.() -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(AppColors.Surface)
+            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(12.dp))
+            .height(IntrinsicSize.Min)
+    ) {
+        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(accent))
+        Column(modifier = Modifier.weight(1f).padding(start = 12.dp, end = 8.dp, top = 11.dp, bottom = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    modifier = Modifier.weight(1f).padding(end = 6.dp)
+                        .let { m -> if (onOpen != null) m.clip(RoundedCornerShape(6.dp)).clickable { onOpen() } else m }
+                ) {
+                    Text(title, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                        color = AppColors.TextPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (subtitle != null) {
+                        Text(subtitle, fontSize = T.Micro, color = AppColors.TextTertiary,
+                            lineHeight = 15.sp, modifier = Modifier.padding(top = 2.dp))
+                    }
+                }
+                if (onOpen != null) {
+                    Text("\u203a", fontSize = 17.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                }
+                if (onDismiss != null) {
+                    Text("\u2715", fontSize = T.Label, color = AppColors.TextTertiary,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onDismiss() }.padding(6.dp))
+                }
+            }
+            body?.let { Spacer(modifier = Modifier.height(8.dp)); it() }
+        }
+    }
+}
+
+/** 提醒卡上的文字型動作。填色的只留給主要動作，其他一律描邊。 */
+@Composable
+fun NoticeAction(label: String, tint: Color, filled: Boolean = false, onClick: () -> Unit) {
+    Text(
+        label, fontSize = T.Label, fontWeight = FontWeight.Bold,
+        color = if (filled) Color.White else tint, maxLines = 1, softWrap = false,
+        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+            .background(if (filled) tint else Color.Transparent)
+            .let { m -> if (filled) m else m.border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp)) }
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    )
+}
+
 /** 區塊標題列：左標題、右可放切換器或說明 */
 @Composable
 fun SectionHead(title: String, trailing: (@Composable RowScope.() -> Unit)? = null) {
@@ -4365,11 +4588,14 @@ fun SectionHead(title: String, trailing: (@Composable RowScope.() -> Unit)? = nu
 @Composable
 fun InfoDot(title: String, body: String, tint: Color = AppColors.TextTertiary) {
     var open by remember { mutableStateOf(false) }
+    // ⚠️ 不要寫死 size()。以前是 20.dp 的圓框裝 13.sp 的字 ——
+    //    系統字體放大之後字比框大，ⓘ 就被切掉一半。
+    //    改成讓框跟著字長，點擊範圍靠 padding 撐開。
     Box(
-        modifier = Modifier.size(20.dp).clip(CircleShape).clickable { open = true },
+        modifier = Modifier.clip(CircleShape).clickable { open = true }.padding(3.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text("ⓘ", fontSize = 13.sp, color = tint, maxLines = 1, softWrap = false)
+        Text("ⓘ", fontSize = T.Label, color = tint, maxLines = 1, softWrap = false)
     }
     if (open) {
         AlertDialog(
@@ -4914,6 +5140,8 @@ fun InsightsView(viewModel: RelateViewModel) {
     val secOrder by viewModel.sectionOrder.collectAsState()
     val secHidden by viewModel.hiddenSections.collectAsState()
     var showSectionEditor by remember { mutableStateOf(false) }
+    // 「新出現的人」點下去就能改標籤，不用記住名字再切去聯絡人頁找
+    var tagTarget by remember { mutableStateOf<String?>(null) }
     // 依存檔順序排好的完整區塊清單；沒排到的接在後面
     val orderedMeta = remember(secOrder) {
         val byId = INSIGHT_SECTIONS.associateBy { it.first }
@@ -4965,7 +5193,19 @@ fun InsightsView(viewModel: RelateViewModel) {
         )
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    tagTarget?.let { t ->
+        QuickTagDialog(
+            name = t,
+            categories = availableCats,
+            currentId = categoriesMap[t],
+            onPick = { catId -> viewModel.setCategory(t, catId); tagTarget = null },
+            onDismiss = { tagTarget = null }
+        )
+    }
+
+    Box(modifier = Modifier.fillMaxSize()
+        // 左右滑動換上一期／下一期，跟日期列上的 ‹ › 同一件事
+        .dateSwipe(filter, viewModel::setTimeFilter)) {
         LazyColumn(
             state = listState,
             contentPadding = PaddingValues(D.Gutter),
@@ -5270,28 +5510,43 @@ fun InsightsView(viewModel: RelateViewModel) {
                                     "只有看過去所有紀錄才知道；但列出來的範圍跟著上方的日期走。"
                             )
                         }
-                        // 一個人一顆膠囊，比「頓號串成一長行」好讀，也點得到
+                        // 新出現的人最常要做的動作就是「分個標籤」——
+                        // 以前點下去只能看互動明細，還得記住名字再切到聯絡人頁去找，
+                        // 所以現在膠囊上直接標出目前的標籤，點一下改標籤，長按才看明細。
                         b.churn.newcomers.take(12).chunked(2).forEach { pairRow ->
                             Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 pairRow.forEach { nm ->
+                                    val catId = categoriesMap[nm] ?: ContactCategory.OTHER.id
+                                    val cat = availableCats.find { it.id == catId } ?: ContactCategory.OTHER
                                     Row(
                                         modifier = Modifier.weight(1f)
                                             .clip(RoundedCornerShape(8.dp))
                                             .background(AppColors.Positive.copy(alpha = 0.08f))
-                                            .clickable { drillInto("$nm 的互動") { r -> (aliases[r.rawSenderName] ?: r.rawSenderName) == nm } }
-                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            .combinedClickable(
+                                                onClick = { tagTarget = nm },
+                                                onLongClick = {
+                                                    drillInto("$nm 的互動") { r -> (aliases[r.rawSenderName] ?: r.rawSenderName) == nm }
+                                                }
+                                            )
+                                            .padding(start = 10.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(AppColors.Positive))
-                                        Spacer(modifier = Modifier.width(6.dp))
                                         Text(nm, fontSize = T.Label, fontWeight = FontWeight.Medium,
-                                            color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            color = AppColors.TextPrimary, maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Text(cat.label, fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                            color = cat.color, maxLines = 1, softWrap = false,
+                                            modifier = Modifier.background(cat.bgColor, RoundedCornerShape(5.dp))
+                                                .padding(horizontal = 5.dp, vertical = 1.dp))
                                     }
                                 }
                                 repeat(2 - pairRow.size) { Spacer(modifier = Modifier.weight(1f)) }
                             }
                         }
+                        Text("點膠囊改標籤　·　長按看互動明細", fontSize = T.Micro,
+                            color = AppColors.TextTertiary, modifier = Modifier.padding(top = 6.dp))
                         if (b.churn.newcomers.size > 12) {
                             Text("＋其他 ${b.churn.newcomers.size - 12} 位", fontSize = T.Micro,
                                 color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
@@ -5388,7 +5643,9 @@ fun OverviewView(viewModel: RelateViewModel) {
 
     val isEmpty = bundle.ready && appStats.isEmpty() && leaderboard.isEmpty()
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize()
+        // 左右滑動換上一期／下一期，跟日期列上的 ‹ › 同一件事
+        .dateSwipe(filter, viewModel::setTimeFilter)) {
     LazyColumn(
         state = listState,
         contentPadding = PaddingValues(D.Gutter),
@@ -6251,7 +6508,9 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     val activeFilterCount = listOfNotNull(appFilter, catFilter?.label).size + (if (groupFilter != GroupFilter.ALL) 1 else 0)
 
     // 排行列彼此相連成一張表，間距由各 item 自行控制
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize()
+        // 左右滑動換上一期／下一期，跟日期列上的 ‹ › 同一件事
+        .dateSwipe(filter, viewModel::setTimeFilter)) {
     LazyColumn(
         state = listState,
         contentPadding = PaddingValues(start = D.Gutter, end = D.Gutter, top = D.Gutter, bottom = if (selectionMode) 76.dp else D.Gutter),
@@ -6749,6 +7008,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     // 收起來就不再提醒，直到重開 App
     var junkDismissed by remember { mutableStateOf(false) }
     var showJunkReview by remember { mutableStateOf(false) }
+    // 「刪除並封鎖」會刪紀錄又永久擋掉，不能一按就執行
+    var pendingBlock by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val similarGroups = cb.similar
 
     var selectionMode by remember { mutableStateOf(false) }
@@ -6774,104 +7035,31 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         ) {
             if (resurrected.isNotEmpty()) {
                 item {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
-                            .background(AppColors.WorkBg, RoundedCornerShape(12.dp))
-                            .padding(12.dp)
+                    NoticeCard(
+                        title = "刪除過的對象又有新紀錄",
+                        subtitle = "你刪掉他們之後對方又傳了訊息，紀錄被重新建立。",
+                        onDismiss = { resurrected = emptyList() }
                     ) {
-                        Text("刪除過的對象又有新紀錄", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.WorkText)
-                        Text("你刪掉他們之後，對方又傳了訊息，紀錄被重新建立。要繼續記錄還是永遠不要記？",
-                            fontSize = T.Label, color = AppColors.WorkText.copy(alpha = 0.85f), lineHeight = 16.sp,
-                            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
                         resurrected.forEach { (name, count) ->
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(name, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(name, fontSize = T.Label, fontWeight = FontWeight.Bold,
                                         color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text("新增 $count 筆", fontSize = T.Micro, color = AppColors.TextTertiary)
                                 }
-                                Box(
-                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                        .background(AppColors.Surface)
-                                        .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
-                                        .clickable {
-                                            viewModel.forgetDeleted(name)
-                                            resurrected = viewModel.resurrectedNames()
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Text("保留", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                                NoticeAction("保留", AppColors.TextSecondary) {
+                                    viewModel.forgetDeleted(name)
+                                    resurrected = viewModel.resurrectedNames()
                                 }
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                        .background(AppColors.WorkText)
-                                        .clickable {
-                                            // 刪掉現有紀錄，並加入永久忽略，之後通知服務直接不收
-                                            viewModel.deleteContacts(setOf(name))
-                                            viewModel.blockName(name)
-                                            resurrected = viewModel.resurrectedNames()
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Text("刪除並封鎖", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                        color = Color.White, maxLines = 1, softWrap = false)
+                                // ⚠️ 這一顆會刪紀錄又封鎖，是不可逆的，一定要二次確認
+                                NoticeAction("刪除並封鎖", AppColors.WorkText) {
+                                    pendingBlock = name to count
                                 }
                             }
-                        }
-                    }
-                }
-            }
-
-            // ⚠️ 「自動合併」以前跟標題擠在同一列。標題吃掉 weight(1f)，
-            //    按鈕只拿得到剩餘寬度；名稱一長或字體一放大，按鈕就被推出父容器邊界。
-            //    畫面上看得到（Row 不裁切子元件），但觸控事件不會派送到父容器外 ——
-            //    這就是「看得到卻按不下去」。改成自己獨立一列、整列可按。
-            if (similarGroups.isNotEmpty() && !selectionMode) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(AppColors.ActiveBlue.copy(alpha = 0.12f))
-                            .clickable { showAutoMerge = true }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("偵測到 ${similarGroups.size} 組可能重複的聯絡人",
-                            fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
-                            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("查看並合併 ›", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                            color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-
-            item {
-                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("聯絡人", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
-                            color = AppColors.TextPrimary)
-                        Text(
-                            if (catFilter == null) "${filteredContacts.size} 位　·　已隱藏系統通知"
-                            else "${filteredContacts.size} 位",
-                            fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Box(
-                            modifier = Modifier.clip(RoundedCornerShape(10.dp))
-                                .background(if (selectionMode) AppColors.BrandPrimary else AppColors.BorderLight)
-                                .clickable { if (selectionMode) exitSelection() else selectionMode = true }
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text(if (selectionMode) "完成" else "選取", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                color = if (selectionMode) Color.White else AppColors.TextPrimary,
-                                maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -6883,57 +7071,23 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             //    刪除降為次要選項，整張卡也可以直接收起來不看。
             if (junkContacts.isNotEmpty() && !selectionMode && !junkDismissed) {
                 item {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
-                            .background(AppColors.WorkBg, RoundedCornerShape(12.dp))
-                            .padding(12.dp)
+                    NoticeCard(
+                        title = "${junkContacts.size} 個非真人來源",
+                        subtitle = "讚、追蹤、推播這類來源。點開可逐筆確認，取消誤判的。",
+                        onOpen = { showJunkReview = true },
+                        onDismiss = { junkDismissed = true }
                     ) {
-                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            // 整塊可點：先看清楚裡面是哪些通知，再決定整批處理。
-                            // ✕ 是內層自己的 clickable，會優先接到手勢，不會誤觸展開。
-                            Row(
-                                modifier = Modifier.weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { showJunkReview = true }
-                                    .padding(end = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f).padding(end = 4.dp)) {
-                                    Text("${junkContacts.size} 個非真人來源", fontSize = T.Body, fontWeight = FontWeight.Bold,
-                                        color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("點開逐筆確認，可取消誤判的", fontSize = T.Micro,
-                                        color = AppColors.WorkText.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                Text("›", fontSize = 17.sp, color = AppColors.WorkText,
-                                    maxLines = 1, softWrap = false)
-                            }
-                            Text("✕", fontSize = 15.sp, color = AppColors.WorkText.copy(alpha = 0.6f),
-                                maxLines = 1, softWrap = false,
-                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                    .clickable { junkDismissed = true }.padding(6.dp))
-                        }
-                        Spacer(modifier = Modifier.height(10.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Button(
-                                onClick = {
-                                    viewModel.setCategories(junkContacts, ContactCategory.SYSTEM.id)
-                                    Toast.makeText(context, "已標為系統通知，統計不再算入", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(vertical = 8.dp)
-                            ) { Text("標為系統通知", fontSize = T.Label, maxLines = 1, softWrap = false) }
-                            OutlinedButton(
-                                onClick = { pendingDelete = junkContacts.toSet() },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(vertical = 8.dp)
-                            ) { Text("直接刪除", fontSize = T.Label, color = AppColors.WorkText, maxLines = 1, softWrap = false) }
+                            NoticeAction("標為系統通知", AppColors.BrandPrimary, filled = true) {
+                                viewModel.setCategories(junkContacts, ContactCategory.SYSTEM.id)
+                                Toast.makeText(context, "已標為系統通知，統計不再算入", Toast.LENGTH_SHORT).show()
+                            }
+                            NoticeAction("逐筆確認", AppColors.TextSecondary) { showJunkReview = true }
                         }
-                        Text("刪除後對方再推播還是會重建；標為系統通知才是一勞永逸",
-                            fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.7f),
-                            lineHeight = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                        // 「直接刪除」刻意收進逐筆確認裡：刪了對方再推播就會重建，
+                        // 放在最外層等於鼓勵使用者選錯的那一個。
+                        Text("刪除沒有用，對方下次推播還是會重建", fontSize = T.Micro,
+                            color = AppColors.TextTertiary, modifier = Modifier.padding(top = 6.dp))
                     }
                 }
             }
@@ -7206,6 +7360,24 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 quickTagTarget = null
                 setShowAddCategoryDialog(true)
             }
+        )
+    }
+
+    pendingBlock?.let { (name, count) ->
+        ConfirmDialog(
+            title = "刪除並封鎖",
+            message = "會刪除「$name」目前的 $count 筆新紀錄，並把這個名字加入永不記錄名單 —— " +
+                "之後對方再傳訊息也不會被記下來。\n\n刪掉的紀錄會進「最近刪除」保留 7 天；" +
+                "封鎖可在「設定 → 永不記錄名單」解除。",
+            confirmLabel = "刪除並封鎖",
+            onConfirm = {
+                viewModel.deleteContacts(setOf(name))
+                viewModel.blockName(name)
+                resurrected = viewModel.resurrectedNames()
+                Toast.makeText(context, "已刪除並封鎖「$name」", Toast.LENGTH_SHORT).show()
+                pendingBlock = null
+            },
+            onDismiss = { pendingBlock = null }
         )
     }
 
@@ -7489,9 +7661,25 @@ fun DetectionDiagnosticsDialog(viewModel: RelateViewModel, onDismiss: () -> Unit
                     fontSize = T.Label, fontWeight = FontWeight.Bold,
                     color = if (beat > 0) AppColors.Positive else AppColors.TextSecondary
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                // ⚠️ 這一頁最常見的問題是「我不知道它要幹嘛」。
+                //    先寫清楚它回答的是哪個問題，再給操作步驟。
+                Text(
+                    "這一頁只回答一件事：停留時間為什麼沒有累積。",
+                    fontSize = T.Label, fontWeight = FontWeight.Bold,
+                    color = AppColors.TextPrimary, lineHeight = 18.sp
+                )
+                Text(
+                    "停留時間靠無障礙服務判斷「你正開著哪個聊天室」，中間有三個可能卡住的環節：" +
+                    "服務沒開、抓不到聊天室標題、或標題被判定成不是聊天室。" +
+                    "下方紀錄會逐筆寫出每個畫面的判定結果，看得出卡在哪一步。",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 18.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    "使用方式：先開著這個 App，切到 LINE / Instagram 打開一個聊天室停留幾秒，再回來看下方紀錄。",
+                    "測法：開著這個 App，切到 LINE / Instagram 打開一個聊天室停留幾秒，再回來看下方紀錄。" +
+                    "看不懂也沒關係 —— 按「複製紀錄」整包貼給開發者即可。",
                     fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -8354,6 +8542,132 @@ private val USER_GUIDE = listOf(
     )
 )
 
+/**
+ * 常見問題。跟 USER_GUIDE 分開放：說明是「這個 App 怎麼運作」，
+ * 常見問題是「東西不對的時候怎麼辦」，兩者的查閱時機完全不同。
+ */
+private val USER_FAQ = listOf(
+    "停留時間都是 0，怎麼辦？" to
+        "多半是無障礙服務被關掉了。Android 每次重新安裝 App 都會自動停用它，需要手動重開。" +
+        "到「設定 → 三項服務」把「停留時間偵測」打開；概況頁頂端也會出現紅色警示。",
+    "為什麼通話時長是 0？" to
+        "Android 原生撥號 App 在通話結束後不會發出通知，系統上拿不到秒數。" +
+        "到「設定 → 匯入手機通話紀錄」可以從系統通話紀錄補齊，可重複執行不會重複計入。",
+    "為什麼有一堆不是人的「聯絡人」？" to
+        "讚、追蹤者、推播這類通知也會被系統送出來，名稱還會把數字寫進去，" +
+        "所以同一種通知會被拆成很多筆。聯絡人頁的提醒卡點開可以逐筆確認，確認後標為「系統通知」即可。" +
+        "不要用刪除的 —— 對方下次推播就會重建。",
+    "刪錯了可以救回來嗎？" to
+        "可以。刪掉的紀錄會進「設定 → 最近刪除」保留 7 天，" +
+        "可以整批還原，也可以只還原其中一個人。逾期會自動永久移除。",
+    "換手機資料會跟著走嗎？" to
+        "Android 系統自動備份已啟用，綁定本機的 Google 帳號，重新安裝後會自動還原（系統上限 25MB）。" +
+        "但不要只依賴它 —— 換機或重灌前請先到「設定 → 匯出備份」自己存一份。",
+    "常用詞為什麼不跟著日期變？" to
+        "系統只儲存詞頻、不保留任何訊息原文，所以事後沒辦法重新切詞分期，只能是全期間累計。",
+    "數字看起來不合理？" to
+        "到「設定 → 偵測診斷」看服務有沒有在跑、最近抓到了什麼。" +
+        "那一頁也會顯示上次閃退的紀錄，可以整包複製回報。"
+)
+
+/** 說明頁裡可展開的一段 */
+@Composable
+private fun GuideExpandable(no: String, title: String, body: @Composable ColumnScope.() -> Unit) {
+    var open by rememberSaveable(no + title) { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                .clickable { open = !open }
+                .padding(vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (no.isNotBlank()) {
+                Text(no, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextTertiary,
+                    maxLines = 1, softWrap = false, modifier = Modifier.widthIn(min = 20.dp))
+            }
+            Text(title, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                lineHeight = 20.sp, modifier = Modifier.weight(1f).padding(end = 8.dp))
+            Text(if (open) "\u2013" else "+", fontSize = T.Title, fontWeight = FontWeight.Bold,
+                color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+        }
+        if (open) {
+            Column(modifier = Modifier.fillMaxWidth().padding(start = if (no.isBlank()) 0.dp else 20.dp, bottom = 10.dp)) { body() }
+        }
+    }
+}
+
+/**
+ * 使用說明（整頁）。
+ *
+ * ⚠️ 這裡以前是 AlertDialog。八個章節塞進一個彈窗，內容被壓在 460dp 的框裡，
+ *    大字體下一次只看得到一段，而且看不到「總共有哪些主題」。
+ *    改成整頁 + 每段預設收合：一眼掃完所有標題，要看哪段再展開。
+ * ⚠️ 展開狀態用 rememberSaveable：翻到一半轉螢幕或被系統回收，不該全部收回去。
+ */
+@Composable
+fun UserGuideScreen(onBack: () -> Unit) {
+    BackHandler { onBack() }
+    Column(modifier = Modifier.fillMaxSize().background(AppColors.Background)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().background(AppColors.Surface)
+                .padding(horizontal = 6.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("\u2039", fontSize = 24.sp, color = AppColors.TextPrimary, maxLines = 1, softWrap = false,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onBack() }
+                    .padding(horizontal = 12.dp, vertical = 2.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("使用說明", fontWeight = FontWeight.Black, fontSize = 18.sp,
+                    letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
+                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = T.Micro, color = AppColors.TextTertiary)
+            }
+        }
+        HorizontalDivider(color = AppColors.BorderLight)
+
+        LazyColumn(
+            contentPadding = PaddingValues(D.Gutter),
+            verticalArrangement = Arrangement.spacedBy(D.Gap)
+        ) {
+            item {
+                Text("常見問題", fontSize = T.Title, fontWeight = FontWeight.Bold,
+                    color = AppColors.TextPrimary, modifier = Modifier.padding(top = 2.dp, bottom = 2.dp))
+            }
+            item {
+                SettingsCard {
+                    USER_FAQ.forEachIndexed { i, (q, a) ->
+                        if (i > 0) SettingsDivider()
+                        Box(modifier = Modifier.padding(horizontal = 14.dp)) {
+                            GuideExpandable("", q) {
+                                Text(a, fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 19.sp)
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                Text("運作原理", fontSize = T.Title, fontWeight = FontWeight.Bold,
+                    color = AppColors.TextPrimary, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            }
+            item {
+                SettingsCard {
+                    USER_GUIDE.forEachIndexed { i, sec ->
+                        if (i > 0) SettingsDivider()
+                        Box(modifier = Modifier.padding(horizontal = 14.dp)) {
+                            GuideExpandable(sec.no, sec.title) {
+                                sec.paragraphs.forEach { p ->
+                                    Text(p, fontSize = T.Label, color = AppColors.TextSecondary,
+                                        lineHeight = 19.sp, modifier = Modifier.padding(bottom = 6.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            item { Spacer(modifier = Modifier.height(20.dp)) }
+        }
+    }
+}
+
 @Composable
 fun UserGuideDialog(onDismiss: () -> Unit) {
     AlertDialog(
@@ -8408,6 +8722,14 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     LaunchedEffect(Unit) { viewModel.refreshUndoState() }
     val fmt = remember { SimpleDateFormat("M/d HH:mm", Locale.US) }
     val now = System.currentTimeMillis()
+    var query by remember { mutableStateOf("") }
+    // ⚠️ 搜尋時才把每一批的內容讀進來。垃圾桶最多只留 7 天，批次數量有限，
+    //    但一批可能上千筆，沒在搜尋就不要讀。
+    val searching = query.isNotBlank()
+    var pendingPurge by remember { mutableStateOf<DataRepository.TrashBatch?>(null) }
+    val allDetail = remember(batches, searching) {
+        if (searching) batches.associate { it.file to viewModel.peekTrash(it.file) } else emptyMap()
+    }
 
     AlertDialog(
         containerColor = AppColors.Surface,
@@ -8415,7 +8737,7 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         title = {
             Column {
                 Text("最近刪除", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
-                Text("保留 7 天後自動永久移除　·　點一批看內容",
+                Text("保留 7 天後自動永久移除　·　可整批或單獨還原某個人",
                     fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
             }
         },
@@ -8451,13 +8773,40 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
             if (batches.isEmpty()) {
                 Text("目前沒有可還原的紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
             } else {
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it },
+                    placeholder = { Text("搜尋刪掉的對象…", fontSize = T.Label) },
+                    singleLine = true,
+                    textStyle = TextStyle(fontSize = T.Body),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.BrandPrimary,
+                        unfocusedBorderColor = AppColors.BorderLight
+                    )
+                )
+                // 搜尋時只留下「批次名稱命中」或「裡面有人命中」的批次
+                val shown = if (!searching) batches else batches.filter { b ->
+                    b.label.contains(query, true) ||
+                        allDetail[b.file].orEmpty().any { it.first.contains(query, true) }
+                }
+                if (shown.isEmpty()) {
+                    Text("找不到「$query」", fontSize = T.Body, color = AppColors.TextSecondary,
+                        modifier = Modifier.padding(vertical = 16.dp))
+                }
                 LazyColumn(modifier = Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(batches, key = { it.file }) { b ->
+                    items(shown, key = { it.file }) { b ->
                         val daysLeft = (7 - ((now - b.deletedAt) / 86_400_000L)).coerceAtLeast(0L)
                         // 展開才去讀檔：一批可能上千筆，全部先讀會拖慢開啟
                         var expanded by remember(b.file) { mutableStateOf(false) }
-                        val detail = remember(b.file, expanded) {
-                            if (expanded) viewModel.peekTrash(b.file) else emptyList()
+                        // 搜尋中一律展開，並且只顯示命中的對象 —— 不然搜到了還要自己點開找
+                        val open = expanded || searching
+                        val detail = remember(b.file, open, query, batches) {
+                            when {
+                                searching -> allDetail[b.file].orEmpty().filter { it.first.contains(query, true) }
+                                expanded -> viewModel.peekTrash(b.file)
+                                else -> emptyList()
+                            }
                         }
                         Column(
                             modifier = Modifier.fillMaxWidth()
@@ -8475,26 +8824,38 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                                 Text("${b.count} 筆", fontSize = T.Label, fontWeight = FontWeight.Bold,
                                     color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text(if (expanded) "▲" else "▼", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                                Text(if (open) "▲" else "▼", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                             }
                             Text(fmt.format(Date(b.deletedAt)) + " 刪除　·　剩 $daysLeft 天",
                                 fontSize = T.Micro, color = AppColors.TextTertiary)
-                            if (expanded) {
+                            if (open) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 if (detail.isEmpty()) {
-                                    Text("讀不到這一批的內容（檔案可能已損毀）", fontSize = T.Micro, color = AppColors.TextTertiary)
+                                    Text(if (searching) "這一批裡沒有符合的對象" else "讀不到這一批的內容（檔案可能已損毀）",
+                                        fontSize = T.Micro, color = AppColors.TextTertiary)
                                 } else {
                                     detail.take(30).forEach { (name, cnt, span) ->
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text(name, fontSize = T.Label, color = AppColors.TextPrimary,
-                                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                            Text(span, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text("$cnt 筆", fontSize = T.Micro, fontWeight = FontWeight.Bold,
-                                                color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                                            Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                                                Text(name, fontSize = T.Label, color = AppColors.TextPrimary,
+                                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                Text("$span　·　$cnt 筆", fontSize = T.Micro,
+                                                    color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                                            }
+                                            // 單獨還原這個人：整批還原常常會把不想要的一起帶回來
+                                            Text("還原", fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                                color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                                    .background(AppColors.ActiveBlue.copy(alpha = 0.12f))
+                                                    .clickable {
+                                                        val n = viewModel.restoreTrashNames(b.file, setOf(name))
+                                                        batches = viewModel.listTrash()
+                                                        Toast.makeText(context, "已還原「$name」$n 筆", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                    .padding(horizontal = 9.dp, vertical = 5.dp))
                                         }
                                     }
                                     if (detail.size > 30) {
@@ -8516,17 +8877,15 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                                         .padding(vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("還原", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                                    Text("整批還原", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
                                 }
                                 Box(
                                     modifier = Modifier.weight(1f)
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(AppColors.Background)
                                         .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
-                                        .clickable {
-                                            viewModel.purgeTrash(b.file)
-                                            batches = viewModel.listTrash()
-                                        }
+                                        // ⚠️ 這一顆是真的救不回來了，必須二次確認並寫明刪的是什麼
+                                        .clickable { pendingPurge = b }
                                         .padding(vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
@@ -8541,6 +8900,22 @@ fun TrashDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
     )
+
+    pendingPurge?.let { b ->
+        ConfirmDialog(
+            title = "永久刪除這一批",
+            message = "「${b.label}」共 ${b.count} 筆會被永久移除，之後無法還原。",
+            // ⚠️ remember 住：peekTrash 會讀檔，一批可能上千筆，不能每次重組都跑一遍
+            details = remember(b.file) { viewModel.peekTrash(b.file).take(30).map { "${it.first}　${it.third}　${it.second} 筆" } },
+            confirmLabel = "永久刪除",
+            onConfirm = {
+                viewModel.purgeTrash(b.file)
+                batches = viewModel.listTrash()
+                pendingPurge = null
+            },
+            onDismiss = { pendingPurge = null }
+        )
+    }
 }
 
 @Composable
@@ -8654,6 +9029,7 @@ fun SettingsView(viewModel: RelateViewModel) {
 
     val (showDataManager, setShowDataManager) = remember { mutableStateOf(false) }
     val (showGuideDialog, setShowGuideDialog) = remember { mutableStateOf(false) }
+
     val weekStartDay by viewModel.weekStartDay.collectAsState()
 
     val records by viewModel.interactions.collectAsState()
@@ -8726,6 +9102,10 @@ fun SettingsView(viewModel: RelateViewModel) {
     //   · 群組之間用 SettingsSection 的小標分隔，不靠留白硬撐
     //   · 每一列 = 標題(14sp) + 說明(11sp) + 右側狀態或 ›
     //   · 破壞性動作一律紅字並排在該區最後
+    // ⚠️ 使用說明是整頁不是彈窗，但**不要**用「早退」的寫法把設定頁換掉 ——
+    //    早退等於整棵子樹被丟掉，回來時設定頁的捲動位置與所有本地狀態都會重置。
+    //    改成蓋在上面：說明頁自己有不透明底色，設定頁還在下面原封不動。
+    Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
         contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -8758,7 +9138,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                     )
                 }
                 SettingsDivider()
-                SettingsRow("運作原理", "訊息與停留時間各自怎麼來的") { setShowGuideDialog(true) }
+                SettingsRow("使用說明", "常見問題與運作原理") { setShowGuideDialog(true) }
             }
         }
 
@@ -8970,10 +9350,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsDivider()
                 SettingsRow("整理系統通知", "把讚、追蹤、推播歸到「系統通知」") { confirmAction = "retag" }
                 SettingsDivider()
-                SettingsRow("清掉常用詞裡的雜訊", "移除系統通知與人名碎片") {
-                    val n = viewModel.purgeJunkWords()
-                    Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
-                }
+                SettingsRow("清掉常用詞裡的雜訊", "移除系統通知與人名碎片") { confirmAction = "purgeWords" }
             }
         }
 
@@ -8990,7 +9367,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                     SettingsRow("永不記錄名單", "${blockedNow.size} 位") { showBlocked = true }
                 }
                 SettingsDivider()
-                SettingsRow("偵測診斷", accent = true) { showDiagnostics = true }
+                SettingsRow("偵測診斷", "停留時間沒在累積時，來這裡看是卡在哪一步", accent = true) { showDiagnostics = true }
                 SettingsDivider()
                 SettingsRow("清除資料", "今日／本週／指定日期／全部", danger = true) {
                     setShowDataManager(true)
@@ -9056,6 +9433,24 @@ fun SettingsView(viewModel: RelateViewModel) {
                 onDismiss = { confirmAction = null }
             )
         }
+        "purgeWords" -> {
+            // ⚠️ remember 住，不然對話框每次重組都重掃一次詞頻表
+            val preview = remember { viewModel.previewJunkWords() }
+            ConfirmDialog(
+                title = "清掉常用詞裡的雜訊",
+                message = if (preview.isEmpty()) "目前沒有偵測到需要清掉的詞。"
+                else "以下 ${preview.size} 個詞會從常用詞統計中移除（系統自動產生的字，以及被切碎的人名）。\n" +
+                    "其他詞的累積不受影響，此操作無法復原。",
+                details = preview.take(60).map { "${it.first}　${it.second} 次" },
+                confirmLabel = if (preview.isEmpty()) "知道了" else "清掉 ${preview.size} 個",
+                onConfirm = {
+                    val n = viewModel.purgeJunkWords()
+                    Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
+                    confirmAction = null
+                },
+                onDismiss = { confirmAction = null }
+            )
+        }
         "words" -> ConfirmDialog(
             title = "清除常用詞統計",
             message = "會刪除目前累積的 ${wordFreqNow.size} 個詞的統計資料，總覽頁的「常用詞」會歸零重新累積。\n互動紀錄與訊息數不受影響，此操作無法復原。",
@@ -9082,7 +9477,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     }
 
     if (showGuideDialog) {
-        UserGuideDialog { setShowGuideDialog(false) }
+        UserGuideScreen { setShowGuideDialog(false) }
+    }
     }
 }
 
