@@ -52,6 +52,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.pointerInput
@@ -217,6 +218,18 @@ val CHART_PALETTES = listOf(
         listOf(
             Color(0xFF465A5E), Color(0xFF56686A), Color(0xFF75828A), Color(0xFF5A7383),
             Color(0xFF6B8093), Color(0xFF3E525A), Color(0xFF7E8E96), Color(0xFF4A6270)
+        )
+    ),
+    // 5. 奶茶
+    ChartPalette(
+        "milktea",
+        listOf(
+            Color(0xFF7F5539), Color(0xFFDDB892), Color(0xFFB08968),
+            Color(0xFFE6CCB2), Color(0xFF9C6644), Color(0xFFCBA98A)
+        ),
+        listOf(
+            Color(0xFF7F5539), Color(0xFF9C6644), Color(0xFFB08968), Color(0xFF6B4A32),
+            Color(0xFFA6784E), Color(0xFF8A6A4F), Color(0xFFBE9268), Color(0xFF5C4033)
         )
     )
 )
@@ -857,7 +870,13 @@ data class CoverageStat(val activeDays: Int, val totalDays: Int, val longestStre
 data class GroupSplit(val groupDuration: Long, val personDuration: Long, val groupMsgs: Int, val personMsgs: Int)
 
 data class AppUsageStat(val appName: String, val totalDurationSeconds: Long, val incomingCount: Int)
-data class CategoryStat(val category: ContactCategory, val totalDurationSeconds: Long, val incomingCount: Int)
+data class CategoryStat(
+    val category: ContactCategory,
+    val totalDurationSeconds: Long,
+    val incomingCount: Int,
+    /** 這個標籤底下有幾位聯絡人（本期有互動的）*/
+    val peopleCount: Int = 0
+)
 data class TimeOfDayStat(val period: String, val percentage: Float, val color: Color, val explicitTimeRange: String)
 
 data class SocialPersona(val title: String, val description: String, val emoji: String) {
@@ -2855,7 +2874,9 @@ class RelateViewModel : ViewModel() {
             CategoryStat(
                 category = category,
                 totalDurationSeconds = catRecords.sumOf { it.durationSeconds.toLong() },
-                incomingCount = catRecords.count { it.isIncoming }
+                incomingCount = catRecords.count { it.isIncoming },
+                // 「這個標籤有幾個人」是使用者最常想知道的一件事，但以前完全沒算
+                peopleCount = catRecords.mapTo(HashSet()) { currentAliases[it.rawSenderName] ?: it.rawSenderName }.size
             )
         }.filter { it.totalDurationSeconds > 0 || it.incomingCount > 0 }.sortedByDescending { it.totalDurationSeconds }
     }
@@ -4076,7 +4097,11 @@ fun MainAppContent(viewModel: RelateViewModel) {
         //    裡面的 rememberSaveable（含捲動位置）就跟著被丟掉 ——
         //    所以切回來永遠是最上面。SaveableStateProvider 會按 key 保存並還原。
         val stateHolder = rememberSaveableStateHolder()
-        Box(modifier = Modifier.fillMaxSize().padding(paddingValues).navigationBarsPadding()) {
+        // ⚠️ 不要再加 navigationBarsPadding()。
+        //    paddingValues 已經含了「導覽列高度 + 系統手勢列」的內距，
+        //    再加一次等於多墊一條系統列的高度，中間就露出 Scaffold 的底色 ——
+        //    那就是分頁列上方那條固定的灰帶。
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
             stateHolder.SaveableStateProvider(activeTab) {
                 when (activeTab) {
                     "overview" -> OverviewView(viewModel)
@@ -4492,6 +4517,46 @@ fun ServiceAlertBanner() {
                 ) { Text("開啟通知存取", fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
         }
+    }
+}
+
+/**
+ * 長清單右側的捲動指示條，可以直接拖。
+ *
+ * ⚠️ 位置用「第幾筆」估算，不是像素。LazyColumn 的每一列高度不一定一樣，
+ *    要拿到精確的像素位移得把所有列都量過，那就失去 lazy 的意義了。
+ *    對「快速跳到中間」這個用途，用索引估算已經夠準。
+ * ⚠️ 只有夠長的清單才畫。二十筆以內出現捲動條只是多一條線在旁邊晃。
+ */
+@Composable
+fun BoxScope.ListScrollbar(listState: LazyListState, minItems: Int = 20) {
+    val total = listState.layoutInfo.totalItemsCount
+    if (total < minItems) return
+    val scope = rememberCoroutineScope()
+    val visible = listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
+    val maxIndex = (total - visible).coerceAtLeast(1)
+    val progress = (listState.firstVisibleItemIndex.toFloat() / maxIndex).coerceIn(0f, 1f)
+    val thumbFrac = (visible.toFloat() / total).coerceIn(0.06f, 1f)
+
+    BoxWithConstraints(
+        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(20.dp)
+            .pointerInput(total, maxIndex) {
+                detectVerticalDragGestures { change, _ ->
+                    val f = (change.position.y / size.height.toFloat()).coerceIn(0f, 1f)
+                    scope.launch { listState.scrollToItem((f * maxIndex).toInt()) }
+                }
+            }
+    ) {
+        val trackH = maxHeight
+        val thumbH = trackH * thumbFrac
+        Box(
+            modifier = Modifier.align(Alignment.TopEnd)
+                .offset(y = (trackH - thumbH) * progress)
+                .padding(end = 3.dp)
+                .width(4.dp).height(thumbH)
+                .clip(RoundedCornerShape(2.dp))
+                .background(AppColors.BorderStrong.copy(alpha = 0.75f))
+        )
     }
 }
 
@@ -5321,16 +5386,24 @@ fun SplitBar(
     fmt: (Long) -> String
 ) {
     val total = (leftValue + rightValue).coerceAtLeast(1L)
+    // ⚠️ 某一邊是 0 的時候也要留一截顏色（4%）。
+    //    寬度給 0 的話那一邊會整個消失，看起來像圖表壞了 ——
+    //    使用者分不出「這一邊是 0」跟「這張圖沒畫出來」。
+    //    也順便讓那一截可以點，行為跟有值時一致。
+    val leftFrac = when {
+        leftValue == 0L && rightValue == 0L -> 0.5f
+        else -> (leftValue.toFloat() / total).coerceIn(0.04f, 0.96f)
+    }
     // 長條與底下的圖例都可點：使用者想點哪邊看哪邊，兩處都要有反應
     Column {
         Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp))) {
             Box(
-                modifier = Modifier.weight(leftValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight()
+                modifier = Modifier.weight(leftFrac).fillMaxHeight()
                     .background(leftColor)
                     .let { m -> if (onLeftClick != null) m.clickable { onLeftClick() } else m }
             )
             Box(
-                modifier = Modifier.weight(rightValue.toFloat().coerceAtLeast(0.001f)).fillMaxHeight()
+                modifier = Modifier.weight(1f - leftFrac).fillMaxHeight()
                     .background(rightColor)
                     .let { m -> if (onRightClick != null) m.clickable { onRightClick() } else m }
             )
@@ -5527,15 +5600,20 @@ fun InsightsView(viewModel: RelateViewModel) {
             }
 
             // ── 2. 逐日趨勢 ──
-            sections.add(Sec("trend", "逐日趨勢") {
-                val (mode, setMode) = remember { mutableStateOf("M") }
-                Panel {
-                    SectionHead("逐日趨勢") {
-                        SegBar(listOf("M" to "訊息", "D" to "時長"), mode, setMode)
+            // ⚠️ 只有一天的時候不要畫。一根長條會撐滿整張圖（寬度平分、高度必然是 100%），
+            //    看起來就是一大塊色塊，而且「趨勢」本來就需要至少兩個點才成立。
+            //    單日想看細節，下面的「幾點在聊」與「時段分佈」才是對的圖。
+            if (b.trend.size >= 2) {
+                sections.add(Sec("trend", "逐日趨勢") {
+                    val (mode, setMode) = remember { mutableStateOf("M") }
+                    Panel {
+                        SectionHead("逐日趨勢") {
+                            SegBar(listOf("M" to "訊息", "D" to "時長"), mode, setMode)
+                        }
+                        TrendChart(b.trend, mode == "D")
                     }
-                    TrendChart(b.trend, mode == "D")
-                }
-            })
+                })
+            }
 
             // ── 3. 平均與極值 ──
             sections.add(Sec("avg", "每日平均") {
@@ -6057,29 +6135,43 @@ fun OverviewView(viewModel: RelateViewModel) {
         // ── 標籤分佈（表格，取代原本的橫向卡片） ──
         if (catStats.isNotEmpty()) {
             item {
-                val (showTime, setShowTime) = remember { mutableStateOf(false) }
+                // ⚠️ 三個模式共用一個字串，不要用 boolean —— 加第三個選項時 boolean 會整段要重寫。
+                var catMode by rememberSaveable { mutableStateOf("M") }
                 var catPie by rememberSaveable { mutableStateOf(true) }
                 Panel {
                     SectionHead("標籤分佈") {
-                        SegBar(listOf("M" to "訊息", "T" to "時長"), if (showTime) "T" else "M") { setShowTime(it == "T") }
+                        SegBar(listOf("M" to "訊息", "T" to "時長", "P" to "人數"), catMode) { catMode = it }
                         Spacer(modifier = Modifier.width(4.dp))
                         SegBar(listOf("P" to "圓餅", "L" to "清單"), if (catPie) "P" else "L") { catPie = (it == "P") }
                     }
-                    val maxV = catStats.maxOfOrNull { if (showTime) it.totalDurationSeconds.toFloat() else it.incomingCount.toFloat() }?.coerceAtLeast(1f) ?: 1f
-                    val sorted = if (showTime) catStats.sortedByDescending { it.totalDurationSeconds } else catStats.sortedByDescending { it.incomingCount }
+                    val showTime = catMode == "T"
+                    val showPeople = catMode == "P"
+                    fun valueOf(st: CategoryStat): Long = when {
+                        showTime -> st.totalDurationSeconds
+                        showPeople -> st.peopleCount.toLong()
+                        else -> st.incomingCount.toLong()
+                    }
+                    fun textOf(v: Long): String = when {
+                        showTime -> formatDuration(v)
+                        showPeople -> "$v 位"
+                        else -> "$v 則"
+                    }
+                    val maxV = catStats.maxOfOrNull { valueOf(it).toFloat() }?.coerceAtLeast(1f) ?: 1f
+                    val sorted = catStats.sortedByDescending { valueOf(it) }
                     if (catPie) {
                         val slices = sorted.map { st ->
-                            Triple(
-                                st.category.label,
-                                if (showTime) st.totalDurationSeconds else st.incomingCount.toLong(),
-                                st.category.color
-                            )
+                            Triple(st.category.label, valueOf(st), st.category.color)
                         }.filter { it.second > 0 }
                         if (slices.isNotEmpty()) {
                             DonutChart(
                                 slices = slices,
-                                centerLabel = if (showTime) "總停留" else "總訊息",
-                                centerValue = if (showTime) formatDuration(slices.sumOf { it.second }) else slices.sumOf { it.second }.toString(),
+                                centerLabel = when {
+                                    showTime -> "總停留"
+                                    showPeople -> "總人數"
+                                    else -> "總訊息"
+                                },
+                                centerValue = if (showTime) formatDuration(slices.sumOf { it.second })
+                                else slices.sumOf { it.second }.toString(),
                                 onSliceClick = { label ->
                                     val cat = sorted.firstOrNull { it.category.label == label }?.category
                                     if (cat != null) {
@@ -6095,13 +6187,14 @@ fun OverviewView(viewModel: RelateViewModel) {
                         }
                     }
                     if (!catPie) sorted.forEach { stat ->
-                        val v = if (showTime) stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
                         DataRow(
                             name = stat.category.label,
                             dotColor = stat.category.color,
-                            progress = v / maxV,
-                            primary = if (showTime) formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount} 則",
-                            secondary = if (showTime) "${stat.incomingCount} 則" else formatDuration(stat.totalDurationSeconds),
+                            progress = valueOf(stat).toFloat() / maxV,
+                            primary = textOf(valueOf(stat)),
+                            // 次要欄位固定顯示人數 —— 就算主指標在看訊息數，
+                            // 「這個標籤有幾個人」也是一直想知道的事
+                            secondary = if (showPeople) "${stat.incomingCount} 則" else "${stat.peopleCount} 位",
                             onClick = {
                                 val rs = filteredRecords.filter { r ->
                                     val u = aliases[r.rawSenderName] ?: r.rawSenderName
@@ -7036,6 +7129,7 @@ fun LeaderboardView(viewModel: RelateViewModel) {
         }
     }
 
+        ListScrollbar(listState)
         ScrollTopButton(listState)
 
         if (selectionMode) {
@@ -7461,8 +7555,13 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     // 多選中按返回＝取消多選，而不是離開這一頁。
     BackHandler(enabled = selectionMode) { exitSelection() }
 
+    // 聯絡人可能有幾百位，沒有 listState 就沒辦法做捲動條與回頂鈕。
+    // rememberSaveable：切出去再切回來不要彈回最上面。
+    val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
+            state = listState,
             contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 14.dp, bottom = if (selectionMode) 92.dp else 14.dp),
             // 0dp：聯絡人列彼此相連成一張卡，間距由各列自己的分隔線負責
             verticalArrangement = Arrangement.spacedBy(0.dp)
@@ -7677,6 +7776,9 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 }
             }
         }
+
+        ListScrollbar(listState)
+        ScrollTopButton(listState)
 
         // 多選模式的底部操作列
         if (selectionMode) {
@@ -8845,19 +8947,20 @@ fun MsgVsTimeCard(msgs: Int, opened: Int, drill: (String, (InteractionRecord) ->
 fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
     Panel {
         SectionHead("時段分佈")
+        // 顏色走 ChartPalette，跟其他圖表同一套；st.color 是舊的寫死色，不再使用
         Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp))) {
-            timeStats.forEach { st ->
+            timeStats.forEachIndexed { i, st ->
                 val name = st.period.split(" ")[0]
                 Box(
-                    modifier = Modifier.weight(st.percentage.coerceAtLeast(0.01f)).fillMaxHeight()
-                        .background(st.color)
+                    modifier = Modifier.weight(st.percentage.coerceAtLeast(0.02f)).fillMaxHeight()
+                        .background(AppColors.Chart.at(i))
                         .clickable { drill("$name 活躍對象", periodPredicate(name)) }
                 )
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            timeStats.forEach { st ->
+            timeStats.forEachIndexed { i, st ->
                 val name = st.period.split(" ")[0]
                 Column(
                     modifier = Modifier.weight(1f)
@@ -8867,7 +8970,7 @@ fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRe
                         .padding(horizontal = 8.dp, vertical = 7.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(st.color))
+                        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(AppColors.Chart.at(i)))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(name, fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
                     }
