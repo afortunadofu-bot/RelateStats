@@ -691,9 +691,13 @@ val INSIGHT_SECTIONS: List<Pair<String, String>> = listOf(
     "delta" to "與上期比較",
     "trend" to "逐日趨勢",
     "avg" to "每日平均",
-    "contrib" to "活躍密度",
+    // ⚠️ 這兩張都是格子圖，長得像但問的問題完全不同。
+    //    名稱一定要直接寫出「它回答什麼」，不然第一次看只看得到兩片色塊：
+    //      哪幾天在聊 = 看**日曆**（近 17 週，哪幾天熱）
+    //      幾點在聊   = 看**時鐘**（一天 24 小時，哪幾個鐘頭熱）
+    "contrib" to "哪幾天在聊",
     "timeofday" to "時段分佈",
-    "heatmap" to "活躍熱力圖",
+    "heatmap" to "幾點在聊",
     "words" to "常用詞",
     "coverage" to "活躍天數",
     "conc" to "社交集中度",
@@ -5048,7 +5052,11 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
             }
         }
         Spacer(modifier = Modifier.height(6.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+        // 圖例那一行本來右邊是空的 —— 把「一欄＝一週」塞在左邊，
+        // 不用另外開一行小字就能講清楚橫軸是什麼。
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("每一欄＝一週", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+            Row(verticalAlignment = Alignment.CenterVertically) {
             Text("少", fontSize = T.Micro, color = AppColors.TextTertiary)
             Spacer(modifier = Modifier.width(4.dp))
             listOf(0f, 0.3f, 0.55f, 0.8f, 1f).forEach { a ->
@@ -5060,6 +5068,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
             }
             Spacer(modifier = Modifier.width(2.dp))
             Text("多（最高 $max）", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+            }
         }
         val avgPeople = data.filter { it.count > 0 }.let { d -> if (d.isEmpty()) 0 else d.sumOf { it.people } / d.size }
         if (avgPeople > 0) {
@@ -5317,15 +5326,17 @@ fun InsightsView(viewModel: RelateViewModel) {
                 }
             })
 
-            // ── 4. 活躍密度 ──
-            sections.add(Sec("contrib", "活躍密度") {
+            // ── 4. 哪幾天在聊（日曆格子圖）──
+            sections.add(Sec("contrib", "哪幾天在聊") {
                 Panel {
-                    SectionHead("活躍密度") {
+                    SectionHead("哪幾天在聊") {
                         InfoDot(
-                            "活躍密度怎麼看",
-                            "橫軸是「週」，由左到右一週一欄；縱軸是「星期幾」，由上到下週日到週六。\n" +
-                                "所以每一格代表某一天，顏色越深表示那天互動越多。\n\n" +
-                                "點任一格會顯示那天的實際次數與聊天人數。\n" +
+                            "哪幾天在聊",
+                            "一格＝一天。橫向由左到右**一欄就是一週**，縱向由上到下是星期幾。\n" +
+                                "顏色越深表示那天互動越多，點任一格會顯示當天的實際次數與聊天人數。\n\n" +
+                                "跟「幾點在聊」的差別：\n" +
+                                "這張看的是**日曆** —— 最近幾個月裡，哪幾天熱、哪幾天整片空白。\n" +
+                                "那張看的是**時鐘** —— 一天二十四小時裡，哪幾個鐘頭熱。\n\n" +
                                 "整片偏白代表那段時間幾乎沒在用通訊軟體，或服務被關掉沒記錄到。"
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -5340,7 +5351,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                 TimeOfDayCard(b.timeStats) { title, pred -> drillInto(title, pred) }
             })
 
-            sections.add(Sec("heatmap", "活躍熱力圖") {
+            sections.add(Sec("heatmap", "幾點在聊") {
                 WeekHourHeatmapCard(b.heatmap, weekStartDay)
             })
 
@@ -5993,8 +6004,26 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
     val emptyColor = AppColors.BorderLight.copy(alpha = 0.5f)
     val markColor = AppColors.BrandPrimary
 
+    // 尖峰時段：這張圖最想回答的就是「我都幾點在聊」，
+    // 沒選格子時就把答案直接寫出來，不用等使用者自己找最深的那一格。
+    val peak = remember(grid) {
+        var bd = -1; var bh = -1; var bv = 0
+        for (d in 0..6) for (h in 0..23) if (grid[d][h] > bv) { bv = grid[d][h]; bd = d; bh = h }
+        if (bd < 0) null else Triple(bd, bh, bv)
+    }
+
     Panel {
-        SectionHead("活躍熱力圖") {
+        SectionHead("幾點在聊") {
+            InfoDot(
+                "幾點在聊",
+                "一格＝某個星期幾的某一個小時。橫向是一天二十四小時（最左 0 點、最右 23 點），" +
+                    "縱向是星期幾，顏色越深表示那個時段互動越多。\n" +
+                    "點任一格會顯示該時段的實際次數。\n\n" +
+                    "跟「哪幾天在聊」的差別：\n" +
+                    "那張看的是**日曆** —— 最近幾個月裡哪幾天熱。\n" +
+                    "這張看的是**時鐘** —— 不管哪一天，一天當中哪幾個鐘頭熱。"
+            )
+            Spacer(modifier = Modifier.width(4.dp))
             Text("共 $total 次", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
         }
         run {
@@ -6013,6 +6042,19 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                             " · " + grid[p.first][p.second] + " 次",
                         fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
                     )
+                } else if (peak != null) {
+                    val (pd, ph, pv) = peak
+                    val displayIdx = rowOrder.indexOf(pd).coerceAtLeast(0)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("最常互動", fontSize = T.Micro, color = AppColors.TextTertiary,
+                            maxLines = 1, softWrap = false)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            days[displayIdx] + " " + String.format(Locale.US, "%02d:00", ph) + " · $pv 次",
+                            fontSize = T.Label, fontWeight = FontWeight.Bold,
+                            color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
+                        )
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
@@ -6071,9 +6113,34 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                     }
                 }
             }
-            Row(modifier = Modifier.fillMaxWidth().padding(start = labelW, top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                listOf("0", "6", "12", "18", "23").forEach {
-                    Text(it, fontSize = T.Micro, color = AppColors.TextTertiary)
+            // 橫軸只寫 0 6 12 18 23 五個數字，第一次看不出那是小時 ——
+            // 左邊的星期標籤欄本來就是空的，把「小時」兩個字放進去。
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.width(labelW)) {
+                    Text("小時", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                }
+                Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceBetween) {
+                    listOf("0", "6", "12", "18", "23").forEach {
+                        Text(it, fontSize = T.Micro, color = AppColors.TextTertiary)
+                    }
+                }
+            }
+            // 色階圖例：跟「哪幾天在聊」那張同一個寫法，兩張圖才讀得起來像同一套
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("每一格＝一小時", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("少", fontSize = T.Micro, color = AppColors.TextTertiary)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    listOf(0f, 0.3f, 0.55f, 0.8f, 1f).forEach { a ->
+                        Box(modifier = Modifier.size(9.dp).background(
+                            if (a == 0f) emptyColor else cellColor.copy(alpha = 0.2f + 0.8f * a),
+                            RoundedCornerShape(2.dp)
+                        ))
+                        Spacer(modifier = Modifier.width(2.dp))
+                    }
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Text("多（最高 $max）", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -8493,7 +8560,7 @@ private val USER_GUIDE = listOf(
             "頁面頂端的日期列決定所有統計的範圍，可選單日、單週、自訂區間或全部。",
             "原則上所有數字都跟隨這個範圍。少數刻意不跟隨的指標會在卡片標題旁標明範圍。",
             "常用詞標示「全期間」：系統只儲存詞頻、不保留訊息原文，事後無法重新分期。",
-            "活躍密度是長期視圖，跟隨篩選會只剩一格，因此固定顯示最近數月。",
+            "「哪幾天在聊」是長期視圖，跟隨篩選會只剩一格，因此固定顯示最近數月。",
             "連續互動天數是長期指標，但基準日會跟著你選的區間走，且只列出最後一次互動落在該區間內的人。"
         )
     ),
@@ -9153,7 +9220,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 ) {
                     Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                         Text("一週起始日", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                        Text("影響單週範圍、活躍密度與熱力圖", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                        Text("影響單週範圍、「哪幾天在聊」與「幾點在聊」", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                     }
                     Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
                         listOf(Calendar.MONDAY to "週一", Calendar.SUNDAY to "週日").forEach { (day, label) ->
