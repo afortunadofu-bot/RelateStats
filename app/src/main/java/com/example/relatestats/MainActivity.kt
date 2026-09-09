@@ -125,33 +125,60 @@ import java.util.*
 // 1. 視覺設計系統
 // ==========================================
 /**
- * 一組主視覺配色。
+ * 一組圖表配色。
  *
- * 只有兩個顏色會跟著主題變：
- *  · brand  —— 深色，用在填色按鈕、被選中的分頁、App 標記
- *  · accent —— 彩色，用在連結、數字強調、所有圖表
- * 標籤色（家人／同事…）與平台色（LINE 綠、IG 粉）不跟著變 ——
- * 那些是「語意色」，換主題就認不出來了。
- * 「上升／下降」的綠紅同理，屬於語意，不進主題。
+ * ⚠️ 這個只換**圖表**的顏色，不換 App 本身。
+ *    App 的灰白藍是介面骨架（背景、卡片、按鈕、連結），換掉會變成另一個 App；
+ *    使用者要挑的是資料的顏色 —— 圓餅圖切片、長條、格子色階。
+ *
+ * colors[0] 同時是單色圖表（長條圖、色階格子）的主色，所以每組的第一個
+ * 都必須是「單獨用也夠深、看得清楚」的顏色。
+ *
+ * 不進配色的東西：
+ *  · 標籤色（家人／同事…）—— 使用者自己挑的，覆蓋掉等於把設定弄丟
+ *  · 「上升／下降」的綠紅 —— 那是語意，不是裝飾
  */
-data class AppTheme(val id: String, val label: String, val brand: Color, val accent: Color)
+data class ChartPalette(val id: String, val colors: List<Color>) {
+    val primary: Color get() = colors[0]
+    fun at(i: Int): Color = colors[((i % colors.size) + colors.size) % colors.size]
+}
 
-val APP_THEMES = listOf(
-    AppTheme("slate", "石墨藍", Color(0xFF0F172A), Color(0xFF2563EB)),
-    AppTheme("forest", "森林綠", Color(0xFF14261D), Color(0xFF0D9488)),
-    AppTheme("violet", "暮光紫", Color(0xFF1E1B4B), Color(0xFF6D28D9)),
-    AppTheme("ember", "赭石橙", Color(0xFF261806), Color(0xFFC2410C)),
-    AppTheme("rose", "玫瑰紅", Color(0xFF2A1018), Color(0xFFBE123C))
+val CHART_PALETTES = listOf(
+    // 預設：原本的藍
+    ChartPalette("default", listOf(
+        Color(0xFF2563EB), Color(0xFF0EA5E9), Color(0xFF14B8A6),
+        Color(0xFF6366F1), Color(0xFF8B5CF6), Color(0xFF94A3B8)
+    )),
+    // 淺色明亮
+    ChartPalette("bright", listOf(
+        Color(0xFF60A5FA), Color(0xFFFBBF24), Color(0xFF34D399),
+        Color(0xFFF472B6), Color(0xFFA78BFA), Color(0xFFFB923C)
+    )),
+    // 深色質感
+    ChartPalette("deep", listOf(
+        Color(0xFF1F3A5F), Color(0xFF3E5C76), Color(0xFF5C7457),
+        Color(0xFF7A5C48), Color(0xFF6B4A5C), Color(0xFF47555E)
+    )),
+    // 奶茶
+    ChartPalette("milktea", listOf(
+        Color(0xFFB08968), Color(0xFF9C6644), Color(0xFFDDB892),
+        Color(0xFF7F5539), Color(0xFFD4A276), Color(0xFFE6CCB2)
+    )),
+    // 海洋
+    ChartPalette("ocean", listOf(
+        Color(0xFF023E8A), Color(0xFF0077B6), Color(0xFF0096C7),
+        Color(0xFF00B4D8), Color(0xFF48CAE4), Color(0xFF90E0EF)
+    ))
 )
 
 object AppColors {
     /**
      * ⚠️ 必須是 Compose 的 MutableState，不能是普通 var。
-     *    下面的顏色都寫成 get()，讀取時等於讀了這個 state ——
-     *    這樣換主題才會自動觸發重組。改成普通 var 的話畫面不會更新。
+     *    Chart 寫成 get()，讀取時等於讀了這個 state ——
+     *    這樣換配色才會自動觸發重組。改成普通 var 的話畫面不會更新。
      */
-    val themeState = mutableStateOf(APP_THEMES[0])
-    val theme: AppTheme get() = themeState.value
+    val chartPaletteState = mutableStateOf(CHART_PALETTES[0])
+    val Chart: ChartPalette get() = chartPaletteState.value
 
     // ── 底層 ──
     val Background = Color(0xFFF4F6F8)
@@ -165,10 +192,12 @@ object AppColors {
     val TextSecondary = Color(0xFF64748B)
     val TextTertiary = Color(0xFF94A3B8)
 
-    // ── 強調（跟著主題走）──
-    val BrandPrimary: Color get() = theme.brand
-    val ActiveBlue: Color get() = theme.accent
-    /** ⚠️ 語意色：專門表示「上升／正向」。不要拿它來畫圖表，圖表一律用 ActiveBlue。 */
+    // ── 強調 ──
+    // ⚠️ 這三個是介面骨架，不跟著圖表配色變。
+    //    畫資料請用 AppColors.Chart，不要用這裡的 ActiveBlue。
+    val BrandPrimary = Color(0xFF0F172A)
+    val ActiveBlue = Color(0xFF2563EB)
+    /** ⚠️ 語意色：專門表示「上升／正向」。不要拿它來畫圖表。 */
     val Positive = Color(0xFF059669)
 
     val WorkBg = Color(0xFFFEE2E2); val WorkText = Color(0xFFB91C1C)
@@ -803,7 +832,7 @@ object DataRepository {
 
     var isFirstLaunch = MutableStateFlow(true)
     var weekStartDay = MutableStateFlow(Calendar.MONDAY)
-    val themeId = MutableStateFlow(APP_THEMES[0].id)
+    val chartPaletteId = MutableStateFlow(CHART_PALETTES[0].id)
 
     var autoBackupEnabled = MutableStateFlow(false)
     var autoBackupPassword = MutableStateFlow("")
@@ -937,7 +966,7 @@ object DataRepository {
         val p = prefs ?: return
         isFirstLaunch.value = p.getBoolean("is_first_launch", true)
         weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
-        applyTheme(p.getString("app_theme", null) ?: APP_THEMES[0].id)
+        applyChartPalette(p.getString("chart_palette", null) ?: CHART_PALETTES[0].id)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
         autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
         lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
@@ -1013,15 +1042,15 @@ object DataRepository {
         prefs?.edit()?.putBoolean("is_first_launch", false)?.apply()
     }
 
-    private fun applyTheme(id: String) {
-        val t = APP_THEMES.find { it.id == id } ?: APP_THEMES[0]
-        themeId.value = t.id
-        AppColors.themeState.value = t
+    private fun applyChartPalette(id: String) {
+        val p = CHART_PALETTES.find { it.id == id } ?: CHART_PALETTES[0]
+        chartPaletteId.value = p.id
+        AppColors.chartPaletteState.value = p
     }
 
-    fun setTheme(id: String) {
-        applyTheme(id)
-        prefs?.edit()?.putString("app_theme", themeId.value)?.apply()
+    fun setChartPalette(id: String) {
+        applyChartPalette(id)
+        prefs?.edit()?.putString("chart_palette", chartPaletteId.value)?.apply()
     }
 
     fun setWeekStartDay(day: Int) {
@@ -2606,8 +2635,8 @@ class RelateViewModel : ViewModel() {
     val aliases = DataRepository.aliases
     val availableCategories = DataRepository.availableCategories
     val weekStartDay = DataRepository.weekStartDay
-    val themeId = DataRepository.themeId
-    fun setTheme(id: String) = DataRepository.setTheme(id)
+    val chartPaletteId = DataRepository.chartPaletteId
+    fun setChartPalette(id: String) = DataRepository.setChartPalette(id)
 
     // 預設看「單週」。預設單日的話，只要今天還沒互動就整片空白，
     // 一開 App 什麼都看不到。
@@ -3719,17 +3748,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 把 App 自己的色票交給 Material3，內建元件才會跟著主題走 */
+/** 把 App 自己的色票交給 Material3，內建元件才不會用預設的紫 */
 @Composable
 fun appColorScheme(): ColorScheme {
-    val t = AppColors.theme
+    val accent = AppColors.ActiveBlue
+    val brand = AppColors.BrandPrimary
     return lightColorScheme(
-        primary = t.accent, onPrimary = Color.White,
-        primaryContainer = t.accent.copy(alpha = 0.14f), onPrimaryContainer = t.accent,
-        secondary = t.brand, onSecondary = Color.White,
+        primary = accent, onPrimary = Color.White,
+        primaryContainer = accent.copy(alpha = 0.14f), onPrimaryContainer = accent,
+        secondary = brand, onSecondary = Color.White,
         // secondaryContainer 就是導覽列選中膠囊的底色
-        secondaryContainer = t.accent.copy(alpha = 0.14f), onSecondaryContainer = t.accent,
-        tertiary = t.accent, onTertiary = Color.White,
+        secondaryContainer = accent.copy(alpha = 0.14f), onSecondaryContainer = accent,
+        tertiary = accent, onTertiary = Color.White,
         background = AppColors.Background, onBackground = AppColors.TextPrimary,
         surface = AppColors.Surface, onSurface = AppColors.TextPrimary,
         surfaceVariant = AppColors.SurfaceAlt, onSurfaceVariant = AppColors.TextSecondary,
@@ -5011,7 +5041,7 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
             if (p != null) {
                 Text(
                     dayFmt.format(Date(p.dayStart)) + " · " + p.msgCount + " 則 · 停留 " + formatDuration(p.durationSeconds),
-                    fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
+                    fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Chart.primary, maxLines = 1, softWrap = false
                 )
             }
         }
@@ -5033,7 +5063,7 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
                     Box(
                         modifier = Modifier.fillMaxWidth().fillMaxHeight(frac)
                             .background(
-                                if (on) AppColors.BrandPrimary else if (v > 0) AppColors.ActiveBlue else AppColors.BorderLight,
+                                if (on) AppColors.BrandPrimary else if (v > 0) AppColors.Chart.primary else AppColors.BorderLight,
                                 RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp)
                             )
                     )
@@ -5135,7 +5165,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
                                 val bg = when {
                                     cellData == null -> Color.Transparent
                                     c == 0 -> AppColors.BorderLight.copy(alpha = 0.5f)
-                                    else -> AppColors.ActiveBlue.copy(alpha = 0.25f + 0.75f * (c!!.toFloat() / max))
+                                    else -> AppColors.Chart.primary.copy(alpha = 0.25f + 0.75f * (c!!.toFloat() / max))
                                 }
                                 Box(
                                     modifier = Modifier.size(cell)
@@ -5161,7 +5191,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
                 Text(
                     // 次數＋人數一起看才有意義：50 則全來自同一人 vs 來自 10 個人差很多
                     "${d.count} 次 · ${d.people} 人",
-                    fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
+                    fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.Chart.primary, maxLines = 1, softWrap = false
                 )
             }
         }
@@ -5175,7 +5205,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
             Spacer(modifier = Modifier.width(4.dp))
             listOf(0f, 0.3f, 0.55f, 0.8f, 1f).forEach { a ->
                 Box(modifier = Modifier.size(9.dp).background(
-                    if (a == 0f) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.ActiveBlue.copy(alpha = 0.25f + 0.75f * a),
+                    if (a == 0f) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.Chart.primary.copy(alpha = 0.25f + 0.75f * a),
                     RoundedCornerShape(2.dp)
                 ))
                 Spacer(modifier = Modifier.width(2.dp))
@@ -5895,13 +5925,15 @@ fun OverviewView(viewModel: RelateViewModel) {
                         SegBar(listOf("P" to "圓餅", "L" to "清單"), if (pie) "P" else "L") { pie = (it == "P") }
                     }
                     if (pie) {
-                        val slices = appStats.map { st ->
-                            Triple(
-                                st.appName,
-                                if (mode == "TIME") st.totalDurationSeconds else st.incomingCount.toLong(),
-                                AppColors.AppBrands[st.appName] ?: AppColors.TextSecondary
-                            )
-                        }.filter { it.second > 0 }.sortedByDescending { it.second }
+                        // ⚠️ 平台圓餅改吃 ChartPalette 而不是各家品牌色。
+                        //    品牌色（LINE 綠、IG 粉）彼此明度差很大，湊成一張圖本來就不成套；
+                        //    而且使用者要挑的就是這張圖的顏色。平台名稱寫在圖例上，不靠顏色辨認。
+                        val slices = appStats
+                            .map { st ->
+                                st.appName to (if (mode == "TIME") st.totalDurationSeconds else st.incomingCount.toLong())
+                            }
+                            .filter { it.second > 0 }.sortedByDescending { it.second }
+                            .mapIndexed { i, (name, v) -> Triple(name, v, AppColors.Chart.at(i)) }
                         if (slices.isNotEmpty()) {
                             DonutChart(
                                 slices = slices,
@@ -5916,11 +5948,11 @@ fun OverviewView(viewModel: RelateViewModel) {
                         }
                     }
                     val total = if (mode == "TIME") totalTimeSec.toFloat() else totalNotifs.toFloat()
-                    if (!pie) appStats.forEach { stat ->
+                    if (!pie) appStats.forEachIndexed { i, stat ->
                         val v = if (mode == "TIME") stat.totalDurationSeconds.toFloat() else stat.incomingCount.toFloat()
                         DataRow(
                             name = stat.appName,
-                            dotColor = AppColors.AppBrands[stat.appName] ?: AppColors.TextSecondary,
+                            dotColor = AppColors.Chart.at(i),
                             progress = if (total > 0f) v / total else 0f,
                             primary = if (mode == "TIME") formatDuration(stat.totalDurationSeconds) else "${stat.incomingCount} 則",
                             secondary = if (mode == "TIME") "${stat.incomingCount} 則" else formatDuration(stat.totalDurationSeconds),
@@ -6114,7 +6146,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
     val days = remember(weekStartDay) { rotatedWeekLabels(weekStartDay) }
     val rowOrder = remember(weekStartDay) { (0..6).map { (it + (weekStartDay - Calendar.SUNDAY)) % 7 } }
     val total = grid.sumOf { row -> row.sum() }
-    val cellColor = AppColors.ActiveBlue
+    val cellColor = AppColors.Chart.primary
     val emptyColor = AppColors.BorderLight.copy(alpha = 0.5f)
     val markColor = AppColors.BrandPrimary
 
@@ -6154,7 +6186,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                     Text(
                         days[displayIdx] + " " + String.format(Locale.US, "%02d:00", p.second) +
                             " · " + grid[p.first][p.second] + " 次",
-                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Chart.primary, maxLines = 1, softWrap = false
                     )
                 } else if (peak != null) {
                     val (pd, ph, pv) = peak
@@ -6166,7 +6198,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                         Text(
                             days[displayIdx] + " " + String.format(Locale.US, "%02d:00", ph) + " · $pv 次",
                             fontSize = T.Label, fontWeight = FontWeight.Bold,
-                            color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
+                            color = AppColors.Chart.primary, maxLines = 1, softWrap = false
                         )
                     }
                 }
@@ -8663,7 +8695,7 @@ fun LengthsCard(
             }
             DataRow(
                 name = label,
-                dotColor = AppColors.ActiveBlue,
+                dotColor = AppColors.Chart.at(i),
                 progress = pct,
                 primary = "$count 則",
                 secondary = "${(pct * 100).toInt()}%",
@@ -8681,14 +8713,14 @@ fun GroupSplitCard(split: GroupSplit, drill: (String, (InteractionRecord) -> Boo
         SectionHead("群組 vs 個人")
         SplitBar(
             "群組", split.groupMsgs.toLong(), "個人", split.personMsgs.toLong(),
-            AppColors.GroupText, AppColors.ActiveBlue,
+            AppColors.Chart.at(0), AppColors.Chart.at(2),
             onLeftClick = { drill("群組") { r -> r.isGroup } },
             onRightClick = { drill("個人") { r -> !r.isGroup } }
         ) { "$it 則" }
         Spacer(modifier = Modifier.height(10.dp))
         SplitBar(
             "群組停留", split.groupDuration, "個人停留", split.personDuration,
-            AppColors.GroupText.copy(alpha = 0.7f), AppColors.ActiveBlue.copy(alpha = 0.7f),
+            AppColors.Chart.at(0).copy(alpha = 0.7f), AppColors.Chart.at(2).copy(alpha = 0.7f),
             onLeftClick = { drill("群組停留") { r -> r.isGroup && r.durationSeconds > 0 } },
             onRightClick = { drill("個人停留") { r -> !r.isGroup && r.durationSeconds > 0 } }
         ) { formatDuration(it) }
@@ -9458,7 +9490,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     val (showGuideDialog, setShowGuideDialog) = remember { mutableStateOf(false) }
 
     val weekStartDay by viewModel.weekStartDay.collectAsState()
-    val themeId by viewModel.themeId.collectAsState()
+    val chartPaletteId by viewModel.chartPaletteId.collectAsState()
 
     val records by viewModel.interactions.collectAsState()
     val availableCats by viewModel.availableCategories.collectAsState()
@@ -9580,32 +9612,35 @@ fun SettingsView(viewModel: RelateViewModel) {
         item {
             SettingsCard {
                 Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    Text("主題配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                    Text("影響按鈕、連結與所有圖表；標籤色與平台色不受影響",
+                    Text("圖表配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                    Text("只影響圖表；App 介面、標籤色與平台色不變",
                         fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                     Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        APP_THEMES.forEach { t ->
-                            val on = themeId == t.id
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier.clip(RoundedCornerShape(10.dp))
-                                    .clickable { viewModel.setTheme(t.id) }
-                                    .padding(horizontal = 4.dp, vertical = 4.dp)
-                            ) {
-                                // 一顆色票同時秀出 brand 與 accent —— 只給一個顏色看不出換了什麼
-                                Box(
-                                    modifier = Modifier.size(30.dp).clip(CircleShape).background(t.brand)
-                                        .then(if (on) Modifier.border(2.dp, t.accent, CircleShape) else Modifier),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Box(modifier = Modifier.size(13.dp).clip(CircleShape).background(t.accent))
+                    // ⚠️ 每一列就是那組配色本身，不寫名字 ——
+                    //    「奶茶色系」這種名字對挑色沒有幫助，直接看顏色才準。
+                    CHART_PALETTES.forEach { p ->
+                        val on = chartPaletteId == p.id
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (on) AppColors.SurfaceAlt else Color.Transparent)
+                                .border(
+                                    if (on) 1.5.dp else 1.dp,
+                                    if (on) AppColors.BrandPrimary else AppColors.BorderLight,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { viewModel.setChartPalette(p.id) }
+                                .padding(horizontal = 10.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                p.colors.forEach { c ->
+                                    Box(modifier = Modifier.size(20.dp).clip(RoundedCornerShape(5.dp)).background(c))
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(t.label, fontSize = T.Micro,
-                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (on) AppColors.TextPrimary else AppColors.TextTertiary,
-                                    maxLines = 1, softWrap = false)
+                            }
+                            if (on) {
+                                Text("✓", fontSize = T.Title, fontWeight = FontWeight.Black,
+                                    color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
                             }
                         }
                     }

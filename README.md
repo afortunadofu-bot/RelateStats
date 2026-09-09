@@ -158,17 +158,25 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### 配色
 
-- **主題只換兩個顏色**：`brand`（深色，填色按鈕／選中分頁／App 標記）與 `accent`（彩色，連結／數字／**所有圖表**）。
-  ⚠️ 標籤色（家人、同事…）與平台色（LINE 綠、IG 粉）**不進主題** —— 那是語意色，換了就認不出來。
-  「上升／下降」的綠紅同理，`AppColors.Positive` 專門留給正向語意。
-- ⚠️ **圖表一律用 `ActiveBlue`，不要用 `Positive`。** 活躍格子以前是綠的、熱力圖是藍的，
-  兩張並排看起來像兩個 App。
-- ⚠️ **`AppColors` 的主題色必須寫成 `get()` 並讀 `themeState`（Compose `MutableState`）**，
-  不能改成普通 `var` —— 那樣換主題畫面不會重組。
+**介面色與資料色是兩套東西，不要混用。**
+
+- **介面色固定不動**：`Background` / `Surface` / `BrandPrimary`(#0F172A) / `ActiveBlue`(#2563EB)。
+  這是 App 的骨架 —— 背景、卡片、按鈕、連結、選中狀態。換掉就變成另一個 App，所以它不可設定。
+- **資料色可設定**：`AppColors.Chart`（`ChartPalette`，5 組）。圓餅切片、長條、格子色階、比例條走這裡。
+  ⚠️ **畫資料不要用 `ActiveBlue`**，要用 `AppColors.Chart.primary` / `.at(i)`。
+- `colors[0]` 同時是單色圖表（長條圖、色階格子）的主色，所以每組的第一個都必須「單獨用也夠深」。
+- **不進配色的兩種顏色**：
+  - 標籤色（家人、同事…）—— 使用者自己挑的，覆蓋掉等於把設定弄丟。標籤圓餅維持用標籤色。
+  - 「上升／下降」的綠紅（`AppColors.Positive`）—— 那是語意，不是裝飾。
+- 平台圓餅**改吃配色而不是品牌色**：LINE 綠、IG 粉彼此明度差太大，湊成一張圖本來就不成套；
+  平台名稱寫在圖例上，不靠顏色辨認。（聯絡人列上的平台標籤仍用品牌色，那是標籤不是圖表。）
+- ⚠️ **`AppColors.Chart` 必須寫成 `get()` 並讀 `chartPaletteState`（Compose `MutableState`）**，
+  不能改成普通 `var` —— 那樣換配色畫面不會重組。
 - ⚠️ **`MaterialTheme` 一定要帶 `colorScheme`。** 空的 `MaterialTheme{}` 會整包吃 Material3 預設紫：
   導覽列選中膠囊、Checkbox、TextButton 文字、輸入框游標全是紫的。
-  `appColorScheme()` 負責把 App 色票交給 Material3；導覽列的膠囊底色來自 `secondaryContainer`。
-- 新增主題只要往 `APP_THEMES` 加一筆，設定頁的色票列會自己長出來。
+  `appColorScheme()` 用的是**固定的**介面色，不跟著圖表配色變。
+- 新增一組配色只要往 `CHART_PALETTES` 加一筆，設定頁的色票列會自己長出來。
+  設定頁**只顯示顏色不寫名字** —— 「奶茶色系」這種名字對挑色沒有幫助。
 
 ### 圖表相關
 
@@ -462,6 +470,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.16 | 2026-09-09 | 主題改成只換「圖表配色」（5 組），App 介面的灰白藍還原不動 |
 | v3.15 | 2026-09-09 | 常用詞雜訊改成逐個勾選；刪除聯絡人時可一併加入永不記錄；非真人來源可「保留不處理」；逐筆刪紀錄補二次確認 |
 | v3.14 | 2026-09-09 | 可自選主題配色（5 組）；Material3 配色不再用預設紫；圖表統一用主題色；聯絡人詳情彈窗瘦身；拿掉永遠是空的平均時長欄位 |
 | v3.13 | 2026-09-09 | 兩張格子圖改名為「哪幾天在聊」「幾點在聊」，補尖峰時段、時軸與色階圖例 |
