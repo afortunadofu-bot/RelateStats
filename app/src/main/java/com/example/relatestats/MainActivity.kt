@@ -53,6 +53,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -123,7 +124,35 @@ import java.util.*
 // ==========================================
 // 1. 視覺設計系統
 // ==========================================
+/**
+ * 一組主視覺配色。
+ *
+ * 只有兩個顏色會跟著主題變：
+ *  · brand  —— 深色，用在填色按鈕、被選中的分頁、App 標記
+ *  · accent —— 彩色，用在連結、數字強調、所有圖表
+ * 標籤色（家人／同事…）與平台色（LINE 綠、IG 粉）不跟著變 ——
+ * 那些是「語意色」，換主題就認不出來了。
+ * 「上升／下降」的綠紅同理，屬於語意，不進主題。
+ */
+data class AppTheme(val id: String, val label: String, val brand: Color, val accent: Color)
+
+val APP_THEMES = listOf(
+    AppTheme("slate", "石墨藍", Color(0xFF0F172A), Color(0xFF2563EB)),
+    AppTheme("forest", "森林綠", Color(0xFF14261D), Color(0xFF0D9488)),
+    AppTheme("violet", "暮光紫", Color(0xFF1E1B4B), Color(0xFF6D28D9)),
+    AppTheme("ember", "赭石橙", Color(0xFF261806), Color(0xFFC2410C)),
+    AppTheme("rose", "玫瑰紅", Color(0xFF2A1018), Color(0xFFBE123C))
+)
+
 object AppColors {
+    /**
+     * ⚠️ 必須是 Compose 的 MutableState，不能是普通 var。
+     *    下面的顏色都寫成 get()，讀取時等於讀了這個 state ——
+     *    這樣換主題才會自動觸發重組。改成普通 var 的話畫面不會更新。
+     */
+    val themeState = mutableStateOf(APP_THEMES[0])
+    val theme: AppTheme get() = themeState.value
+
     // ── 底層 ──
     val Background = Color(0xFFF4F6F8)
     val Surface = Color(0xFFFFFFFF)
@@ -136,9 +165,10 @@ object AppColors {
     val TextSecondary = Color(0xFF64748B)
     val TextTertiary = Color(0xFF94A3B8)
 
-    // ── 強調 ──
-    val BrandPrimary = Color(0xFF0F172A)
-    val ActiveBlue = Color(0xFF2563EB)
+    // ── 強調（跟著主題走）──
+    val BrandPrimary: Color get() = theme.brand
+    val ActiveBlue: Color get() = theme.accent
+    /** ⚠️ 語意色：專門表示「上升／正向」。不要拿它來畫圖表，圖表一律用 ActiveBlue。 */
     val Positive = Color(0xFF059669)
 
     val WorkBg = Color(0xFFFEE2E2); val WorkText = Color(0xFFB91C1C)
@@ -773,6 +803,7 @@ object DataRepository {
 
     var isFirstLaunch = MutableStateFlow(true)
     var weekStartDay = MutableStateFlow(Calendar.MONDAY)
+    val themeId = MutableStateFlow(APP_THEMES[0].id)
 
     var autoBackupEnabled = MutableStateFlow(false)
     var autoBackupPassword = MutableStateFlow("")
@@ -906,6 +937,7 @@ object DataRepository {
         val p = prefs ?: return
         isFirstLaunch.value = p.getBoolean("is_first_launch", true)
         weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
+        applyTheme(p.getString("app_theme", null) ?: APP_THEMES[0].id)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
         autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
         lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
@@ -978,6 +1010,17 @@ object DataRepository {
     fun completeOnboarding() {
         isFirstLaunch.value = false
         prefs?.edit()?.putBoolean("is_first_launch", false)?.apply()
+    }
+
+    private fun applyTheme(id: String) {
+        val t = APP_THEMES.find { it.id == id } ?: APP_THEMES[0]
+        themeId.value = t.id
+        AppColors.themeState.value = t
+    }
+
+    fun setTheme(id: String) {
+        applyTheme(id)
+        prefs?.edit()?.putString("app_theme", themeId.value)?.apply()
     }
 
     fun setWeekStartDay(day: Int) {
@@ -2523,6 +2566,8 @@ class RelateViewModel : ViewModel() {
     val aliases = DataRepository.aliases
     val availableCategories = DataRepository.availableCategories
     val weekStartDay = DataRepository.weekStartDay
+    val themeId = DataRepository.themeId
+    fun setTheme(id: String) = DataRepository.setTheme(id)
 
     // 預設看「單週」。預設單日的話，只要今天還沒互動就整片空白，
     // 一開 App 什麼都看不到。
@@ -3618,13 +3663,35 @@ class MainActivity : ComponentActivity() {
         DataRepository.installCrashReporter(applicationContext)
         DataRepository.init(applicationContext)
         setContent {
-            MaterialTheme {
+            // ⚠️ 以前是空的 MaterialTheme{}，等於整包吃 Material3 預設的紫色配色 ——
+            //    導覽列選中的膠囊、Checkbox、TextButton 文字、輸入框游標全都是紫的，
+            //    跟 App 自己的藍完全對不起來。這就是「色調不統一」最大的來源。
+            MaterialTheme(colorScheme = appColorScheme()) {
                 Surface(color = AppColors.Background, modifier = Modifier.fillMaxSize()) {
                     RelateStatsApp()
                 }
             }
         }
     }
+}
+
+/** 把 App 自己的色票交給 Material3，內建元件才會跟著主題走 */
+@Composable
+fun appColorScheme(): ColorScheme {
+    val t = AppColors.theme
+    return lightColorScheme(
+        primary = t.accent, onPrimary = Color.White,
+        primaryContainer = t.accent.copy(alpha = 0.14f), onPrimaryContainer = t.accent,
+        secondary = t.brand, onSecondary = Color.White,
+        // secondaryContainer 就是導覽列選中膠囊的底色
+        secondaryContainer = t.accent.copy(alpha = 0.14f), onSecondaryContainer = t.accent,
+        tertiary = t.accent, onTertiary = Color.White,
+        background = AppColors.Background, onBackground = AppColors.TextPrimary,
+        surface = AppColors.Surface, onSurface = AppColors.TextPrimary,
+        surfaceVariant = AppColors.SurfaceAlt, onSurfaceVariant = AppColors.TextSecondary,
+        outline = AppColors.BorderStrong, outlineVariant = AppColors.BorderLight,
+        error = AppColors.WorkText, onError = Color.White
+    )
 }
 
 @Composable
@@ -5018,10 +5085,13 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
                             week.forEach { cellData ->
                                 val c = cellData?.count
                                 val on = cellData != null && picked?.dayStart == cellData.dayStart
+                                // ⚠️ 圖表一律用 ActiveBlue（主題色），不要用 Positive。
+                                //    Positive 是「上升／正向」的語意色，拿來畫格子會讓
+                                //    這張圖跟隔壁那張藍色的熱力圖看起來像兩個 App。
                                 val bg = when {
                                     cellData == null -> Color.Transparent
                                     c == 0 -> AppColors.BorderLight.copy(alpha = 0.5f)
-                                    else -> AppColors.Positive.copy(alpha = 0.25f + 0.75f * (c!!.toFloat() / max))
+                                    else -> AppColors.ActiveBlue.copy(alpha = 0.25f + 0.75f * (c!!.toFloat() / max))
                                 }
                                 Box(
                                     modifier = Modifier.size(cell)
@@ -5047,7 +5117,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
                 Text(
                     // 次數＋人數一起看才有意義：50 則全來自同一人 vs 來自 10 個人差很多
                     "${d.count} 次 · ${d.people} 人",
-                    fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.Positive, maxLines = 1, softWrap = false
+                    fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false
                 )
             }
         }
@@ -5061,7 +5131,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
             Spacer(modifier = Modifier.width(4.dp))
             listOf(0f, 0.3f, 0.55f, 0.8f, 1f).forEach { a ->
                 Box(modifier = Modifier.size(9.dp).background(
-                    if (a == 0f) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.Positive.copy(alpha = 0.25f + 0.75f * a),
+                    if (a == 0f) AppColors.BorderLight.copy(alpha = 0.5f) else AppColors.ActiveBlue.copy(alpha = 0.25f + 0.75f * a),
                     RoundedCornerShape(2.dp)
                 ))
                 Spacer(modifier = Modifier.width(2.dp))
@@ -5512,7 +5582,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                         // 對「這段期間發生什麼」沒有幫助，反而把卡片撐得又長又亂。
                         SectionHead("新出現的人") {
                             Text("${b.churn.newcomers.size} 位", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                color = AppColors.Positive, maxLines = 1, softWrap = false)
+                                color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
                             Spacer(modifier = Modifier.width(4.dp))
                             InfoDot(
                                 "怎麼算「新出現」",
@@ -5533,7 +5603,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                                     Row(
                                         modifier = Modifier.weight(1f)
                                             .clip(RoundedCornerShape(8.dp))
-                                            .background(AppColors.Positive.copy(alpha = 0.08f))
+                                            .background(AppColors.ActiveBlue.copy(alpha = 0.07f))
                                             .combinedClickable(
                                                 onClick = { tagTarget = nm },
                                                 onLongClick = {
@@ -6059,12 +6129,18 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
             }
             Spacer(modifier = Modifier.height(6.dp))
 
-            val labelW = 20.dp
+            // ⚠️ 星期標籤與「小時」都是 sp 的字，裝在寫死 dp 的框裡 ——
+            //    使用者把系統字體放大之後字比框大，兩邊都被切掉。
+            //    格高同時也是 Canvas 的列高，所以兩者必須用同一個數字，
+            //    直接讓它跟著 fontScale 長大。
+            val fs = LocalDensity.current.fontScale.coerceIn(1f, 2f)
+            val labelW = (23 * fs).dp
+            val rowH = (15 * fs).dp
             Row(modifier = Modifier.fillMaxWidth()) {
                 // 星期標籤另外畫，格子本體整個交給一張 Canvas
                 Column {
                     days.forEach {
-                        Box(modifier = Modifier.width(labelW).height(15.dp), contentAlignment = Alignment.CenterStart) {
+                        Box(modifier = Modifier.width(labelW).height(rowH), contentAlignment = Alignment.CenterStart) {
                             Text(it, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                         }
                     }
@@ -6074,7 +6150,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                 //    捲到這張卡時要一次組出近千個 modifier 節點 —— 明顯的卡頓來源。
                 //    改成一張 Canvas 畫完、一個 pointerInput 做命中測試，節點數從近千降到個位數。
                 Canvas(
-                    modifier = Modifier.weight(1f).height(15.dp * 7)
+                    modifier = Modifier.weight(1f).height(rowH * 7)
                         .pointerInput(rowOrder) {
                             detectTapGestures { offset ->
                                 val cw = size.width / 24f
@@ -6117,7 +6193,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
             // 左邊的星期標籤欄本來就是空的，把「小時」兩個字放進去。
             Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.width(labelW)) {
-                    Text("小時", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                    Text("時", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                 }
                 Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceBetween) {
                     listOf("0", "6", "12", "18", "23").forEach {
@@ -6128,7 +6204,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
             // 色階圖例：跟「哪幾天在聊」那張同一個寫法，兩張圖才讀得起來像同一套
             Spacer(modifier = Modifier.height(6.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("每一格＝一小時", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                Text("左邊是星期　·　橫向是 0–23 時", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("少", fontSize = T.Micro, color = AppColors.TextTertiary)
                     Spacer(modifier = Modifier.width(4.dp))
@@ -6225,15 +6301,17 @@ fun TopWordsCard(wordFreq: Map<String, Int>) {
 /** 詳情頁的小標 */
 @Composable
 private fun DetailHead(text: String) {
+    // ⚠️ 這個彈窗有五、六個小標與十幾列，每列多 2dp 就是整整多一段。
+    //    間距一律走小數值，密度靠字重與顏色撐，不要靠留白。
     Text(text, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
-        modifier = Modifier.padding(top = 14.dp, bottom = 6.dp), maxLines = 1, softWrap = false)
+        modifier = Modifier.padding(top = 10.dp, bottom = 3.dp), maxLines = 1, softWrap = false)
 }
 
 /** 詳情頁的一列「標題 — 值」 */
 @Composable
 private fun DetailLine(label: String, value: String, accent: Color = AppColors.TextPrimary) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
         horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, fontSize = T.Body, color = AppColors.TextSecondary, maxLines = 1,
@@ -6271,20 +6349,20 @@ fun ContactDetailDialog(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(stat.unifiedName, fontWeight = FontWeight.Black, fontSize = 18.sp, lineHeight = 24.sp,
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(stat.unifiedName, fontWeight = FontWeight.Black, fontSize = 18.sp, lineHeight = 22.sp,
                     color = AppColors.TextPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (insight.ready && insight.rank > 0) {
                     Text(
                         "本期第 " + insight.rank + " 名／共 " + insight.totalContacts + " 位 · 佔你全部訊息 " + insight.sharePct + "%",
                         fontSize = T.Label, color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 4.dp)
+                        modifier = Modifier.padding(top = 2.dp)
                     )
                 }
             }
         },
         text = {
-            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState())) {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                 if (!insight.ready) {
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = AppColors.ActiveBlue)
@@ -6295,10 +6373,10 @@ fun ContactDetailDialog(
                 }
 
                 if (insight.missedCalls > 0) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp).background(AppColors.WorkBg, RoundedCornerShape(8.dp)).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("本期有 " + insight.missedCalls + " 通未接來電", color = AppColors.WorkText, fontSize = T.Body, fontWeight = FontWeight.Bold)
+                    Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).background(AppColors.WorkBg, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("本期有 " + insight.missedCalls + " 通未接來電", color = AppColors.WorkText, fontSize = T.Label, fontWeight = FontWeight.Bold)
                     }
                 }
 
@@ -6311,7 +6389,7 @@ fun ContactDetailDialog(
                 Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     StatPair("平均每則", insight.avgWords.toString() + " 字", "訊息長度", Modifier.weight(1f))
                     StatPair("通話", insight.callCount.toString() + " 通",
-                        if (insight.callSeconds > 0) formatDuration(insight.callSeconds) else "無秒數資料", Modifier.weight(1f))
+                        if (insight.callSeconds > 0) formatDuration(insight.callSeconds) else null, Modifier.weight(1f))
                 }
 
                 // ── 關係節奏 ──
@@ -8270,11 +8348,11 @@ fun CallsCard(calls: CallSummary) {
         Spacer(modifier = Modifier.height(6.dp))
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatPair("未接", "${calls.missed} 通", "未接率 ${calls.missRate}%", Modifier.weight(1f))
-            // 沒抓到秒數就要說清楚，顯示 0s 會讓人以為是算錯
+            // ⚠️ 沒有秒數時**整格拿掉**，不要留一個「—　需匯入通話紀錄」的空欄位。
+            //    永遠是空的欄位只會佔位置又讓人以為壞了；
+            //    「為什麼沒有時長」的說明已經在標題旁的 ⓘ 裡了。
             if (calls.hasDuration) {
                 StatPair("平均時長", formatDuration(calls.avgSeconds), "依 ${calls.timed} 通有秒數的通話", Modifier.weight(1f))
-            } else {
-                StatPair("平均時長", "—", "需匯入通話紀錄", Modifier.weight(1f))
             }
         }
 
@@ -8460,7 +8538,7 @@ fun SettingsSection(title: String) {
         fontWeight = FontWeight.Black,
         color = AppColors.TextTertiary,
         letterSpacing = 1.2.sp,
-        modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 2.dp),
+        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
         maxLines = 1, softWrap = false
     )
 }
@@ -9098,6 +9176,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     val (showGuideDialog, setShowGuideDialog) = remember { mutableStateOf(false) }
 
     val weekStartDay by viewModel.weekStartDay.collectAsState()
+    val themeId by viewModel.themeId.collectAsState()
 
     val records by viewModel.interactions.collectAsState()
     val availableCats by viewModel.availableCategories.collectAsState()
@@ -9178,8 +9257,11 @@ fun SettingsView(viewModel: RelateViewModel) {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
+            // ⚠️ 標題與第一個小標之間本來疊了三層留白：
+            //    標題 bottom 6 + LazyColumn spacedBy 8 + SettingsSection top 12 = 26dp。
+            //    標題自己不再帶下留白，小標的上留白也收到 8。
             Text("設定", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
-                color = AppColors.TextPrimary, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
+                color = AppColors.TextPrimary, modifier = Modifier.padding(top = 4.dp))
         }
 
         // ── 服務狀態：這是全 App 最重要的一張卡，關掉就什麼都不會記錄 ──
@@ -9213,6 +9295,38 @@ fun SettingsView(viewModel: RelateViewModel) {
         item { SettingsSection("偏好") }
         item {
             SettingsCard {
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Text("主題配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                    Text("影響按鈕、連結與所有圖表；標籤色與平台色不受影響",
+                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        APP_THEMES.forEach { t ->
+                            val on = themeId == t.id
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                                    .clickable { viewModel.setTheme(t.id) }
+                                    .padding(horizontal = 4.dp, vertical = 4.dp)
+                            ) {
+                                // 一顆色票同時秀出 brand 與 accent —— 只給一個顏色看不出換了什麼
+                                Box(
+                                    modifier = Modifier.size(30.dp).clip(CircleShape).background(t.brand)
+                                        .then(if (on) Modifier.border(2.dp, t.accent, CircleShape) else Modifier),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(modifier = Modifier.size(13.dp).clip(CircleShape).background(t.accent))
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(t.label, fontSize = T.Micro,
+                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (on) AppColors.TextPrimary else AppColors.TextTertiary,
+                                    maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+                SettingsDivider()
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
