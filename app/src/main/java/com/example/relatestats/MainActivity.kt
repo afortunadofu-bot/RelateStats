@@ -138,37 +138,87 @@ import java.util.*
  *  · 標籤色（家人／同事…）—— 使用者自己挑的，覆蓋掉等於把設定弄丟
  *  · 「上升／下降」的綠紅 —— 那是語意，不是裝飾
  */
-data class ChartPalette(val id: String, val colors: List<Color>) {
+data class ChartPalette(
+    val id: String,
+    /** 圖表用色。colors[0] 同時是單色圖表（長條、色階格子）的主色，必須夠深。 */
+    val colors: List<Color>,
+    /**
+     * 標籤用色。
+     * ⚠️ 跟 colors 分開列，不能直接共用 —— 標籤是「淺底 + 深字」，
+     *    圖表色裡那些很淺的（例如 #CEDCE7）拿來當字色根本看不見。
+     *    這裡每一個都必須是「放在白底上讀得清楚」的深度。
+     *    底色不另外列，一律由字色壓到 15% 透明度得出，才不會有色偏。
+     */
+    val tags: List<Color>
+) {
     val primary: Color get() = colors[0]
     fun at(i: Int): Color = colors[((i % colors.size) + colors.size) % colors.size]
+    fun tag(i: Int): Color = tags[((i % tags.size) + tags.size) % tags.size]
+    fun tagBg(i: Int): Color = tag(i).copy(alpha = 0.15f)
 }
 
+/**
+ * 圖表與標籤的配色。
+ *
+ * ⚠️ 這個只換**資料的顏色**（圖表切片、長條、色階、標籤），不換 App 介面。
+ *    介面的灰白藍是骨架 —— 背景、卡片、按鈕、連結。換掉就變成另一個 App。
+ *
+ * ⚠️ 第一組必須是 App 標準色的家族。預設值不該是一個「風格選擇」，
+ *    它要跟 App 本身看起來是同一套東西。
+ *
+ * 排列順序也有講究：相鄰的兩個顏色要看得出差別。
+ * 同色系配色如果照明度排，圓餅圖上相鄰的兩塊會糊在一起，
+ * 所以一律深、淺、深、淺交錯放。
+ */
 val CHART_PALETTES = listOf(
-    // 預設：原本的藍
-    ChartPalette("default", listOf(
-        Color(0xFF2563EB), Color(0xFF0EA5E9), Color(0xFF14B8A6),
-        Color(0xFF6366F1), Color(0xFF8B5CF6), Color(0xFF94A3B8)
-    )),
-    // 淺色明亮
-    ChartPalette("bright", listOf(
-        Color(0xFF60A5FA), Color(0xFFFBBF24), Color(0xFF34D399),
-        Color(0xFFF472B6), Color(0xFFA78BFA), Color(0xFFFB923C)
-    )),
-    // 深色質感
-    ChartPalette("deep", listOf(
-        Color(0xFF1F3A5F), Color(0xFF3E5C76), Color(0xFF5C7457),
-        Color(0xFF7A5C48), Color(0xFF6B4A5C), Color(0xFF47555E)
-    )),
-    // 奶茶
-    ChartPalette("milktea", listOf(
-        Color(0xFFB08968), Color(0xFF9C6644), Color(0xFFDDB892),
-        Color(0xFF7F5539), Color(0xFFD4A276), Color(0xFFE6CCB2)
-    )),
-    // 海洋
-    ChartPalette("ocean", listOf(
-        Color(0xFF023E8A), Color(0xFF0077B6), Color(0xFF0096C7),
-        Color(0xFF00B4D8), Color(0xFF48CAE4), Color(0xFF90E0EF)
-    ))
+    // 1. App 標準色（藍／墨）—— 預設
+    ChartPalette(
+        "app",
+        listOf(
+            Color(0xFF2563EB), Color(0xFF0F172A), Color(0xFF60A5FA),
+            Color(0xFF475569), Color(0xFF93C5FD), Color(0xFF1E3A8A)
+        ),
+        listOf(
+            Color(0xFF1D4ED8), Color(0xFF0F172A), Color(0xFF0EA5E9), Color(0xFF475569),
+            Color(0xFF1E3A8A), Color(0xFF3B82F6), Color(0xFF64748B), Color(0xFF0369A1)
+        )
+    ),
+    // 2. 鼠尾草綠
+    ChartPalette(
+        "sage",
+        listOf(
+            Color(0xFF33513F), Color(0xFFA9C8B6), Color(0xFF6B8F7D),
+            Color(0xFFC0D8CD), Color(0xFF4F7A63), Color(0xFF8FB5A0)
+        ),
+        listOf(
+            Color(0xFF2F4A3A), Color(0xFF4F7A63), Color(0xFF6B8F7D), Color(0xFF3F6B55),
+            Color(0xFF567D6A), Color(0xFF25603F), Color(0xFF7E9C8B), Color(0xFF44705C)
+        )
+    ),
+    // 3. 乾燥玫瑰／芥末
+    ChartPalette(
+        "rose",
+        listOf(
+            Color(0xFF7B5A51), Color(0xFFD9B8A5), Color(0xFFAB7934),
+            Color(0xFFCCA79F), Color(0xFFB57261), Color(0xFFBC8D73)
+        ),
+        listOf(
+            Color(0xFF7B5A51), Color(0xFFB57261), Color(0xFFAB7934), Color(0xFF96604F),
+            Color(0xFF8C6A4F), Color(0xFFC08552), Color(0xFF6E4B44), Color(0xFFA8756A)
+        )
+    ),
+    // 4. 藍灰
+    ChartPalette(
+        "mist",
+        listOf(
+            Color(0xFF56686A), Color(0xFFCEDCE7), Color(0xFF75828A),
+            Color(0xFFC6D2D2), Color(0xFFA0B2BC), Color(0xFF8FA3A8)
+        ),
+        listOf(
+            Color(0xFF465A5E), Color(0xFF56686A), Color(0xFF75828A), Color(0xFF5A7383),
+            Color(0xFF6B8093), Color(0xFF3E525A), Color(0xFF7E8E96), Color(0xFF4A6270)
+        )
+    )
 )
 
 object AppColors {
@@ -214,17 +264,17 @@ object AppColors {
         "電話" to Color(0xFF4ADE80)
     )
 
-    // 標籤可挑選的配色（文字色, 底色）
-    val CategoryPalette: List<Pair<Color, Color>> get() = listOf(
-        FamilyText to FamilyBg, PartnerText to PartnerBg, FriendText to FriendBg,
-        WorkText to WorkBg, GroupText to GroupBg, OtherText to OtherBg
-    ) + CustomPalette
+// 標籤可挑選的配色。⚠️ 直接來自目前的圖表配色 ——
+    // 標籤與圖表是同一批資料的兩種呈現，配色分家會很怪。
+    val CategoryPalette: List<Pair<Color, Color>> get() =
+        Chart.tags.indices.map { Chart.tag(it) to Chart.tagBg(it) }
 
-    val CustomPalette = listOf(
-        Pair(Color(0xFF9333EA), Color(0xFFF3E8FF)), Pair(Color(0xFFC026D3), Color(0xFFFAE8FF)),
-        Pair(Color(0xFFE11D48), Color(0xFFFFE4E6)), Pair(Color(0xFF0D9488), Color(0xFFCCFBF1)),
-        Pair(Color(0xFF0284C7), Color(0xFFE0F2FE)), Pair(Color(0xFF4F46E5), Color(0xFFE0E7FF)),
-        Pair(Color(0xFF059669), Color(0xFFD1FAE5))
+    /** 舊版寫死的標籤色，只用於把舊資料轉成索引 */
+    val LegacyTagColors = listOf(
+        Color(0xFF1D4ED8), Color(0xFFBE185D), Color(0xFF047857), Color(0xFFB91C1C),
+        Color(0xFFB45309), Color(0xFF4B5563), Color(0xFF9333EA), Color(0xFFC026D3),
+        Color(0xFFE11D48), Color(0xFF0D9488), Color(0xFF0284C7), Color(0xFF4F46E5),
+        Color(0xFF059669)
     )
 }
 
@@ -246,18 +296,28 @@ object D {
     val RowH = 40.dp       // 表格列高
 }
 
+/**
+ * 標籤。
+ *
+ * ⚠️ colorInt / bgColorInt 有兩種意義：
+ *   · 0..15  → 配色裡的第幾個顏色（跟著「圖表配色」一起變）
+ *   · 其他    → 舊資料留下的絕對色值，照原樣用
+ * 真正的 ARGB 一定帶 alpha（0xFF……），轉成 Int 是負數，不可能落在 0..15，
+ * 所以兩者不會撞在一起。舊資料會在 loadData 時一次性轉成索引。
+ */
 data class ContactCategory(val id: String, val label: String, val colorInt: Int, val bgColorInt: Int) {
-    val color: Color get() = Color(colorInt)
-    val bgColor: Color get() = Color(bgColorInt)
+    val color: Color get() = if (colorInt in 0..15) AppColors.Chart.tag(colorInt) else Color(colorInt)
+    val bgColor: Color get() = if (bgColorInt in 0..15) AppColors.Chart.tagBg(bgColorInt) else Color(bgColorInt)
     fun toCsvString() = listOf(id, label, colorInt.toString(), bgColorInt.toString()).joinToString("|cat|")
     companion object {
-        val WORK = ContactCategory("WORK", "工作", AppColors.WorkText.toArgb(), AppColors.WorkBg.toArgb())
-        val FAMILY = ContactCategory("FAMILY", "家人", AppColors.FamilyText.toArgb(), AppColors.FamilyBg.toArgb())
-        val FRIEND = ContactCategory("FRIEND", "朋友", AppColors.FriendText.toArgb(), AppColors.FriendBg.toArgb())
-        val OTHER = ContactCategory("OTHER", "未分類", AppColors.OtherText.toArgb(), AppColors.OtherBg.toArgb())
+// 數字是配色索引，不是色值 —— 換配色時這些標籤會跟著換色
+        val WORK = ContactCategory("WORK", "工作", 3, 3)
+        val FAMILY = ContactCategory("FAMILY", "家人", 0, 0)
+        val FRIEND = ContactCategory("FRIEND", "朋友", 2, 2)
+        val OTHER = ContactCategory("OTHER", "未分類", 6, 6)
         // IG 讚／追蹤者／串文推播等非真人通知統一歸到這裡，排行預設不顯示
-        val SYSTEM = ContactCategory("SYSTEM", "系統通知", AppColors.GroupText.toArgb(), AppColors.GroupBg.toArgb())
-        val PARTNER = ContactCategory("PARTNER", "伴侶", AppColors.PartnerText.toArgb(), AppColors.PartnerBg.toArgb())
+        val SYSTEM = ContactCategory("SYSTEM", "系統通知", 7, 7)
+        val PARTNER = ContactCategory("PARTNER", "伴侶", 1, 1)
 
         // 首次啟動的預設清單。名稱與顏色之後都可以在「標籤管理」裡改，
         // 但 OTHER / SYSTEM 這兩個 id 程式內部會用到，不可刪除。
@@ -1017,6 +1077,11 @@ object DataRepository {
             }
         }.getOrDefault(ContactCategory.seedCategories)
 
+        // ⚠️ 必須在 _availableCategories 讀完之後才跑。
+        //    放在前面的話會對著舊值（或空清單）做轉換，然後把旗標設成已完成 ——
+        //    既沒轉到東西，之後也不會再跑。
+        migrateTagColorsToIndex(p)
+
         _wordFreq.value = runCatching {
             (p.getStringSet("word_freq", emptySet()) ?: emptySet()).mapNotNull { line ->
                 val i = line.lastIndexOf("|w|")
@@ -1040,6 +1105,28 @@ object DataRepository {
     fun completeOnboarding() {
         isFirstLaunch.value = false
         prefs?.edit()?.putBoolean("is_first_launch", false)?.apply()
+    }
+
+    /**
+     * 把舊資料的標籤色（絕對 ARGB）轉成配色索引，讓它們跟著配色走。
+     *
+     * ⚠️ 只跑一次，用旗標擋住。跑第二次沒有壞處（索引不在 LegacyTagColors 裡就不動），
+     * 但每次啟動都掃一遍沒有意義。
+     * ⚠️ 對不上舊色票的（使用者從別版本帶過來的怪色）保留原樣，
+     * 不要硬塞一個索引 —— 那會讓他挑好的顏色無聲無息被換掉。
+     */
+    private fun migrateTagColorsToIndex(p: SharedPreferences) {
+        if (p.getBoolean("tag_palette_v317_done", false)) return
+        val legacy = AppColors.LegacyTagColors.map { it.toArgb() }
+        val migrated = _availableCategories.value.map { c ->
+            val idx = legacy.indexOf(c.colorInt)
+            if (c.colorInt in 0..15 || idx < 0) c else c.copy(colorInt = idx, bgColorInt = idx)
+        }
+        if (migrated != _availableCategories.value) {
+            _availableCategories.value = migrated
+            saveData(immediate = true)
+        }
+        p.edit().putBoolean("tag_palette_v317_done", true).apply()
     }
 
     private fun applyChartPalette(id: String) {
@@ -3590,8 +3677,9 @@ class RelateViewModel : ViewModel() {
     }
 
     fun addNewCategory(label: String, targetUnifiedName: String? = null) {
-        val randomPair = AppColors.CustomPalette.random()
-        val newCat = ContactCategory(id = UUID.randomUUID().toString(), label = label, colorInt = randomPair.first.toArgb(), bgColorInt = randomPair.second.toArgb())
+        // 存的是配色索引，不是色值 —— 換配色時這個新標籤才會跟著變
+        val slot = AppColors.Chart.tags.indices.random()
+        val newCat = ContactCategory(id = UUID.randomUUID().toString(), label = label, colorInt = slot, bgColorInt = slot)
         DataRepository.addCustomCategory(newCat)
         if (targetUnifiedName != null) DataRepository.updateCategory(targetUnifiedName, newCat.id)
     }
@@ -8320,11 +8408,11 @@ fun CategoryManagerDialog(viewModel: RelateViewModel, categories: List<ContactCa
 /** 標籤的新增／編輯：名稱 + 配色 */
 @Composable
 fun CategoryEditDialog(initial: ContactCategory?, onConfirm: (String, Int, Int) -> Unit, onDismiss: () -> Unit) {
-    val palette = remember { AppColors.CategoryPalette }
+    // ⚠️ 不要 remember 住色票：換配色之後這裡要跟著變。
+    val palette = AppColors.CategoryPalette
     var label by remember { mutableStateOf(initial?.label ?: "") }
-    var pick by remember {
-        mutableStateOf(palette.indexOfFirst { it.first.toArgb() == initial?.colorInt }.takeIf { it >= 0 } ?: 0)
-    }
+    // 存的是「配色的第幾個顏色」而不是色值，所以換配色時標籤會一起換
+    var pick by remember { mutableStateOf(initial?.colorInt?.takeIf { it in palette.indices } ?: 0) }
 
     AlertDialog(
         containerColor = AppColors.Surface,
@@ -8342,10 +8430,10 @@ fun CategoryEditDialog(initial: ContactCategory?, onConfirm: (String, Int, Int) 
                 Spacer(modifier = Modifier.height(12.dp))
                 Text("顏色", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary)
                 Spacer(modifier = Modifier.height(6.dp))
-                palette.chunked(6).forEachIndexed { rowIdx, row ->
+                palette.chunked(4).forEachIndexed { rowIdx, row ->
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         row.forEachIndexed { colIdx, pair ->
-                            val gi = rowIdx * 6 + colIdx
+                            val gi = rowIdx * 4 + colIdx
                             val on = gi == pick
                             Box(
                                 modifier = Modifier.weight(1f).aspectRatio(1f)
@@ -8357,14 +8445,14 @@ fun CategoryEditDialog(initial: ContactCategory?, onConfirm: (String, Int, Int) 
                                 Text("A", color = pair.first, fontSize = 13.sp, fontWeight = FontWeight.Black)
                             }
                         }
-                        repeat(6 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
+                        repeat(4 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
                     }
                 }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(label, palette[pick].first.toArgb(), palette[pick].second.toArgb()) },
+                onClick = { onConfirm(label, pick, pick) },
                 enabled = label.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary)
             ) { Text("儲存", maxLines = 1) }
@@ -9612,35 +9700,31 @@ fun SettingsView(viewModel: RelateViewModel) {
         item {
             SettingsCard {
                 Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    Text("圖表配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                    Text("只影響圖表；App 介面、標籤色與平台色不變",
-                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // ⚠️ 每一列就是那組配色本身，不寫名字 ——
-                    //    「奶茶色系」這種名字對挑色沒有幫助，直接看顏色才準。
-                    CHART_PALETTES.forEach { p ->
-                        val on = chartPaletteId == p.id
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (on) AppColors.SurfaceAlt else Color.Transparent)
-                                .border(
-                                    if (on) 1.5.dp else 1.dp,
-                                    if (on) AppColors.BrandPrimary else AppColors.BorderLight,
-                                    RoundedCornerShape(10.dp)
-                                )
-                                .clickable { viewModel.setChartPalette(p.id) }
-                                .padding(horizontal = 10.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("圖表與標籤配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                    Text("App 介面維持原本的配色", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // ⚠️ 一組配色壓成一條色帶，四組並排在同一列。
+                    //    上一版一組佔一整列、每個色塊 20dp，光這個設定就吃掉半個螢幕 ——
+                    //    這只是個偏好設定，不該比服務狀態還顯眼。
+                    //    也不寫名字：「奶茶色系」這種字對挑色沒有幫助，看顏色才準。
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CHART_PALETTES.forEach { p ->
+                            val on = chartPaletteId == p.id
+                            Row(
+                                modifier = Modifier.weight(1f).height(30.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(
+                                        if (on) 2.dp else 1.dp,
+                                        if (on) AppColors.BrandPrimary else AppColors.BorderLight,
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable { viewModel.setChartPalette(p.id) }
+                                    .padding(3.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                            ) {
                                 p.colors.forEach { c ->
-                                    Box(modifier = Modifier.size(20.dp).clip(RoundedCornerShape(5.dp)).background(c))
+                                    Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c))
                                 }
-                            }
-                            if (on) {
-                                Text("✓", fontSize = T.Title, fontWeight = FontWeight.Black,
-                                    color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
                             }
                         }
                     }
