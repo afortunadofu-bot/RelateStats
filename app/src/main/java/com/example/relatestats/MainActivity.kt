@@ -963,6 +963,7 @@ object DataRepository {
 
         _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
         _blockedNames.value = runCatching { p.getStringSet("blocked_names", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
+        _junkIgnored.value = runCatching { p.getStringSet("junk_ignored", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
         _sectionOrder.value = runCatching {
             p.getString("section_order", "")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
         }.getOrDefault(emptyList())
@@ -1414,6 +1415,19 @@ object DataRepository {
             .toList().sortedByDescending { it.second }
     }
 
+    /** 只清掉指定的詞。⚠️ 使用者一定要能挑，整批清掉是不可復原的。 */
+    fun purgeWords(words: Set<String>): Int {
+        if (words.isEmpty()) return 0
+        val cur = _wordFreq.value
+        val kept = cur.filterKeys { it !in words }
+        val removed = cur.size - kept.size
+        if (removed > 0) {
+            _wordFreq.value = kept
+            saveData(immediate = true)
+        }
+        return removed
+    }
+
     fun purgeJunkWords(): Int {
         val cur = _wordFreq.value
         if (cur.isEmpty()) return 0
@@ -1555,6 +1569,28 @@ object DataRepository {
         saveData(immediate = true)
     }
 
+    /**
+     * 「這些不是垃圾，別再問我」的名單。
+     *
+     * ⚠️ 沒有這個的話使用者會被卡死：規則判定某個名字是非真人，
+     *    但它其實是真人（群組名撞到關鍵字就會發生）——
+     *    使用者既不想標成系統通知、也不想刪，於是橫幅每次開 App 都跳出來。
+     *    這是第三個出口：記住它是真人，不再列入提醒。
+     */
+    private val _junkIgnored = MutableStateFlow<Set<String>>(emptySet())
+    val junkIgnored: StateFlow<Set<String>> = _junkIgnored
+
+    fun ignoreJunk(names: Collection<String>) {
+        if (names.isEmpty()) return
+        _junkIgnored.update { it + names }
+        prefs?.edit()?.putStringSet("junk_ignored", _junkIgnored.value)?.apply()
+    }
+
+    fun unignoreJunk(name: String) {
+        _junkIgnored.update { it - name }
+        prefs?.edit()?.putStringSet("junk_ignored", _junkIgnored.value)?.apply()
+    }
+
     private val _blockedNames = MutableStateFlow<Set<String>>(emptySet())
     val blockedNames: StateFlow<Set<String>> = _blockedNames
 
@@ -1619,7 +1655,11 @@ object DataRepository {
     fun listJunkContacts(): List<String> =
         _interactions.value.map { _aliases.value[it.rawSenderName] ?: it.rawSenderName }
             .distinct()
-            .filter { isNonPersonContact(it) && _categories.value[it] != ContactCategory.SYSTEM.id }
+            .filter {
+                isNonPersonContact(it) &&
+                    _categories.value[it] != ContactCategory.SYSTEM.id &&
+                    it !in _junkIgnored.value
+            }
 
     /** 預覽「整理系統通知」會影響哪些聯絡人（尚未歸類的） */
     fun previewRetagTargets(): List<String> =
@@ -3550,6 +3590,7 @@ class RelateViewModel : ViewModel() {
     fun clearWordFreq() = DataRepository.clearWordFreq()
     fun purgeJunkWords() = DataRepository.purgeJunkWords()
     fun previewJunkWords() = DataRepository.previewJunkWords()
+    fun purgeWords(words: Set<String>) = DataRepository.purgeWords(words)
     val lastWordPurge = DataRepository.lastWordPurge
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
     fun previewRetagTargets() = DataRepository.previewRetagTargets()
@@ -3586,6 +3627,9 @@ class RelateViewModel : ViewModel() {
     fun purgeTrash(f: String) = DataRepository.purgeTrash(f)
     fun peekTrash(f: String) = DataRepository.peekTrash(f)
     fun listJunkContacts() = DataRepository.listJunkContacts()
+    val junkIgnored = DataRepository.junkIgnored
+    fun ignoreJunk(names: Collection<String>) = DataRepository.ignoreJunk(names)
+    fun unignoreJunk(name: String) = DataRepository.unignoreJunk(name)
     val undoAvailable = DataRepository.undoAvailable
     val undoLabel = DataRepository.undoLabel
     fun undoLastDestructive() = DataRepository.undoLastDestructive()
@@ -6915,6 +6959,112 @@ fun LeaderboardView(viewModel: RelateViewModel) {
     }
 }
 
+/**
+ * 常用詞雜訊清理：逐個勾選。
+ *
+ * ⚠️ 不要做成「全部清掉」的一鍵動作。判定是靠規則與人名比對，一定會有誤判，
+ *    而且清掉之後累積的次數就回不來了。預設全勾，使用者只要取消想留的那幾個。
+ */
+@Composable
+fun WordPurgeDialog(
+    words: List<Pair<String, Int>>,
+    onConfirm: (Set<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val unchecked = remember { mutableStateListOf<String>() }
+    var query by remember { mutableStateOf("") }
+    val shown = remember(words, query) {
+        if (query.isBlank()) words else words.filter { it.first.contains(query, true) }
+    }
+    val picked = words.map { it.first }.filter { it !in unchecked }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("清掉常用詞裡的雜訊", fontWeight = FontWeight.Black, fontSize = 18.sp,
+                    letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
+                Text("系統自動產生的字，以及被切碎的人名。取消勾選的會保留。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp)
+            }
+        },
+        text = {
+            Column {
+                if (words.isEmpty()) {
+                    Text("目前沒有偵測到需要清掉的詞。", fontSize = T.Body, color = AppColors.TextSecondary)
+                    return@Column
+                }
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it },
+                    placeholder = { Text("搜尋詞…", fontSize = T.Label) },
+                    singleLine = true,
+                    textStyle = TextStyle(fontSize = T.Body),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.BrandPrimary,
+                        unfocusedBorderColor = AppColors.BorderLight
+                    )
+                )
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("已勾選 ${picked.size} / ${words.size}", fontSize = T.Label,
+                        fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
+                        modifier = Modifier.weight(1f), maxLines = 1, softWrap = false)
+                    Text(if (unchecked.isEmpty()) "全部不選" else "全選",
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                if (unchecked.isEmpty()) { unchecked.clear(); unchecked.addAll(words.map { it.first }) }
+                                else unchecked.clear()
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp))
+                }
+                if (shown.isEmpty()) {
+                    Text("找不到「$query」", fontSize = T.Body, color = AppColors.TextSecondary,
+                        modifier = Modifier.padding(vertical = 16.dp))
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                        items(shown, key = { it.first }) { (w, n) ->
+                            val on = w !in unchecked
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable { if (on) unchecked.add(w) else unchecked.remove(w) }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = on, onCheckedChange = {
+                                    if (on) unchecked.add(w) else unchecked.remove(w)
+                                })
+                                Text(w, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                    color = AppColors.TextPrimary, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Text("$n 次", fontSize = T.Micro, color = AppColors.TextTertiary,
+                                    maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+                Text("勾選的會從常用詞統計中移除，其他詞的累積不受影響。此操作無法復原。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 8.dp))
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(picked.toSet()) },
+                enabled = picked.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("清掉 ${picked.size} 個", fontSize = T.Label, maxLines = 1, softWrap = false) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) }
+        }
+    )
+}
+
 /** 逐筆確認畫面上的一列 */
 data class JunkEntry(
     val name: String,
@@ -6943,6 +7093,8 @@ fun JunkReviewDialog(
     aliases: Map<String, String>,
     onApply: (List<String>) -> Unit,
     onDelete: (List<String>) -> Unit,
+    /** 記住這些其實是真人，之後不再列入提醒 */
+    onKeep: (List<String>) -> Unit,
     onDismiss: () -> Unit
 ) {
     val dateFmt = remember { SimpleDateFormat("M/d HH:mm", Locale.US) }
@@ -7062,14 +7214,28 @@ fun JunkReviewDialog(
                         }
                     }
                 }
-                Text("標為系統通知：紀錄留著但統計不算，也不會再出現在清單上。\n直接刪除：對方下次推播還是會重建。",
+                Text(
+                    "標為系統通知：紀錄留著但統計不算，也不會再出現在清單上。\n" +
+                        "直接刪除：對方下次推播還是會重建。\n" +
+                        "取消勾選的會被記成真人，之後不再列入提醒。",
                     fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
-                    modifier = Modifier.padding(top = 8.dp))
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                // ⚠️ 一定要有「什麼都不做」這個出口。
+                //    不標成系統通知、也不刪，橫幅就會每次開 App 都跳出來，
+                //    使用者等於被逼著在兩個不想要的選項裡挑一個。
+                Text("這些都是真人，全部保留不再提醒",
+                    fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                    modifier = Modifier.padding(top = 8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onKeep(names) }
+                        .padding(vertical = 4.dp))
             }
         },
         confirmButton = {
             Button(
-                onClick = { onApply(picked) },
+                // 取消勾選的＝使用者判定為真人，順手記起來，下次不要再問
+                onClick = { if (unchecked.isNotEmpty()) onKeep(unchecked.toList()); onApply(picked) },
                 enabled = picked.isNotEmpty(),
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
                 shape = RoundedCornerShape(10.dp)
@@ -7077,7 +7243,10 @@ fun JunkReviewDialog(
         },
         dismissButton = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { onDelete(picked) }, enabled = picked.isNotEmpty()) {
+                TextButton(
+                    onClick = { if (unchecked.isNotEmpty()) onKeep(unchecked.toList()); onDelete(picked) },
+                    enabled = picked.isNotEmpty()
+                ) {
                     Text("刪除", color = AppColors.WorkText, fontSize = T.Label, maxLines = 1, softWrap = false)
                 }
                 TextButton(onClick = onDismiss) {
@@ -7223,11 +7392,11 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         onDismiss = { junkDismissed = true }
                     ) {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            NoticeAction("標為系統通知", AppColors.BrandPrimary, filled = true) {
+                            NoticeAction("逐筆確認", AppColors.BrandPrimary, filled = true) { showJunkReview = true }
+                            NoticeAction("標為系統通知", AppColors.TextSecondary) {
                                 viewModel.setCategories(junkContacts, ContactCategory.SYSTEM.id)
                                 Toast.makeText(context, "已標為系統通知，統計不再算入", Toast.LENGTH_SHORT).show()
                             }
-                            NoticeAction("逐筆確認", AppColors.TextSecondary) { showJunkReview = true }
                         }
                         // 「直接刪除」刻意收進逐筆確認裡：刪了對方再推播就會重建，
                         // 放在最外層等於鼓勵使用者選錯的那一個。
@@ -7453,17 +7622,46 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     }
 
     pendingDelete?.let { targets ->
+        // ⚠️ 刪除本身擋不住對方再傳訊息 —— 紀錄會被重新建立，使用者以為沒刪掉。
+        //    所以「永不記錄」要在刪除的當下就能勾，不要等它復活了才在提醒卡上補救。
+        //    預設不勾：多數刪除是整理資料，不是要封鎖一個人。
+        var alsoBlock by remember(targets) { mutableStateOf(false) }
         AlertDialog(
             containerColor = AppColors.Surface,
             onDismissRequest = { pendingDelete = null },
-            title = { Text("刪除 ${targets.size} 位聯絡人？", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            title = { Text("刪除 ${targets.size} 位聯絡人？", fontWeight = FontWeight.Bold, fontSize = T.Title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
-                    Text("將一併刪除這些聯絡人的所有互動紀錄、標籤與合併設定，此操作無法復原。", fontSize = 13.sp, color = AppColors.TextSecondary, lineHeight = 18.sp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    LazyColumn(modifier = Modifier.heightIn(max = 180.dp)) {
+                    Text("將一併刪除這些聯絡人的所有互動紀錄、標籤與合併設定。",
+                        fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 18.sp)
+                    Text("紀錄會先進「最近刪除」保留 7 天，期間可以還原。",
+                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                        modifier = Modifier.padding(top = 2.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyColumn(modifier = Modifier.heightIn(max = 160.dp)) {
                         items(targets.toList().take(50), key = { it }) {
-                            Text("• $it", fontSize = 12.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 2.dp))
+                            Text("• $it", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 1.dp))
+                        }
+                        if (targets.size > 50) {
+                            item { Text("＋其他 ${targets.size - 50} 位", fontSize = T.Micro, color = AppColors.TextTertiary) }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(AppColors.SurfaceAlt)
+                            .clickable { alsoBlock = !alsoBlock }
+                            .padding(end = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(checked = alsoBlock, onCheckedChange = { alsoBlock = it })
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("同時加入永不記錄名單", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                color = AppColors.TextPrimary)
+                            Text("之後對方再傳訊息也不會被記下來，可在設定裡解除",
+                                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                         }
                     }
                 }
@@ -7471,7 +7669,12 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             confirmButton = {
                 Button(onClick = {
                     val removed = viewModel.deleteContacts(targets)
-                    Toast.makeText(context, "已刪除 ${targets.size} 位聯絡人（$removed 筆紀錄）", Toast.LENGTH_SHORT).show()
+                    if (alsoBlock) targets.forEach { viewModel.blockName(it) }
+                    Toast.makeText(
+                        context,
+                        "已刪除 ${targets.size} 位（$removed 筆紀錄）" + if (alsoBlock) "並加入永不記錄" else "",
+                        Toast.LENGTH_SHORT
+                    ).show()
                     pendingDelete = null
                     exitSelection()
                 }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)) { Text("確認刪除", maxLines = 1) }
@@ -7538,6 +7741,11 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             },
             onDelete = { list ->
                 pendingDelete = list.toSet()
+                showJunkReview = false
+            },
+            onKeep = { list ->
+                viewModel.ignoreJunk(list)
+                Toast.makeText(context, "已保留 ${list.size} 個，不再列入提醒", Toast.LENGTH_SHORT).show()
                 showJunkReview = false
             },
             onDismiss = { showJunkReview = false }
@@ -7877,6 +8085,9 @@ fun RecordManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
     val selected = remember { mutableStateListOf<String>() }
     val fmt = remember { SimpleDateFormat("MM/dd HH:mm", Locale.US) }
+    // ⚠️ 沒有這個的話「刪除選取」是按下去立刻生效的 ——
+    //    全 App 只剩這一個破壞性動作沒有二次確認。
+    var confirmDelete by remember { mutableStateOf(false) }
 
     // 資料量可能上萬筆，只呈現最新的 400 筆並提供搜尋
     // 反轉 + 過濾上萬筆也不能在主執行緒做，打字搜尋時每按一鍵就卡一次
@@ -7959,17 +8170,38 @@ fun RecordManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         },
         confirmButton = {
             Button(
-                onClick = {
-                    val n = viewModel.deleteRecordsByIds(selected.toSet())
-                    Toast.makeText(context, "已刪除 $n 筆（可在設定頁復原）", Toast.LENGTH_SHORT).show()
-                    selected.clear()
-                },
+                onClick = { confirmDelete = true },
                 enabled = selected.isNotEmpty(),
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText)
-            ) { Text("刪除選取", maxLines = 1, softWrap = false) }
+            ) { Text("刪除選取 (${selected.size})", maxLines = 1, softWrap = false) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
     )
+
+    if (confirmDelete) {
+        // 按對象分組列出來，比列一堆時間戳看得懂
+        val byName = remember(selected.size) {
+            val ids = selected.toHashSet()
+            records.filter { it.id in ids }
+                .groupBy { aliases[it.rawSenderName] ?: it.rawSenderName }
+                .map { (n, list) -> "$n　${list.size} 筆" }
+                .sortedByDescending { it.length }
+        }
+        ConfirmDialog(
+            title = "刪除 ${selected.size} 筆紀錄？",
+            message = "這些紀錄會從統計中移除。" +
+                "\n刪掉之後可以到「設定 → 最近刪除」復原。",
+            details = byName,
+            confirmLabel = "刪除 ${selected.size} 筆",
+            onConfirm = {
+                val n = viewModel.deleteRecordsByIds(selected.toSet())
+                Toast.makeText(context, "已刪除 $n 筆（可在設定頁復原）", Toast.LENGTH_SHORT).show()
+                selected.clear()
+                confirmDelete = false
+            },
+            onDismiss = { confirmDelete = false }
+        )
+    }
 }
 
 /** 標籤管理：改名、換色、排序、刪除 */
@@ -8232,6 +8464,56 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
                             ) {
                                 Text("解除", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+}
+
+/**
+ * 已保留的非真人來源。
+ *
+ * ⚠️ 「保留不處理」是永久的，所以必須有地方看得到並且改得回來 ——
+ *    按錯了卻沒有出口，那個來源就永遠不會再被提醒。
+ */
+@Composable
+fun KeptSourcesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
+    val kept by viewModel.junkIgnored.collectAsState()
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("已保留的來源", fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
+                Text("規則把這些當成非真人，但你確認過它們是真人，所以不再提醒",
+                    fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
+            }
+        },
+        text = {
+            if (kept.isEmpty()) {
+                Text("目前沒有保留任何來源。", fontSize = T.Body, color = AppColors.TextSecondary)
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(kept.toList().sorted(), key = { it }) { name ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(name, fontSize = T.Body, color = AppColors.TextPrimary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                    .background(AppColors.Background)
+                                    .border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+                                    .clickable { viewModel.unignoreJunk(name) }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("取消保留", fontSize = T.Label, fontWeight = FontWeight.Bold,
                                     color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
                             }
                         }
@@ -9186,6 +9468,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showDiagnostics by remember { mutableStateOf(false) }
     var showTrash by remember { mutableStateOf(false) }
     var showBlocked by remember { mutableStateOf(false) }
+    var showKept by remember { mutableStateOf(false) }
+    val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
     var crashReport by remember { mutableStateOf<String?>(null) }
@@ -9547,6 +9831,10 @@ fun SettingsView(viewModel: RelateViewModel) {
                     SettingsDivider()
                     SettingsRow("永不記錄名單", "${blockedNow.size} 位") { showBlocked = true }
                 }
+                if (keptNow.isNotEmpty()) {
+                    SettingsDivider()
+                    SettingsRow("已保留的來源", "${keptNow.size} 個，不再列入非真人提醒") { showKept = true }
+                }
                 SettingsDivider()
                 SettingsRow("偵測診斷", "停留時間沒在累積時，來這裡看是卡在哪一步", accent = true) { showDiagnostics = true }
                 SettingsDivider()
@@ -9585,6 +9873,10 @@ fun SettingsView(viewModel: RelateViewModel) {
         TrashDialog(viewModel) { showTrash = false }
     }
 
+    if (showKept) {
+        KeptSourcesDialog(viewModel) { showKept = false }
+    }
+
     if (showBlocked) {
         BlockedNamesDialog(viewModel) { showBlocked = false }
     }
@@ -9617,16 +9909,11 @@ fun SettingsView(viewModel: RelateViewModel) {
         "purgeWords" -> {
             // ⚠️ remember 住，不然對話框每次重組都重掃一次詞頻表
             val preview = remember { viewModel.previewJunkWords() }
-            ConfirmDialog(
-                title = "清掉常用詞裡的雜訊",
-                message = if (preview.isEmpty()) "目前沒有偵測到需要清掉的詞。"
-                else "以下 ${preview.size} 個詞會從常用詞統計中移除（系統自動產生的字，以及被切碎的人名）。\n" +
-                    "其他詞的累積不受影響，此操作無法復原。",
-                details = preview.take(60).map { "${it.first}　${it.second} 次" },
-                confirmLabel = if (preview.isEmpty()) "知道了" else "清掉 ${preview.size} 個",
-                onConfirm = {
-                    val n = viewModel.purgeJunkWords()
-                    Toast.makeText(context, if (n > 0) "已清掉 $n 個雜訊詞" else "沒有找到需要清的詞", Toast.LENGTH_SHORT).show()
+            WordPurgeDialog(
+                words = preview,
+                onConfirm = { picked ->
+                    val n = viewModel.purgeWords(picked)
+                    Toast.makeText(context, if (n > 0) "已清掉 $n 個詞" else "沒有清掉任何詞", Toast.LENGTH_SHORT).show()
                     confirmAction = null
                 },
                 onDismiss = { confirmAction = null }
