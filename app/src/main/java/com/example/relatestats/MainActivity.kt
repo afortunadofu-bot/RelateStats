@@ -149,6 +149,11 @@ data class ChartPalette(
      *    圖表色裡那些很淺的（例如 #CEDCE7）拿來當字色根本看不見。
      *    這裡每一個都必須是「放在白底上讀得清楚」的深度。
      *    底色不另外列，一律由字色壓到 15% 透明度得出，才不會有色偏。
+     *
+     * ⚠️ 前六個（索引 0–5）給一般標籤用，必須**彼此明顯不同** ——
+     *    同色系不代表要長一樣，要靠色相與明度拉開，
+     *    不然家人／伴侶／朋友／工作四個標籤擺在一起會分不出來。
+     *    最後兩個（6–7）留給「未分類」與「系統通知」，刻意做成最不搶眼的中性色。
      */
     val tags: List<Color>
 ) {
@@ -172,7 +177,7 @@ data class ChartPalette(
  * 所以一律深、淺、深、淺交錯放。
  */
 val CHART_PALETTES = listOf(
-    // 1. App 標準色（藍／墨）—— 預設
+    // 1. App 標準色（藍）—— 預設
     ChartPalette(
         "app",
         listOf(
@@ -180,56 +185,56 @@ val CHART_PALETTES = listOf(
             Color(0xFF475569), Color(0xFF93C5FD), Color(0xFF1E3A8A)
         ),
         listOf(
-            Color(0xFF1D4ED8), Color(0xFF0F172A), Color(0xFF0EA5E9), Color(0xFF475569),
-            Color(0xFF1E3A8A), Color(0xFF3B82F6), Color(0xFF64748B), Color(0xFF0369A1)
+            Color(0xFF1D4ED8), Color(0xFF0891B2), Color(0xFF4338CA), Color(0xFF0F766E),
+            Color(0xFF1E3A8A), Color(0xFF3B82F6), Color(0xFF64748B), Color(0xFF475569)
         )
     ),
-    // 2. 鼠尾草綠
+    // 2. 森林綠 —— 明確的綠，不要跟第 4 組的藍灰撞在一起
     ChartPalette(
-        "sage",
+        "forest",
         listOf(
-            Color(0xFF33513F), Color(0xFFA9C8B6), Color(0xFF6B8F7D),
-            Color(0xFFC0D8CD), Color(0xFF4F7A63), Color(0xFF8FB5A0)
+            Color(0xFF1F4D3D), Color(0xFF7FC8A9), Color(0xFF3E8E6E),
+            Color(0xFFC8E6D5), Color(0xFF2A6B54), Color(0xFFA3D7BE)
         ),
         listOf(
-            Color(0xFF2F4A3A), Color(0xFF4F7A63), Color(0xFF6B8F7D), Color(0xFF3F6B55),
-            Color(0xFF567D6A), Color(0xFF25603F), Color(0xFF7E9C8B), Color(0xFF44705C)
+            Color(0xFF15803D), Color(0xFF0F766E), Color(0xFF4D7C0F), Color(0xFF047857),
+            Color(0xFF166534), Color(0xFF65A30D), Color(0xFF6B7C6E), Color(0xFF44554A)
         )
     ),
-    // 3. 乾燥玫瑰／芥末
+    // 3. 質感深色 —— 炭灰＋駝＋米，低彩度、耐看
     ChartPalette(
-        "rose",
+        "muted",
         listOf(
-            Color(0xFF7B5A51), Color(0xFFD9B8A5), Color(0xFFAB7934),
-            Color(0xFFCCA79F), Color(0xFFB57261), Color(0xFFBC8D73)
+            Color(0xFF2C3639), Color(0xFFA27B5C), Color(0xFF5C6E6F),
+            Color(0xFFDCD7C9), Color(0xFF3F4E4F), Color(0xFFB99B76)
         ),
         listOf(
-            Color(0xFF7B5A51), Color(0xFFB57261), Color(0xFFAB7934), Color(0xFF96604F),
-            Color(0xFF8C6A4F), Color(0xFFC08552), Color(0xFF6E4B44), Color(0xFFA8756A)
+            Color(0xFF8A6240), Color(0xFF2C3639), Color(0xFF5C6E6F), Color(0xFFA27B5C),
+            Color(0xFF6B4F3A), Color(0xFF3F4E4F), Color(0xFF7A6A55), Color(0xFF4A403A)
         )
     ),
-    // 4. 藍灰
+    // 4. 霧藍灰 —— 明確偏藍的鋼灰
     ChartPalette(
         "mist",
         listOf(
-            Color(0xFF56686A), Color(0xFFCEDCE7), Color(0xFF75828A),
-            Color(0xFFC6D2D2), Color(0xFFA0B2BC), Color(0xFF8FA3A8)
+            Color(0xFF33475B), Color(0xFFAFC6D9), Color(0xFF5A7A94),
+            Color(0xFFDCE6EF), Color(0xFF7E9BB5), Color(0xFF93AEC7)
         ),
         listOf(
-            Color(0xFF465A5E), Color(0xFF56686A), Color(0xFF75828A), Color(0xFF5A7383),
-            Color(0xFF6B8093), Color(0xFF3E525A), Color(0xFF7E8E96), Color(0xFF4A6270)
+            Color(0xFF3D6488), Color(0xFF4A6572), Color(0xFF5F7A8A), Color(0xFF2F4858),
+            Color(0xFF6D8BA3), Color(0xFF3A5A6C), Color(0xFF7C8A95), Color(0xFF44535E)
         )
     ),
-    // 5. 奶茶
+    // 5. 粉嫩 —— 比第 3 組粉、比第 3 組淺，兩組不會再混在一起
     ChartPalette(
-        "milktea",
+        "blush",
         listOf(
-            Color(0xFF7F5539), Color(0xFFDDB892), Color(0xFFB08968),
-            Color(0xFFE6CCB2), Color(0xFF9C6644), Color(0xFFCBA98A)
+            Color(0xFFC98B9E), Color(0xFFF6DCE4), Color(0xFFE0A3B6),
+            Color(0xFFFBEFF3), Color(0xFFD7B7C4), Color(0xFFEFCBD8)
         ),
         listOf(
-            Color(0xFF7F5539), Color(0xFF9C6644), Color(0xFFB08968), Color(0xFF6B4A32),
-            Color(0xFFA6784E), Color(0xFF8A6A4F), Color(0xFFBE9268), Color(0xFF5C4033)
+            Color(0xFFA85C74), Color(0xFFC07C93), Color(0xFF8E4A60), Color(0xFFB76E85),
+            Color(0xFF9C5568), Color(0xFFD18FA5), Color(0xFFA98795), Color(0xFF7E3E52)
         )
     )
 )
@@ -3280,15 +3285,31 @@ class RelateViewModel : ViewModel() {
     }
 
     /** 本期有互動的天數、最長與目前連續天數 */
-    fun getCoverage(records: List<InteractionRecord>, filter: DateFilter, weekStart: Int): CoverageStat {
+    /**
+     * ⚠️ 活躍天數必須排除系統通知與非真人來源。
+     *
+     * 舊版是「這天有任何一筆紀錄就算活躍」—— 但一天裡只要有一則 IG 推播、
+     * 一個「11 位新追蹤者」，那天就被算成有互動。
+     * 結果就是使用者說的「我的總聊天天數沒那麼多」：數字是對的，但算的不是聊天。
+     * 現在只算真人的互動。
+     */
+    fun getCoverage(
+        records: List<InteractionRecord>, filter: DateFilter, weekStart: Int,
+        aliasMap: Map<String, String> = emptyMap(), catsMap: Map<String, String> = emptyMap()
+    ): CoverageStat {
         if (records.isEmpty()) return CoverageStat(0, 0, 0, 0)
         val range = rangeOf(filter, weekStart)
-        val scoped = if (range == null) records else records.filter { it.timestamp in range.first..range.second }
+        val human = records.filter { r ->
+            val n = aliasMap[r.rawSenderName] ?: r.rawSenderName
+            !isExcludedFromStats(n, catsMap)
+        }
+        if (human.isEmpty()) return CoverageStat(0, 0, 0, 0)
+        val scoped = if (range == null) human else human.filter { it.timestamp in range.first..range.second }
         val activeDays = scoped.map { startOfDay(it.timestamp) }.toSortedSet()
         val totalDays = if (range != null)
             (((startOfDay(range.second) - startOfDay(range.first)) / 86_400_000L) + 1).toInt()
         else if (records.isEmpty()) 0
-        else (((startOfDay(records.maxOf { it.timestamp }) - startOfDay(records.minOf { it.timestamp })) / 86_400_000L) + 1).toInt()
+        else (((startOfDay(human.maxOf { it.timestamp }) - startOfDay(human.minOf { it.timestamp })) / 86_400_000L) + 1).toInt()
 
         var longest = 0; var run = 0; var prev = -1L
         activeDays.forEach { d ->
@@ -3574,7 +3595,7 @@ class RelateViewModel : ViewModel() {
             lengths = lengthBucketsOf(scoped),
             // 「本期有幾個人從多個平台找你」是一個期間問題，要跟隨篩選
             cross = getCrossPlatform(scoped, aliasMap),
-            coverage = getCoverage(records, filter, weekStart),
+            coverage = getCoverage(records, filter, weekStart, aliasMap, catsMap),
             split = groupSplitOf(scoped),
             extras = extraStatsOf(scoped, records, filter, weekStart),
             persona = getSocialPersona(scoped, DateFilter(FilterType.ALL)),
@@ -4121,6 +4142,7 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
 
     val year = currentMonthCal.get(Calendar.YEAR)
     val month = currentMonthCal.get(Calendar.MONTH)
+    val todayCal = remember { Calendar.getInstance() }
 
     val firstDayCal = Calendar.getInstance().apply {
         set(year, month, 1)
@@ -4162,6 +4184,10 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                     } else {
                         val calCheck = Calendar.getInstance().apply { timeInMillis = selectedTime }
                         val isSelected = calCheck.get(Calendar.YEAR) == year && calCheck.get(Calendar.MONTH) == month && calCheck.get(Calendar.DAY_OF_MONTH) == dayNumber
+                        // 今天永遠要看得出來，不然翻到別的月份就失去方位感
+                        val isToday = todayCal.get(Calendar.YEAR) == year &&
+                            todayCal.get(Calendar.MONTH) == month &&
+                            todayCal.get(Calendar.DAY_OF_MONTH) == dayNumber
                         Box(
                             modifier = Modifier
                                 .weight(1f)
@@ -4169,6 +4195,11 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                                 .padding(4.dp)
                                 .clip(CircleShape)
                                 .background(if (isSelected) AppColors.ActiveBlue else Color.Transparent)
+                                .then(
+                                    if (isToday && !isSelected)
+                                        Modifier.border(1.5.dp, AppColors.ActiveBlue, CircleShape)
+                                    else Modifier
+                                )
                                 .clickable {
                                     val cal = Calendar.getInstance().apply {
                                         set(year, month, dayNumber)
@@ -4278,6 +4309,14 @@ fun TimeFilterSelector(
                 fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.padding(top = 4.dp))
         } else if (currentFilter.type != FilterType.ALL) {
             Spacer(modifier = Modifier.height(6.dp))
+            // 現在停的是不是「今天／本週」。翻走了才需要「回今天」那顆鈕。
+            val onCurrent = remember(currentFilter, weekStartDay) {
+                val now = System.currentTimeMillis()
+                if (currentFilter.type == FilterType.SPECIFIC_DAY)
+                    DateFilter(FilterType.SPECIFIC_DAY, now).isSameDay(currentFilter.timestamp)
+                else getStartOfWeekTimestamp(currentFilter.timestamp, weekStartDay) ==
+                    getStartOfWeekTimestamp(now, weekStartDay)
+            }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = {
                     val days = if (currentFilter.type == FilterType.SPECIFIC_DAY) -1 else -7
@@ -4312,6 +4351,21 @@ fun TimeFilterSelector(
 
                     Text(dateText, color = AppColors.ActiveBlue, fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                     Icon(Icons.Rounded.ArrowDropDown, contentDescription = null, tint = AppColors.ActiveBlue)
+                }
+
+                // ⚠️ 翻到第五週之後要回到本週，只能一直按箭頭 —— 這顆是唯一的捷徑。
+                //    只在「不在今天／本週」時出現，平常不佔位置。
+                if (!onCurrent) {
+                    Text(
+                        if (currentFilter.type == FilterType.SPECIFIC_DAY) "今天" else "本週",
+                        fontSize = T.Micro, fontWeight = FontWeight.Bold, color = Color.White,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.padding(end = 4.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(AppColors.BrandPrimary)
+                            .clickable { onFilterChange(currentFilter.copy(timestamp = System.currentTimeMillis())) }
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                    )
                 }
 
                 IconButton(onClick = {
@@ -5474,7 +5528,10 @@ fun InsightsView(viewModel: RelateViewModel) {
         records, filter, weekStartDay, categoriesMap, aliases, availableCats
     ) {
         delay(300)
-        if (value.ready) value = value.copy(ready = false)
+        // ⚠️ 不要在這裡把 value 標成 ready = false。
+        //    那會讓畫面上的內容整個消失換成轉圈圈，捲動位置跟著歸零 ——
+        //    每來一則通知、每切一次日期都跳回最上面，就是這一行造成的。
+        //    舊資料先留著，算完再換掉；只有「從來沒算過」時才會是 ready = false。
         val next = withContext(Dispatchers.Default) {
             runCatching {
                 viewModel.buildInsights(records, filter, weekStartDay, categoriesMap, aliases, availableCats)
@@ -5548,6 +5605,8 @@ fun InsightsView(viewModel: RelateViewModel) {
                 }
             }
 
+            // ⚠️ 只有「這輩子第一次算」才整頁轉圈。
+            //    重算期間照樣顯示上一份結果，使用者才不會每切一次日期就看到空白頁。
             if (!b.ready) {
                 item {
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), horizontalArrangement = Arrangement.Center) {
@@ -5671,7 +5730,15 @@ fun InsightsView(viewModel: RelateViewModel) {
 
             sections.add(Sec("coverage", "活躍天數") {
                 Panel {
-                    SectionHead("活躍天數")
+                    SectionHead("活躍天數") {
+                        InfoDot(
+                            "活躍天數怎麼算",
+                            "「這一天有沒有跟真人互動過」——有就算一天。\n\n" +
+                                "系統通知（讚、追蹤者、推播）與被標成「系統通知」的來源都不算，" +
+                                "所以這個數字會比「有收到任何通知的天數」少，那是對的。\n\n" +
+                                "覆蓋率＝活躍天數 ÷ 這個區間的總天數。"
+                        )
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         StatPair("本期活躍", "${b.coverage.activeDays} 天", "共 ${b.coverage.totalDays} 天", Modifier.weight(1f))
                         StatPair("覆蓋率", "${b.coverage.pct}%", "有互動的日子佔比", Modifier.weight(1f))
@@ -5911,7 +5978,10 @@ fun OverviewView(viewModel: RelateViewModel) {
         // 先等一下再算：新訊息會讓 records 一直換新實例，
         // 不做合併的話每則訊息都會觸發一次全表重算，直接把 CPU 吃滿。
         delay(300)
-        if (value.ready) value = value.copy(ready = false)
+        // ⚠️ 不要在這裡把 value 標成 ready = false。
+        //    那會讓畫面上的內容整個消失換成轉圈圈，捲動位置跟著歸零 ——
+        //    每來一則通知、每切一次日期都跳回最上面，就是這一行造成的。
+        //    舊資料先留著，算完再換掉；只有「從來沒算過」時才會是 ready = false。
         // ⚠️ 統計丟例外不能讓整個 App 掛掉。接住、記下堆疊、保留上一份資料，
         //    使用者才有機會把原因回報出來（設定頁最上方會出現紅色區塊）。
         val next = withContext(Dispatchers.Default) {
@@ -6891,7 +6961,10 @@ fun LeaderboardView(viewModel: RelateViewModel) {
         records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter
     ) {
         delay(300)
-        if (value.ready) value = value.copy(ready = false)
+        // ⚠️ 不要在這裡把 value 標成 ready = false。
+        //    那會讓畫面上的內容整個消失換成轉圈圈，捲動位置跟著歸零 ——
+        //    每來一則通知、每切一次日期都跳回最上面，就是這一行造成的。
+        //    舊資料先留著，算完再換掉；只有「從來沒算過」時才會是 ready = false。
         val next = withContext(Dispatchers.Default) {
             runCatching {
                 viewModel.buildLeaderboard(records, categoriesMap, aliases, availableCats, filter, sort, catFilter, appFilter, groupFilter)
@@ -7492,7 +7565,10 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     //    少了它，標籤改完畫面不會更新（按「標為系統通知」像沒反應）。
     val cb by produceState(viewModel.cachedContacts, records, aliases, categoriesMap) {
         delay(300)
-        if (value.ready) value = value.copy(ready = false)
+        // ⚠️ 不要在這裡把 value 標成 ready = false。
+        //    那會讓畫面上的內容整個消失換成轉圈圈，捲動位置跟著歸零 ——
+        //    每來一則通知、每切一次日期都跳回最上面，就是這一行造成的。
+        //    舊資料先留著，算完再換掉；只有「從來沒算過」時才會是 ready = false。
         val next = withContext(Dispatchers.Default) { runCatching { viewModel.buildContacts(records, aliases, categoriesMap) } }
         next.getOrNull()?.let { value = it }
             ?: next.exceptionOrNull()?.let { viewModel.recordError("buildContacts", it) }
@@ -7538,6 +7614,13 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var showJunkReview by remember { mutableStateOf(false) }
     // 「刪除並封鎖」會刪紀錄又永久擋掉，不能一按就執行
     var pendingBlock by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    var pendingBlockMany by remember { mutableStateOf<List<String>?>(null) }
+    // 預設全勾：這張卡多數情況是整批想做同一件事
+    val resurrectPicked = remember { mutableStateListOf<String>() }
+    LaunchedEffect(resurrected) {
+        resurrectPicked.clear()
+        resurrectPicked.addAll(resurrected.map { it.first })
+    }
     val similarGroups = cb.similar
 
     var selectionMode by remember { mutableStateOf(false) }
@@ -7573,25 +7656,54 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         subtitle = "你刪掉他們之後對方又傳了訊息，紀錄被重新建立。",
                         onDismiss = { resurrected = emptyList() }
                     ) {
+                        // ⚠️ 這張卡可能列出十幾個人，一個一個按兩下太慢。
+                        //    勾選 + 批次處理，而且預設全勾 —— 多數情況是整批想做同一件事。
+                        val allNames = resurrected.map { it.first }
+                        val allOn = resurrectPicked.size == allNames.size && allNames.isNotEmpty()
+                        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("已選 ${resurrectPicked.size} / ${allNames.size}", fontSize = T.Micro,
+                                color = AppColors.TextTertiary, modifier = Modifier.weight(1f))
+                            Text(if (allOn) "取消全選" else "全選",
+                                fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        if (allOn) resurrectPicked.clear()
+                                        else { resurrectPicked.clear(); resurrectPicked.addAll(allNames) }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp))
+                        }
                         resurrected.forEach { (name, count) ->
+                            val on = resurrectPicked.contains(name)
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                modifier = Modifier.fillMaxWidth()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { if (on) resurrectPicked.remove(name) else resurrectPicked.add(name) }
+                                    .padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Checkbox(checked = on, onCheckedChange = {
+                                    if (on) resurrectPicked.remove(name) else resurrectPicked.add(name)
+                                })
                                 Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                     Text(name, fontSize = T.Label, fontWeight = FontWeight.Bold,
                                         color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text("新增 $count 筆", fontSize = T.Micro, color = AppColors.TextTertiary)
                                 }
-                                NoticeAction("保留", AppColors.TextSecondary) {
-                                    viewModel.forgetDeleted(name)
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            NoticeAction("保留 (${resurrectPicked.size})", AppColors.TextSecondary) {
+                                if (resurrectPicked.isNotEmpty()) {
+                                    resurrectPicked.forEach { viewModel.forgetDeleted(it) }
+                                    resurrectPicked.clear()
                                     resurrected = viewModel.resurrectedNames()
                                 }
-                                Spacer(modifier = Modifier.width(6.dp))
-                                // ⚠️ 這一顆會刪紀錄又封鎖，是不可逆的，一定要二次確認
-                                NoticeAction("刪除並封鎖", AppColors.WorkText) {
-                                    pendingBlock = name to count
-                                }
+                            }
+                            // ⚠️ 這一顆會刪紀錄又封鎖，是不可逆的，一定要二次確認
+                            NoticeAction("刪除並封鎖 (${resurrectPicked.size})", AppColors.WorkText) {
+                                if (resurrectPicked.isNotEmpty()) pendingBlockMany = resurrectPicked.toList()
                             }
                         }
                     }
@@ -7793,14 +7905,32 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                             if (selected.isEmpty()) "點卡片選取" else "已選 ${selected.size} 位",
                             fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false
                         )
-                        Text(
-                            if (selected.size == filteredContacts.size && filteredContacts.isNotEmpty()) "取消全選" else "全選",
-                            fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
-                            modifier = Modifier.clickable {
-                                if (selected.size == filteredContacts.size) selected.clear()
-                                else { selected.clear(); selected.addAll(filteredContacts) }
-                            }.padding(6.dp)
-                        )
+                        // ⚠️ 以前是一行 12sp 的藍字，跟旁邊的說明文字看起來一樣，使用者根本沒發現那是按鈕。
+                        //    做成有框、有圖示的按鈕。
+                        val allOn = selected.size == filteredContacts.size && filteredContacts.isNotEmpty()
+                        Row(
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                .background(if (allOn) AppColors.ActiveBlue else AppColors.Surface)
+                                .border(1.dp, if (allOn) AppColors.ActiveBlue else AppColors.BorderStrong, RoundedCornerShape(8.dp))
+                                .clickable {
+                                    if (allOn) selected.clear()
+                                    else { selected.clear(); selected.addAll(filteredContacts) }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Rounded.Check, contentDescription = null,
+                                tint = if (allOn) Color.White else AppColors.TextPrimary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                if (allOn) "取消全選" else "全選 ${filteredContacts.size}",
+                                fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                                color = if (allOn) Color.White else AppColors.TextPrimary
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -7930,6 +8060,25 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 quickTagTarget = null
                 setShowAddCategoryDialog(true)
             }
+        )
+    }
+
+    pendingBlockMany?.let { names ->
+        ConfirmDialog(
+            title = "刪除並封鎖 ${names.size} 位",
+            message = "會刪除這些對象目前的新紀錄，並把名字加入永不記錄名單 —— " +
+                "之後對方再傳訊息也不會被記下來。\n\n刪掉的紀錄會進「最近刪除」保留 7 天；" +
+                "封鎖可在「設定 → 永不記錄名單」解除。",
+            details = names,
+            confirmLabel = "刪除並封鎖",
+            onConfirm = {
+                viewModel.deleteContacts(names.toSet())
+                names.forEach { viewModel.blockName(it) }
+                resurrected = viewModel.resurrectedNames()
+                Toast.makeText(context, "已刪除並封鎖 ${names.size} 位", Toast.LENGTH_SHORT).show()
+                pendingBlockMany = null
+            },
+            onDismiss = { pendingBlockMany = null }
         )
     }
 
@@ -8698,7 +8847,78 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
 }
 
 /**
- * 已保留的非真人來源。
+ * 配色選擇。
+ *
+ * ⚠️ 做成彈窗而不是設定頁裡的一列，是因為**要看得到實際套用的樣子**。
+ *    設定頁上只有一條色帶，使用者根本不知道套下去的圓餅圖與標籤長什麼樣。
+ *    這裡每一組都直接畫出「圖表會用的顏色」與「標籤會長的樣子」。
+ * ⚠️ 點下去立刻套用（不做「確定」按鈕）——
+ *    整個 App 會即時跟著變，關掉彈窗就能看到真正的圖表。
+ *    後悔就再點另一組，沒有破壞性，不需要二次確認。
+ */
+@Composable
+fun PaletteDialog(currentId: String, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    val sampleTags = listOf("家人", "伴侶", "朋友", "工作")
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("圖表與標籤配色", fontWeight = FontWeight.Black, fontSize = 18.sp,
+                    letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
+                Text("點一下立刻套用，關掉就能看到實際的圖表",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp)
+            }
+        },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(CHART_PALETTES, key = { it.id }) { p ->
+                    val on = p.id == currentId
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (on) AppColors.SurfaceAlt else Color.Transparent)
+                            .border(
+                                if (on) 2.dp else 1.dp,
+                                if (on) AppColors.BrandPrimary else AppColors.BorderLight,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onPick(p.id) }
+                            .padding(10.dp)
+                    ) {
+                        // 圖表會長的樣子：一條由六個顏色組成的色帶
+                        Row(modifier = Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(4.dp))) {
+                            p.colors.forEach { c ->
+                                Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c))
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 標籤會長的樣子：直接畫成標籤
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            sampleTags.forEachIndexed { i, label ->
+                                Text(
+                                    label, fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                    color = p.tag(i), maxLines = 1, softWrap = false,
+                                    modifier = Modifier.clip(RoundedCornerShape(5.dp))
+                                        .background(p.tagBg(i))
+                                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            }
+                            if (on) {
+                                Spacer(modifier = Modifier.weight(1f))
+                                Text("✓", fontSize = T.Title, fontWeight = FontWeight.Black,
+                                    color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成", color = AppColors.TextSecondary) } }
+    )
+}
+
+/** 已保留的非真人來源。
  *
  * ⚠️ 「保留不處理」是永久的，所以必須有地方看得到並且改得回來 ——
  *    按錯了卻沒有出口，那個來源就永遠不會再被提醒。
@@ -9692,6 +9912,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showTrash by remember { mutableStateOf(false) }
     var showBlocked by remember { mutableStateOf(false) }
     var showKept by remember { mutableStateOf(false) }
+    var showPalette by remember { mutableStateOf(false) }
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -9802,35 +10023,24 @@ fun SettingsView(viewModel: RelateViewModel) {
         item { SettingsSection("偏好") }
         item {
             SettingsCard {
-                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    Text("圖表與標籤配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                    Text("App 介面維持原本的配色", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // ⚠️ 一組配色壓成一條色帶，四組並排在同一列。
-                    //    上一版一組佔一整列、每個色塊 20dp，光這個設定就吃掉半個螢幕 ——
-                    //    這只是個偏好設定，不該比服務狀態還顯眼。
-                    //    也不寫名字：「奶茶色系」這種字對挑色沒有幫助，看顏色才準。
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CHART_PALETTES.forEach { p ->
-                            val on = chartPaletteId == p.id
-                            Row(
-                                modifier = Modifier.weight(1f).height(30.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .border(
-                                        if (on) 2.dp else 1.dp,
-                                        if (on) AppColors.BrandPrimary else AppColors.BorderLight,
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable { viewModel.setChartPalette(p.id) }
-                                    .padding(3.dp)
-                                    .clip(RoundedCornerShape(5.dp))
-                            ) {
-                                p.colors.forEach { c ->
-                                    Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c))
-                                }
-                            }
+                // 設定頁上只放一列「現在是哪組」，挑色在彈窗裡做 —— 那裡才看得到實際套用的樣子
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { showPalette = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                        Text("圖表與標籤配色", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("App 介面維持原本的配色", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
+                    Row(modifier = Modifier.width(64.dp).height(18.dp).clip(RoundedCornerShape(4.dp))) {
+                        AppColors.Chart.colors.forEach { c ->
+                            Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c))
                         }
                     }
+                    Text("›", fontSize = 17.sp, color = AppColors.TextTertiary,
+                        maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 6.dp))
                 }
                 SettingsDivider()
                 Row(
@@ -10093,6 +10303,14 @@ fun SettingsView(viewModel: RelateViewModel) {
 
     if (showTrash) {
         TrashDialog(viewModel) { showTrash = false }
+    }
+
+    if (showPalette) {
+        PaletteDialog(
+            currentId = chartPaletteId,
+            onPick = { viewModel.setChartPalette(it) },
+            onDismiss = { showPalette = false }
+        )
     }
 
     if (showKept) {
