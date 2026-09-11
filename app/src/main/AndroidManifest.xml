@@ -5,6 +5,9 @@
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <!-- 只用於「設定 → 匯入手機通話紀錄」，使用者主動按才會要求授權 -->
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- 每晚回顧與「服務被關掉」提醒 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -50,6 +53,19 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+
+        <!-- 每晚九點左右的回顧通知；重開機後由 BOOT_COMPLETED 重新排程 -->
+        <receiver
+            android:name=".RecapReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

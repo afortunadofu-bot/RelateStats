@@ -22,6 +22,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Process
+import android.os.Build
 import android.Manifest
 import android.content.pm.PackageManager
 import android.provider.CallLog
@@ -33,6 +34,10 @@ import android.util.Base64
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
+import android.app.AlarmManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -917,6 +922,7 @@ object DataRepository {
     var isFirstLaunch = MutableStateFlow(true)
     var weekStartDay = MutableStateFlow(Calendar.MONDAY)
     val chartPaletteId = MutableStateFlow(CHART_PALETTES[0].id)
+    val recapEnabled = MutableStateFlow(true)
 
     var autoBackupEnabled = MutableStateFlow(false)
     var autoBackupPassword = MutableStateFlow("")
@@ -1051,6 +1057,7 @@ object DataRepository {
         isFirstLaunch.value = p.getBoolean("is_first_launch", true)
         weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
         applyChartPalette(p.getString("chart_palette", null) ?: CHART_PALETTES[0].id)
+        recapEnabled.value = p.getBoolean("recap_enabled", true)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
         autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
         lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
@@ -1106,6 +1113,18 @@ object DataRepository {
         //    既沒轉到東西，之後也不會再跑。
         migrateTagColorsToIndex(p)
 
+        _wordSenders.value = runCatching {
+            val out = HashMap<String, HashMap<String, Int>>()
+            (p.getStringSet("word_senders", emptySet()) ?: emptySet()).forEach { line ->
+                val parts = line.split("\u0001")
+                if (parts.size == 3) {
+                    val c = parts[2].toIntOrNull() ?: return@forEach
+                    out.getOrPut(parts[0]) { HashMap() }[parts[1]] = c
+                }
+            }
+            out as Map<String, Map<String, Int>>
+        }.getOrDefault(emptyMap())
+
         _wordFreq.value = runCatching {
             (p.getStringSet("word_freq", emptySet()) ?: emptySet()).mapNotNull { line ->
                 val i = line.lastIndexOf("|w|")
@@ -1157,6 +1176,11 @@ object DataRepository {
         val p = CHART_PALETTES.find { it.id == id } ?: CHART_PALETTES[0]
         chartPaletteId.value = p.id
         AppColors.chartPaletteState.value = p
+    }
+
+    fun setRecapEnabled(on: Boolean) {
+        recapEnabled.value = on
+        prefs?.edit()?.putBoolean("recap_enabled", on)?.apply()
     }
 
     fun setChartPalette(id: String) {
@@ -1248,6 +1272,10 @@ object DataRepository {
                 putStringSet("categories", cats)
                 putString("all_categories", allCats)
                 putStringSet("word_freq", words)
+                // word \u0001 sender \u0001 count —— 用控制字元當分隔，名字裡不可能出現
+                putStringSet("word_senders", _wordSenders.value.flatMap { (w, senders) ->
+                    senders.map { (n, c) -> w + "\u0001" + n + "\u0001" + c }
+                }.toSet())
                 putStringSet("blocked_names", _blockedNames.value)
                 putString("section_order", _sectionOrder.value.joinToString(","))
                 putStringSet("hidden_sections", _hiddenSections.value)
@@ -1499,6 +1527,38 @@ object DataRepository {
         }
     }
 
+    /**
+     * 每個常用詞是誰傳的。
+     *
+     * ⚠️ 只記「前幾位發話者與次數」，不記訊息內容 —— 那個前提不能破。
+     * ⚠️ 兩層上限是必要的：詞最多 400 個、每個詞最多 6 位發話者。
+     *    不設上限的話這份資料會變成「詞數 × 聯絡人數」，比詞頻本身大一個量級。
+     * ⚠️ 這份資料只能從現在開始累積 —— 過去的訊息早就沒留內容了，回不去。
+     */
+    private const val MAX_WORD_SENDER_WORDS = 400
+    private const val MAX_SENDERS_PER_WORD = 6
+
+    private val _wordSenders = MutableStateFlow<Map<String, Map<String, Int>>>(emptyMap())
+    val wordSenders: StateFlow<Map<String, Map<String, Int>>> = _wordSenders
+
+    private fun recordWordSenders(words: List<String>, senderName: String) {
+        _wordSenders.update { cur ->
+            val m = HashMap(cur)
+            words.distinct().forEach { w ->
+                val inner = HashMap(m[w] ?: emptyMap())
+                inner[senderName] = (inner[senderName] ?: 0) + 1
+                m[w] = if (inner.size > MAX_SENDERS_PER_WORD)
+                    inner.entries.sortedByDescending { it.value }.take(MAX_SENDERS_PER_WORD)
+                        .associate { it.key to it.value }
+                else inner
+            }
+            if (m.size > MAX_WORD_SENDER_WORDS)
+                m.entries.sortedByDescending { e -> e.value.values.sum() }
+                    .take(MAX_WORD_SENDER_WORDS).associate { it.key to it.value }
+            else m
+        }
+    }
+
     fun addWords(words: List<String>, senderName: String? = null) {
         if (words.isEmpty() || prefs == null) return
         // 發話者名字的碎片不是詞彙，先擋掉
@@ -1513,6 +1573,7 @@ object DataRepository {
             if (m.size > MAX_WORDS) m.entries.sortedByDescending { it.value }.take(MAX_WORDS).associate { it.key to it.value }
             else m
         }
+        if (!senderName.isNullOrBlank()) recordWordSenders(clean, senderName)
         saveData()
     }
 
@@ -1583,6 +1644,7 @@ object DataRepository {
 
     fun clearWordFreq() {
         _wordFreq.value = emptyMap()
+        _wordSenders.value = emptyMap()
         saveData(immediate = true)
     }
 
@@ -2151,6 +2213,152 @@ object DataRepository {
 /// ==========================================
 // 4. 核心服務
 // ==========================================
+/**
+ * 每晚回顧＋服務異常提醒。
+ *
+ * ⚠️ 用 AlarmManager 而不是 WorkManager：這個 App 沒有其他背景工作，
+ *    為了一天一次的鬧鐘多拉一個函式庫不划算。
+ * ⚠️ 必須用 setExactAndAllowWhileIdle 之外的方式（setWindow），
+ *    因為精確鬧鐘在 Android 12+ 要另外的權限，而「晚上九點左右」本來就不需要精確。
+ * ⚠️ 每次觸發後要自己排下一次 —— setWindow 是一次性的。
+ */
+object DailyRecap {
+    const val CHANNEL_RECAP = "relate_recap"
+    const val CHANNEL_ALERT = "relate_alert"
+    private const val REQ = 8801
+    /** 晚上 9 點 */
+    private const val HOUR = 21
+
+    fun ensureChannels(ctx: Context) {
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_RECAP, "每日回顧", NotificationManager.IMPORTANCE_DEFAULT)
+                .apply { description = "每天晚上整理今天的互動" }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_ALERT, "服務提醒", NotificationManager.IMPORTANCE_HIGH)
+                .apply { description = "偵測服務被系統關掉時通知你" }
+        )
+    }
+
+    private fun pending(ctx: Context): PendingIntent =
+        PendingIntent.getBroadcast(
+            ctx, REQ, Intent(ctx, RecapReceiver::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    fun schedule(ctx: Context) {
+        val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val c = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, HOUR); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DATE, 1)
+        }
+        runCatching {
+            // 給一小時的窗，系統可以挑省電的時機發，不需要分秒不差
+            am.setWindow(AlarmManager.RTC_WAKEUP, c.timeInMillis, 3_600_000L, pending(ctx))
+        }
+    }
+
+    fun cancel(ctx: Context) {
+        val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        runCatching { am.cancel(pending(ctx)) }
+    }
+
+    /** 今天的一句話總結。沒有互動就回 null —— 沒事就不要吵人。 */
+    fun buildRecapText(): String? {
+        val today = startOfDayMs(System.currentTimeMillis())
+        val cats = DataRepository.categories.value
+        val aliases = DataRepository.aliases.value
+        val todays = DataRepository.interactions.value.filter { it.timestamp >= today }
+            .filter { r ->
+                val n = aliases[r.rawSenderName] ?: r.rawSenderName
+                !isExcludedFromStats(n, cats)
+            }
+        if (todays.isEmpty()) return null
+        val msgs = todays.count { it.isIncoming && !it.isCall }
+        val people = todays.mapTo(HashSet()) { aliases[it.rawSenderName] ?: it.rawSenderName }
+        val dur = todays.sumOf { it.durationSeconds.toLong() }
+        val top = todays.groupingBy { aliases[it.rawSenderName] ?: it.rawSenderName }
+            .eachCount().maxByOrNull { it.value }?.key
+        return buildString {
+            append("$msgs 則　·　${people.size} 位")
+            if (dur > 0) append("　·　停留 ${formatDuration(dur)}")
+            if (top != null) append("\n聊最多：$top")
+        }
+    }
+
+    fun notifyRecap(ctx: Context) {
+        val text = buildRecapText() ?: return
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        ensureChannels(ctx)
+        val open = PendingIntent.getActivity(
+            ctx, 0, Intent(ctx, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = Notification.Builder(ctx, CHANNEL_RECAP)
+            .setSmallIcon(android.R.drawable.ic_menu_agenda)
+            .setContentTitle("今天的互動")
+            .setContentText(text.replace("\n", "　"))
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        runCatching { nm.notify(9001, n) }
+    }
+
+    /**
+     * 無障礙服務被關掉時提醒。
+     * ⚠️ Android 每次重新安裝 App 都會自動停用它，使用者通常不會發現 ——
+     *    等到發現「停留時間都是 0」已經漏掉好幾天了。
+     */
+    fun notifyServiceOff(ctx: Context) {
+        if (isAccessibilityServiceEnabled(ctx, ChatTrackerService::class.java)) {
+            runCatching {
+                (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(9002)
+            }
+            return
+        }
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        ensureChannels(ctx)
+        val open = PendingIntent.getActivity(
+            ctx, 1, Intent(ctx, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = Notification.Builder(ctx, CHANNEL_ALERT)
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setContentTitle("停留時間沒有在記錄")
+            .setContentText("無障礙服務被關掉了，點這裡重新開啟")
+            .setStyle(Notification.BigTextStyle().bigText(
+                "「停留時間偵測」目前是關閉的，這段期間不會累積任何停留時間。\n" +
+                    "Android 在每次重新安裝 App 後都會自動停用它。"
+            ))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        runCatching { nm.notify(9002, n) }
+    }
+}
+
+/** 重開機後重新排程 —— AlarmManager 的錳鐘不會跨重啟保留 */
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED) DailyRecap.schedule(context)
+    }
+}
+
+class RecapReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        runCatching {
+            DataRepository.init(context.applicationContext)
+            if (DataRepository.recapEnabled.value) DailyRecap.notifyRecap(context)
+            DailyRecap.notifyServiceOff(context)
+        }
+        // setWindow 是一次性的，排下一次
+        DailyRecap.schedule(context)
+    }
+}
+
 class RelateNotificationService : NotificationListenerService() {
 
     private val targetApps = mapOf(
@@ -2748,6 +2956,8 @@ class RelateViewModel : ViewModel() {
     val weekStartDay = DataRepository.weekStartDay
     val chartPaletteId = DataRepository.chartPaletteId
     fun setChartPalette(id: String) = DataRepository.setChartPalette(id)
+    val recapEnabled = DataRepository.recapEnabled
+    fun setRecapEnabled(on: Boolean) = DataRepository.setRecapEnabled(on)
 
     // 預設看「單週」。預設單日的話，只要今天還沒互動就整片空白，
     // 一開 App 什麼都看不到。
@@ -3751,6 +3961,7 @@ class RelateViewModel : ViewModel() {
     fun previewJunkWords() = DataRepository.previewJunkWords()
     fun purgeWords(words: Set<String>) = DataRepository.purgeWords(words)
     val lastWordPurge = DataRepository.lastWordPurge
+    val wordSenders = DataRepository.wordSenders
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
     fun previewRetagTargets() = DataRepository.previewRetagTargets()
     val debugLog = DataRepository.debugLog
@@ -3853,6 +4064,19 @@ fun hasUsageStatsPermission(context: Context): Boolean {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 每晚回顧與「服務被關掉」提醒。
+        // ⚠️ 排程要每次啟動都做 —— AlarmManager 的錳鐘會被「強制停止」清掉，
+        //    只靠開機廣播補不回來。重複排同一個 PendingIntent 不會累加。
+        DailyRecap.ensureChannels(this)
+        DailyRecap.schedule(this)
+        if (Build.VERSION.SDK_INT >= 33) {
+            runCatching {
+                if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7701)
+                }
+            }
+        }
 
         @Suppress("DEPRECATION")
         window.statusBarColor = android.graphics.Color.TRANSPARENT
@@ -5140,6 +5364,7 @@ fun KpiTile(
 
 /** 表格資料列：色點 + 名稱 + 迷你長條 + 右側數值 */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun DataRow(
     name: String,
     dotColor: Color,
@@ -5204,6 +5429,7 @@ fun DeltaBadge(pct: Int?) {
 
 /** 兩欄小統計 */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun StatPair(
     label: String, value: String, sub: String? = null,
     modifier: Modifier = Modifier, onClick: (() -> Unit)? = null
@@ -5212,7 +5438,9 @@ fun StatPair(
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
             .background(AppColors.SurfaceAlt)
-            .let { m -> if (onClick != null) m.clickable { onClick() } else m }
+            .let { m ->
+                if (onClick != null) m.combinedClickable(onClick = onClick, onLongClick = onClick) else m
+            }
             .padding(horizontal = 9.dp, vertical = 7.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5233,6 +5461,7 @@ fun StatPair(
 
 /** 逐日趨勢長條圖 */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
     if (points.isEmpty()) {
         Text("尚無資料", fontSize = T.Label, color = AppColors.TextSecondary)
@@ -5263,8 +5492,14 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
                 val on = picked?.dayStart == pt.dayStart
                 // 整根欄位都要可點：只有長條可點的話矮的那幾天根本點不到
                 Column(
+                    // ⚠️ 長按要跟點擊做同一件事。
+                    //    手指停在長條上等它出現說明是很自然的動作，
+                    //    只綁 onClick 的話長按等於什麼都沒發生，使用者會以為圖表壞了。
                     modifier = Modifier.weight(1f).fillMaxHeight()
-                        .clickable { picked = if (on) null else pt },
+                        .combinedClickable(
+                            onClick = { picked = if (on) null else pt },
+                            onLongClick = { picked = pt }
+                        ),
                     verticalArrangement = Arrangement.Bottom
                 ) {
                     Box(
@@ -5288,6 +5523,7 @@ fun TrendChart(points: List<TrendPoint>, showDuration: Boolean) {
 
 /** 近數週每日活躍密度圖 */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY) {
     if (data.isEmpty()) return
     val max = data.maxOf { it.count }.coerceAtLeast(1)
@@ -5378,7 +5614,12 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
                                     modifier = Modifier.size(cell)
                                         .background(bg, RoundedCornerShape(2.dp))
                                         .then(if (on) Modifier.border(1.5.dp, AppColors.BrandPrimary, RoundedCornerShape(2.dp)) else Modifier)
-                                        .then(if (cellData != null) Modifier.clickable { picked = if (on) null else cellData } else Modifier)
+                                        .then(
+                                            if (cellData != null) Modifier.combinedClickable(
+                                                onClick = { picked = if (on) null else cellData },
+                                                onLongClick = { picked = cellData }
+                                            ) else Modifier
+                                        )
                                 )
                             }
                             repeat(7 - week.size) { Spacer(modifier = Modifier.size(cell)) }
@@ -5431,6 +5672,7 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
 
 /** 水平比例條（群組 vs 個人之類的二分佔比） */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun SplitBar(
     leftLabel: String, leftValue: Long, rightLabel: String, rightValue: Long,
     leftColor: Color, rightColor: Color,
@@ -5454,12 +5696,12 @@ fun SplitBar(
             Box(
                 modifier = Modifier.weight(leftFrac).fillMaxHeight()
                     .background(leftColor)
-                    .let { m -> if (onLeftClick != null) m.clickable { onLeftClick() } else m }
+                    .let { m -> if (onLeftClick != null) m.combinedClickable(onClick = onLeftClick, onLongClick = onLeftClick) else m }
             )
             Box(
                 modifier = Modifier.weight(1f - leftFrac).fillMaxHeight()
                     .background(rightColor)
-                    .let { m -> if (onRightClick != null) m.clickable { onRightClick() } else m }
+                    .let { m -> if (onRightClick != null) m.combinedClickable(onClick = onRightClick, onLongClick = onRightClick) else m }
             )
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -5505,6 +5747,7 @@ fun InsightsView(viewModel: RelateViewModel) {
     // 圖表點下去要看得到「是哪些人」，不能只給一個總數
     var drill by remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
     val wordFreq by viewModel.wordFreq.collectAsState()
+    val wordSenders by viewModel.wordSenders.collectAsState()
     val secOrder by viewModel.sectionOrder.collectAsState()
     val secHidden by viewModel.hiddenSections.collectAsState()
     var showSectionEditor by remember { mutableStateOf(false) }
@@ -5725,7 +5968,7 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             sections.add(Sec("words", "常用詞") {
-                TopWordsCard(wordFreq)
+                TopWordsCard(wordFreq, wordSenders)
             })
 
             sections.add(Sec("coverage", "活躍天數") {
@@ -6479,14 +6722,21 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
                 Canvas(
                     modifier = Modifier.weight(1f).height(rowH * 7)
                         .pointerInput(rowOrder) {
-                            detectTapGestures { offset ->
+                            // 長按與點擊同效果；長按時直接選取，不做「再按一次取消」
+                            fun cellAt(offset: Offset): Pair<Int, Int> {
                                 val cw = size.width / 24f
                                 val ch = size.height / 7f
                                 val h = (offset.x / cw).toInt().coerceIn(0, 23)
                                 val rowIdx = (offset.y / ch).toInt().coerceIn(0, 6)
-                                val d = rowOrder[rowIdx]
-                                picked = if (picked?.first == d && picked?.second == h) null else (d to h)
+                                return rowOrder[rowIdx] to h
                             }
+                            detectTapGestures(
+                                onLongPress = { picked = cellAt(it) },
+                                onTap = {
+                                    val c = cellAt(it)
+                                    picked = if (picked == c) null else c
+                                }
+                            )
                         }
                 ) {
                     val cw = size.width / 24f
@@ -6552,7 +6802,7 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
 
 /** 常用詞（只累計詞頻，不保留訊息原文） */
 @Composable
-fun TopWordsCard(wordFreq: Map<String, Int>) {
+fun TopWordsCard(wordFreq: Map<String, Int>, wordSenders: Map<String, Map<String, Int>> = emptyMap()) {
     // 預設看 3 字：2 字組合太容易切出「送了」「了貼」這種跨詞邊界的碎片
     var mode by remember { mutableStateOf("3") }
     var picked by remember { mutableStateOf<Pair<String, Int>?>(null) }
@@ -6592,14 +6842,39 @@ fun TopWordsCard(wordFreq: Map<String, Int>) {
             val maxCount = top.first().second.coerceAtLeast(1)
             picked?.let { (w, c) ->
                 val share = (c * 100f / top.sumOf { it.second }.coerceAtLeast(1)).let { "%.1f".format(it) }
-                Row(
+                val senders = wordSenders[w].orEmpty().entries.sortedByDescending { it.value }
+                Column(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
                         .background(AppColors.SurfaceAlt, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 10.dp, vertical = 7.dp)
                 ) {
-                    Text("「$w」", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                    Text("$c 次 · 佔榜上 $share%", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("「$w」", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                        Text("$c 次 · 佔榜上 $share%", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.Chart.primary, maxLines = 1, softWrap = false)
+                    }
+                    // 誰傳的。⚠️ 只有 v3.20 之後收到的訊息才有這份資料 ——
+                    //    過去的訊息沒有留內容，發話者回推不出來，所以舊詞會是空的。
+                    if (senders.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        senders.forEach { (name, cnt) ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(name, fontSize = T.Label, color = AppColors.TextPrimary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Text("$cnt 則", fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                    color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("這個詞還沒有發話者紀錄（只記錄 v3.20 之後收到的訊息）",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
                 }
             }
             top.chunked(3).forEach { rowWords ->
@@ -6610,7 +6885,7 @@ fun TopWordsCard(wordFreq: Map<String, Int>) {
                         Column(
                             modifier = Modifier.weight(1f)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(AppColors.ActiveBlue.copy(alpha = 0.08f + 0.22f * ratio))
+                                .background(AppColors.Chart.primary.copy(alpha = 0.08f + 0.22f * ratio))
                                 .clickable { picked = if (picked?.first == word) null else (word to count) }
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                         ) {
@@ -9056,15 +9331,10 @@ fun SectionOrderDialog(
 @Composable
 fun CallsCard(calls: CallSummary) {
     Panel {
-        SectionHead("通話統計") {
-            if (!calls.hasDuration) {
-                InfoDot(
-                    "為什麼沒有通話時長",
-                    "原生撥號 App 接通後不會發通知，只靠通知拿不到通話秒數。\n\n" +
-                        "到「設定 → 匯入手機通話紀錄」可以把真實時長補進來，也會回補過去的通話。"
-                )
-            }
-        }
+        // ⚠️ 不要再解釋「為什麼沒有通話時長」。
+        //    沒有秒數時就整格不畫（見下方），畫面上根本不會有空欄位，
+        //    沒有東西缺席就不需要道歉 —— 多一個 ⓘ 反而是在提醒使用者這裡少了東西。
+        SectionHead("通話統計")
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatPair("總通話", "${calls.total} 通", null, Modifier.weight(1f))
             StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f))
@@ -9164,6 +9434,7 @@ fun MsgVsTimeCard(msgs: Int, opened: Int, drill: (String, (InteractionRecord) ->
  * 這是「時間模式」，跟平台分佈那種「構成」不同類，所以放在洞察頁。
  */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
     Panel {
         SectionHead("時段分佈")
@@ -9174,7 +9445,10 @@ fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRe
                 Box(
                     modifier = Modifier.weight(st.percentage.coerceAtLeast(0.02f)).fillMaxHeight()
                         .background(AppColors.Chart.at(i))
-                        .clickable { drill("$name 活躍對象", periodPredicate(name)) }
+                        .combinedClickable(
+                            onClick = { drill("$name 活躍對象", periodPredicate(name)) },
+                            onLongClick = { drill("$name 活躍對象", periodPredicate(name)) }
+                        )
                 )
             }
         }
@@ -9913,6 +10187,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showBlocked by remember { mutableStateOf(false) }
     var showKept by remember { mutableStateOf(false) }
     var showPalette by remember { mutableStateOf(false) }
+    val recapEnabled by viewModel.recapEnabled.collectAsState()
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -10041,6 +10316,20 @@ fun SettingsView(viewModel: RelateViewModel) {
                     }
                     Text("›", fontSize = 17.sp, color = AppColors.TextTertiary,
                         maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 6.dp))
+                }
+                SettingsDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { viewModel.setRecapEnabled(!recapEnabled) }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("每晚回顧通知", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("晚上九點左右整理今天的互動；今天沒互動就不發",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
+                    Switch(checked = recapEnabled, onCheckedChange = { viewModel.setRecapEnabled(it) })
                 }
                 SettingsDivider()
                 Row(
