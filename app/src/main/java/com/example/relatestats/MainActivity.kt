@@ -162,7 +162,7 @@ data class ChartPalette(
      * ⚠️ 標籤是「淺底＋深字」，所以每一個都必須是白底上讀得清楚的深度（不能拿圖表的淺色來用）。
      *    底色一律由字色壓到 15% 透明度得出，不另外列，才不會有色偏。
      *
-     * ⚠️ **前六個必須是不同色相，不是同一個顏色的深淺。**
+     * ⚠️ **前六個彼此的明度要拉開。**
      *    這是上一版最大的錯誤：為了「成套」而把八個標籤做成同色系，
      *    結果家人／伴侶／朋友／工作擺在一起完全分不出來，標籤顏色就失去意義了。
      *    「成套」靠的是彩度與明度的一致（都低彩、都中深），不是靠同色相。
@@ -187,69 +187,69 @@ data class ChartPalette(
  *    預設值才會跟以前一模一樣。
  */
 val CHART_PALETTES = listOf(
-    // 1. 經典藍（預設＝原本的 App 標準色）
+    // 1. App 標準色（藍）—— 預設
     ChartPalette(
         "app",
         accent = Color(0xFF2563EB), brand = Color(0xFF0F172A),
         colors = listOf(
-            Color(0xFF2563EB), Color(0xFF0F766E), Color(0xFF6366F1),
-            Color(0xFFB45309), Color(0xFF0EA5E9), Color(0xFF64748B)
+            Color(0xFF2563EB), Color(0xFF0F172A), Color(0xFF60A5FA),
+            Color(0xFF475569), Color(0xFF93C5FD), Color(0xFF1E3A8A)
         ),
         tags = listOf(
-            Color(0xFF1D4ED8), Color(0xFF0F766E), Color(0xFF6D28D9), Color(0xFFB45309),
-            Color(0xFFBE123C), Color(0xFF15803D), Color(0xFF64748B), Color(0xFF52525B)
+            Color(0xFF1D4ED8), Color(0xFF0891B2), Color(0xFF4338CA), Color(0xFF0F766E),
+            Color(0xFF16325C), Color(0xFF3B82F6), Color(0xFF64748B), Color(0xFF334155)
         )
     ),
-    // 2. 大地暖褐
+    // 2. 森林綠
     ChartPalette(
-        "earth",
-        accent = Color(0xFF8A5A3B), brand = Color(0xFF2E241C),
+        "forest",
+        accent = Color(0xFF2A6B54), brand = Color(0xFF14302A),
         colors = listOf(
-            Color(0xFF8A5A3B), Color(0xFF4F6B4A), Color(0xFF3F5A6B),
-            Color(0xFFC08552), Color(0xFF7A5C7A), Color(0xFF9C5F52)
+            Color(0xFF173D30), Color(0xFF7FC8A9), Color(0xFF3E8E6E),
+            Color(0xFFD9EEE3), Color(0xFF2A6B54), Color(0xFFA3D7BE)
         ),
         tags = listOf(
-            Color(0xFF8A5A3B), Color(0xFF4F6B4A), Color(0xFF3F5A6B), Color(0xFF9C5F52),
-            Color(0xFF7A5C7A), Color(0xFF6B6242), Color(0xFF7A6E63), Color(0xFF55504A)
+            Color(0xFF15803D), Color(0xFF0F766E), Color(0xFF4D7C0F), Color(0xFF046A4C),
+            Color(0xFF10462C), Color(0xFF6FA524), Color(0xFF6B7C6E), Color(0xFF3A4A40)
         )
     ),
-    // 3. 莫蘭迪霧
+    // 3. 質感深色（炭灰＋駝＋米）
     ChartPalette(
-        "morandi",
-        accent = Color(0xFF5B6E8C), brand = Color(0xFF2B303A),
+        "muted",
+        accent = Color(0xFF7A5C3E), brand = Color(0xFF242D30),
         colors = listOf(
-            Color(0xFF5B6E8C), Color(0xFF8A6A72), Color(0xFF5F7A61),
-            Color(0xFF937253), Color(0xFF6E668C), Color(0xFF4E7C7C)
+            Color(0xFF242D30), Color(0xFFA27B5C), Color(0xFF5C6E6F),
+            Color(0xFFE5E1D6), Color(0xFF3F4E4F), Color(0xFFB99B76)
         ),
         tags = listOf(
-            Color(0xFF5B6E8C), Color(0xFF8A6A72), Color(0xFF5F7A61), Color(0xFF937253),
-            Color(0xFF6E668C), Color(0xFF4E7C7C), Color(0xFF7D7468), Color(0xFF565C66)
+            Color(0xFF8A6240), Color(0xFF232B2E), Color(0xFF5C6E6F), Color(0xFFB08A64),
+            Color(0xFF6B4F3A), Color(0xFF3F4E4F), Color(0xFF7A6A55), Color(0xFF3B342E)
         )
     ),
-    // 4. 深海
+    // 4. 霧藍灰
     ChartPalette(
-        "ocean",
-        accent = Color(0xFF0E6E7C), brand = Color(0xFF0C2430),
+        "mist",
+        accent = Color(0xFF3D6488), brand = Color(0xFF263D52),
         colors = listOf(
-            Color(0xFF0B4F6C), Color(0xFF12857A), Color(0xFF3B5EA6),
-            Color(0xFFA15C3E), Color(0xFF4C7A9B), Color(0xFF1F6F52)
+            Color(0xFF2A3C4E), Color(0xFFAFC6D9), Color(0xFF5A7A94),
+            Color(0xFFE6EEF5), Color(0xFF7E9BB5), Color(0xFF93AEC7)
         ),
         tags = listOf(
-            Color(0xFF0B4F6C), Color(0xFF12857A), Color(0xFF3B5EA6), Color(0xFFA15C3E),
-            Color(0xFF1F6F52), Color(0xFF4C7A9B), Color(0xFF6B7A85), Color(0xFF46525E)
+            Color(0xFF3D6488), Color(0xFF43596B), Color(0xFF5F7A8A), Color(0xFF22384A),
+            Color(0xFF7392AB), Color(0xFF2F5773), Color(0xFF7C8A95), Color(0xFF3A4650)
         )
     ),
-    // 5. 粉霧玫瑰
+    // 5. 粉嫩
     ChartPalette(
         "blush",
-        accent = Color(0xFFB05A72), brand = Color(0xFF33222A),
+        accent = Color(0xFFA85C74), brand = Color(0xFF7E3E52),
         colors = listOf(
-            Color(0xFFA8506B), Color(0xFF8E5E8E), Color(0xFF9C6B52),
-            Color(0xFF6B7A8F), Color(0xFF5F7A66), Color(0xFFB07A46)
+            Color(0xFFBE7488), Color(0xFFF6DCE4), Color(0xFFE0A3B6),
+            Color(0xFFFBEFF3), Color(0xFFD7B7C4), Color(0xFFEFCBD8)
         ),
         tags = listOf(
-            Color(0xFFA8506B), Color(0xFF8E5E8E), Color(0xFF9C6B52), Color(0xFF6B7A8F),
-            Color(0xFF5F7A66), Color(0xFFB07A46), Color(0xFF8A7078), Color(0xFF5E545A)
+            Color(0xFFA85C74), Color(0xFFC07C93), Color(0xFF8E4A60), Color(0xFFB76E85),
+            Color(0xFF7E3E52), Color(0xFFD18FA5), Color(0xFFA98795), Color(0xFF6B3446)
         )
     )
 )
