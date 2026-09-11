@@ -146,18 +146,26 @@ import java.util.*
  */
 data class ChartPalette(
     val id: String,
+    /**
+     * 介面強調色：連結、被選中的日期、導覽列高亮、輸入框游標。
+     * ⚠️ 這個一定要跟著配色走。只換圖表與標籤的話，
+     *    選了粉色配色卻看到藍色的「本週」與藍色的分頁高亮，整個畫面就是散的。
+     */
+    val accent: Color,
+    /** 深色：填色按鈕、被選中的分頁、App 標記。配色的最深階。 */
+    val brand: Color,
     /** 圖表用色。colors[0] 同時是單色圖表（長條、色階格子）的主色，必須夠深。 */
     val colors: List<Color>,
     /**
      * 標籤用色。
-     * ⚠️ 跟 colors 分開列，不能直接共用 —— 標籤是「淺底 + 深字」，
-     *    圖表色裡那些很淺的（例如 #CEDCE7）拿來當字色根本看不見。
-     *    這裡每一個都必須是「放在白底上讀得清楚」的深度。
-     *    底色不另外列，一律由字色壓到 15% 透明度得出，才不會有色偏。
      *
-     * ⚠️ 前六個（索引 0–5）給一般標籤用，必須**彼此明顯不同** ——
-     *    同色系不代表要長一樣，要靠色相與明度拉開，
-     *    不然家人／伴侶／朋友／工作四個標籤擺在一起會分不出來。
+     * ⚠️ 標籤是「淺底＋深字」，所以每一個都必須是白底上讀得清楚的深度（不能拿圖表的淺色來用）。
+     *    底色一律由字色壓到 15% 透明度得出，不另外列，才不會有色偏。
+     *
+     * ⚠️ **前六個必須是不同色相，不是同一個顏色的深淺。**
+     *    這是上一版最大的錯誤：為了「成套」而把八個標籤做成同色系，
+     *    結果家人／伴侶／朋友／工作擺在一起完全分不出來，標籤顏色就失去意義了。
+     *    「成套」靠的是彩度與明度的一致（都低彩、都中深），不是靠同色相。
      *    最後兩個（6–7）留給「未分類」與「系統通知」，刻意做成最不搶眼的中性色。
      */
     val tags: List<Color>
@@ -169,77 +177,79 @@ data class ChartPalette(
 }
 
 /**
- * 圖表與標籤的配色。
+ * 配色。
  *
- * ⚠️ 這個只換**資料的顏色**（圖表切片、長條、色階、標籤），不換 App 介面。
- *    介面的灰白藍是骨架 —— 背景、卡片、按鈕、連結。換掉就變成另一個 App。
+ * 換的是「強調色 + 資料色」，**不換中性色** ——
+ * 背景、卡片、文字、分隔線永遠是那套灰白，所以不管選哪一組，
+ * App 看起來都還是同一個 App，只是換了個調性。
  *
- * ⚠️ 第一組必須是 App 標準色的家族。預設值不該是一個「風格選擇」，
- *    它要跟 App 本身看起來是同一套東西。
- *
- * 排列順序也有講究：相鄰的兩個顏色要看得出差別。
- * 同色系配色如果照明度排，圓餅圖上相鄰的兩塊會糊在一起，
- * 所以一律深、淺、深、淺交錯放。
+ * ⚠️ 第一組的 accent / brand 必須**完全等於**原本寫死的 #2563EB / #0F172A，
+ *    預設值才會跟以前一模一樣。
  */
 val CHART_PALETTES = listOf(
-    // 1. App 標準色（藍）—— 預設
+    // 1. 經典藍（預設＝原本的 App 標準色）
     ChartPalette(
         "app",
-        listOf(
-            Color(0xFF2563EB), Color(0xFF0F172A), Color(0xFF60A5FA),
-            Color(0xFF475569), Color(0xFF93C5FD), Color(0xFF1E3A8A)
+        accent = Color(0xFF2563EB), brand = Color(0xFF0F172A),
+        colors = listOf(
+            Color(0xFF2563EB), Color(0xFF0F766E), Color(0xFF6366F1),
+            Color(0xFFB45309), Color(0xFF0EA5E9), Color(0xFF64748B)
         ),
-        listOf(
-            Color(0xFF1D4ED8), Color(0xFF0891B2), Color(0xFF4338CA), Color(0xFF0F766E),
-            Color(0xFF1E3A8A), Color(0xFF3B82F6), Color(0xFF64748B), Color(0xFF475569)
+        tags = listOf(
+            Color(0xFF1D4ED8), Color(0xFF0F766E), Color(0xFF6D28D9), Color(0xFFB45309),
+            Color(0xFFBE123C), Color(0xFF15803D), Color(0xFF64748B), Color(0xFF52525B)
         )
     ),
-    // 2. 森林綠 —— 明確的綠，不要跟第 4 組的藍灰撞在一起
+    // 2. 大地暖褐
     ChartPalette(
-        "forest",
-        listOf(
-            Color(0xFF1F4D3D), Color(0xFF7FC8A9), Color(0xFF3E8E6E),
-            Color(0xFFC8E6D5), Color(0xFF2A6B54), Color(0xFFA3D7BE)
+        "earth",
+        accent = Color(0xFF8A5A3B), brand = Color(0xFF2E241C),
+        colors = listOf(
+            Color(0xFF8A5A3B), Color(0xFF4F6B4A), Color(0xFF3F5A6B),
+            Color(0xFFC08552), Color(0xFF7A5C7A), Color(0xFF9C5F52)
         ),
-        listOf(
-            Color(0xFF15803D), Color(0xFF0F766E), Color(0xFF4D7C0F), Color(0xFF047857),
-            Color(0xFF166534), Color(0xFF65A30D), Color(0xFF6B7C6E), Color(0xFF44554A)
+        tags = listOf(
+            Color(0xFF8A5A3B), Color(0xFF4F6B4A), Color(0xFF3F5A6B), Color(0xFF9C5F52),
+            Color(0xFF7A5C7A), Color(0xFF6B6242), Color(0xFF7A6E63), Color(0xFF55504A)
         )
     ),
-    // 3. 質感深色 —— 炭灰＋駝＋米，低彩度、耐看
+    // 3. 莫蘭迪霧
     ChartPalette(
-        "muted",
-        listOf(
-            Color(0xFF2C3639), Color(0xFFA27B5C), Color(0xFF5C6E6F),
-            Color(0xFFDCD7C9), Color(0xFF3F4E4F), Color(0xFFB99B76)
+        "morandi",
+        accent = Color(0xFF5B6E8C), brand = Color(0xFF2B303A),
+        colors = listOf(
+            Color(0xFF5B6E8C), Color(0xFF8A6A72), Color(0xFF5F7A61),
+            Color(0xFF937253), Color(0xFF6E668C), Color(0xFF4E7C7C)
         ),
-        listOf(
-            Color(0xFF8A6240), Color(0xFF2C3639), Color(0xFF5C6E6F), Color(0xFFA27B5C),
-            Color(0xFF6B4F3A), Color(0xFF3F4E4F), Color(0xFF7A6A55), Color(0xFF4A403A)
+        tags = listOf(
+            Color(0xFF5B6E8C), Color(0xFF8A6A72), Color(0xFF5F7A61), Color(0xFF937253),
+            Color(0xFF6E668C), Color(0xFF4E7C7C), Color(0xFF7D7468), Color(0xFF565C66)
         )
     ),
-    // 4. 霧藍灰 —— 明確偏藍的鋼灰
+    // 4. 深海
     ChartPalette(
-        "mist",
-        listOf(
-            Color(0xFF33475B), Color(0xFFAFC6D9), Color(0xFF5A7A94),
-            Color(0xFFDCE6EF), Color(0xFF7E9BB5), Color(0xFF93AEC7)
+        "ocean",
+        accent = Color(0xFF0E6E7C), brand = Color(0xFF0C2430),
+        colors = listOf(
+            Color(0xFF0B4F6C), Color(0xFF12857A), Color(0xFF3B5EA6),
+            Color(0xFFA15C3E), Color(0xFF4C7A9B), Color(0xFF1F6F52)
         ),
-        listOf(
-            Color(0xFF3D6488), Color(0xFF4A6572), Color(0xFF5F7A8A), Color(0xFF2F4858),
-            Color(0xFF6D8BA3), Color(0xFF3A5A6C), Color(0xFF7C8A95), Color(0xFF44535E)
+        tags = listOf(
+            Color(0xFF0B4F6C), Color(0xFF12857A), Color(0xFF3B5EA6), Color(0xFFA15C3E),
+            Color(0xFF1F6F52), Color(0xFF4C7A9B), Color(0xFF6B7A85), Color(0xFF46525E)
         )
     ),
-    // 5. 粉嫩 —— 比第 3 組粉、比第 3 組淺，兩組不會再混在一起
+    // 5. 粉霧玫瑰
     ChartPalette(
         "blush",
-        listOf(
-            Color(0xFFC98B9E), Color(0xFFF6DCE4), Color(0xFFE0A3B6),
-            Color(0xFFFBEFF3), Color(0xFFD7B7C4), Color(0xFFEFCBD8)
+        accent = Color(0xFFB05A72), brand = Color(0xFF33222A),
+        colors = listOf(
+            Color(0xFFA8506B), Color(0xFF8E5E8E), Color(0xFF9C6B52),
+            Color(0xFF6B7A8F), Color(0xFF5F7A66), Color(0xFFB07A46)
         ),
-        listOf(
-            Color(0xFFA85C74), Color(0xFFC07C93), Color(0xFF8E4A60), Color(0xFFB76E85),
-            Color(0xFF9C5568), Color(0xFFD18FA5), Color(0xFFA98795), Color(0xFF7E3E52)
+        tags = listOf(
+            Color(0xFFA8506B), Color(0xFF8E5E8E), Color(0xFF9C6B52), Color(0xFF6B7A8F),
+            Color(0xFF5F7A66), Color(0xFFB07A46), Color(0xFF8A7078), Color(0xFF5E545A)
         )
     )
 )
@@ -265,11 +275,14 @@ object AppColors {
     val TextSecondary = Color(0xFF64748B)
     val TextTertiary = Color(0xFF94A3B8)
 
-    // ── 強調 ──
-    // ⚠️ 這三個是介面骨架，不跟著圖表配色變。
-    //    畫資料請用 AppColors.Chart，不要用這裡的 ActiveBlue。
-    val BrandPrimary = Color(0xFF0F172A)
-    val ActiveBlue = Color(0xFF2563EB)
+    // ── 強調（跟著配色走）──
+    // ⚠️ 中性色（Background / Surface / Text / Border）**不跟著變**，那是骨架。
+    //    但強調色一定要跟 —— 選了粉色配色卻看到藍色的「本週」跟藍色分頁高亮，
+    //    畫面就是散的。這是 v3.16 的判斷失誤，v3.21 修正。
+    // ⚠️ 畫資料還是請用 AppColors.Chart，不要用 ActiveBlue。
+    //    兩者在預設配色下同色，但換了配色就不一樣了。
+    val BrandPrimary: Color get() = Chart.brand
+    val ActiveBlue: Color get() = Chart.accent
     /** ⚠️ 語意色：專門表示「上升／正向」。不要拿它來畫圖表。 */
     val Positive = Color(0xFF059669)
 
@@ -4329,12 +4342,19 @@ fun MainAppContent(viewModel: RelateViewModel) {
             }
         },
         bottomBar = {
-            NavigationBar(containerColor = AppColors.Surface, tonalElevation = 8.dp) {
+            // ⚠️ tonalElevation 必須是 0。
+            //    containerColor 跟 colorScheme.surface 相等時，M3 會拿 primary 色疊一層「色調膜」上去，
+            //    整條分頁列就變成淡藍的 —— 跟白底的內容區對不起來。
+            //    改成平的白底，跟內容的分隔靠上緣的細線。
+            Column {
+            HorizontalDivider(color = AppColors.BorderLight)
+            NavigationBar(containerColor = AppColors.Surface, tonalElevation = 0.dp) {
                 NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, "概況") }, label = { Text("概況", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "leaderboard", onClick = { setActiveTab("leaderboard") }, icon = { Icon(Icons.AutoMirrored.Rounded.List, "排行") }, label = { Text("排行", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "insights", onClick = { setActiveTab("insights") }, icon = { Icon(Icons.Rounded.Star, "分析") }, label = { Text("分析", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "contacts", onClick = { setActiveTab("contacts") }, icon = { Icon(Icons.Rounded.Person, "聯絡人") }, label = { Text("聯絡人", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
                 NavigationBarItem(selected = activeTab == "settings", onClick = { setActiveTab("settings") }, icon = { Icon(Icons.Rounded.Settings, "設定") }, label = { Text("設定", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+            }
             }
         }
     ) { paddingValues ->
@@ -9133,7 +9153,9 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
  */
 @Composable
 fun PaletteDialog(currentId: String, onPick: (String) -> Unit, onDismiss: () -> Unit) {
-    val sampleTags = listOf("家人", "伴侶", "朋友", "工作")
+    // ⚠️ 預覽一定要排滿六個標籤。只放四個看不出「六種標籤是不是分得開」，
+    //    而那正是上一版最大的問題。
+    val sampleTags = listOf("家人", "伴侶", "朋友", "工作", "同學", "其他")
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
@@ -9141,7 +9163,7 @@ fun PaletteDialog(currentId: String, onPick: (String) -> Unit, onDismiss: () -> 
             Column {
                 Text("圖表與標籤配色", fontWeight = FontWeight.Black, fontSize = 18.sp,
                     letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
-                Text("點一下立刻套用，關掉就能看到實際的圖表",
+                Text("圖表、標籤、按鈕與連結都會跟著換；背景與文字維持原本的灰白",
                     fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp)
             }
         },
@@ -9169,20 +9191,35 @@ fun PaletteDialog(currentId: String, onPick: (String) -> Unit, onDismiss: () -> 
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         // 標籤會長的樣子：直接畫成標籤
-                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             sampleTags.forEachIndexed { i, label ->
                                 Text(
                                     label, fontSize = T.Micro, fontWeight = FontWeight.Bold,
                                     color = p.tag(i), maxLines = 1, softWrap = false,
                                     modifier = Modifier.clip(RoundedCornerShape(5.dp))
                                         .background(p.tagBg(i))
-                                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                                        .padding(horizontal = 6.dp, vertical = 3.dp)
                                 )
                             }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 介面會長的樣子：這組配色的按鈕與連結
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("按鈕", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = Color.White,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(p.brand)
+                                    .padding(horizontal = 10.dp, vertical = 4.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("連結文字", fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                color = p.accent, maxLines = 1, softWrap = false)
+                            Spacer(modifier = Modifier.weight(1f))
                             if (on) {
-                                Spacer(modifier = Modifier.weight(1f))
                                 Text("✓", fontSize = T.Title, fontWeight = FontWeight.Black,
-                                    color = AppColors.BrandPrimary, maxLines = 1, softWrap = false)
+                                    color = p.brand, maxLines = 1, softWrap = false)
                             }
                         }
                     }
