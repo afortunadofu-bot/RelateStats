@@ -60,6 +60,8 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -144,112 +146,146 @@ import java.util.*
  *  · 標籤色（家人／同事…）—— 使用者自己挑的，覆蓋掉等於把設定弄丟
  *  · 「上升／下降」的綠紅 —— 那是語意，不是裝飾
  */
+/**
+ * 一個標籤 chip 的樣式。
+ *
+ * ⚠️ bg 與 text 是**各自獨立的色值**，不是從彼此算出來的。
+ *    舊版是「text 壓到 15% 透明度當 bg」，那在同一組裡會讓所有標籤的底色
+ *    深淺一模一樣，只剩文字色有差 —— 小色塊上根本分不出來。
+ *    現在兩個都明寫，底色也刻意做出深淺差。
+ * @param dashed 透明底＋虛線框。留給「未分類」——它代表「還沒分」，
+ *               不該長得像一個真正的標籤。
+ */
+data class TagStyle(val bg: Color, val text: Color, val dashed: Boolean = false)
+
 data class ChartPalette(
     val id: String,
     /**
      * 介面強調色：連結、被選中的日期、導覽列高亮、輸入框游標。
      * ⚠️ 這個一定要跟著配色走。只換圖表與標籤的話，
-     *    選了粉色配色卻看到藍色的「本週」與藍色的分頁高亮，整個畫面就是散的。
+     *    選了暖色配色卻看到藍色的「本週」與藍色的分頁高亮，整個畫面就是散的。
      */
     val accent: Color,
     /** 深色：填色按鈕、被選中的分頁、App 標記。配色的最深階。 */
     val brand: Color,
-    /** 圖表用色。colors[0] 同時是單色圖表（長條、色階格子）的主色，必須夠深。 */
+    /**
+     * 圖表用色（6 色）。colors[0] 同時是單色圖表（長條、色階格子）的主色，必須夠深。
+     * ⚠️ 設定頁色盤選擇畫面上方的預覽色條吃的就是這 6 色。
+     */
     val colors: List<Color>,
     /**
-     * 標籤用色。
-     *
-     * ⚠️ 標籤是「淺底＋深字」，所以每一個都必須是白底上讀得清楚的深度（不能拿圖表的淺色來用）。
-     *    底色一律由字色壓到 15% 透明度得出，不另外列，才不會有色偏。
-     *
-     * ⚠️ **前六個彼此的明度要拉開。**
-     *    這是上一版最大的錯誤：為了「成套」而把八個標籤做成同色系，
-     *    結果家人／伴侶／朋友／工作擺在一起完全分不出來，標籤顏色就失去意義了。
-     *    「成套」靠的是彩度與明度的一致（都低彩、都中深），不是靠同色相。
-     *    最後兩個（6–7）留給「未分類」與「系統通知」，刻意做成最不搶眼的中性色。
+     * 標籤 chip 用色（7 組），固定順序：
+     *   0 伴侶／男友　1 家人　2 朋友　3 工作　4 其他　5 系統通知　6 未分類
+     * ⚠️ 跟 colors 是**兩份獨立的資料**，不互相衍生，只要求色相彼此呼應。
+     * ⚠️ 0–4 要靠明度差分開，不能只差色相 —— chip 很小，只有明度差看得出來。
+     * ⚠️ 索引 6（未分類）是 dashed 的，所以自訂標籤配色只能挑 0–5，
+     *    不然使用者會挑到一個「看起來沒分類」的樣式。
      */
-    val tags: List<Color>
+    val tags: List<TagStyle>
 ) {
     val primary: Color get() = colors[0]
     fun at(i: Int): Color = colors[((i % colors.size) + colors.size) % colors.size]
-    fun tag(i: Int): Color = tags[((i % tags.size) + tags.size) % tags.size]
-    fun tagBg(i: Int): Color = tag(i).copy(alpha = 0.15f)
+    fun tagStyle(i: Int): TagStyle = tags[((i % tags.size) + tags.size) % tags.size]
+    fun tag(i: Int): Color = tagStyle(i).text
+    fun tagBg(i: Int): Color = tagStyle(i).bg
 }
 
 /**
  * 配色。
  *
- * 換的是「強調色 + 資料色」，**不換中性色** ——
+ * 換的是「強調色 + 圖表色 + 標籤色」，**不換中性色** ——
  * 背景、卡片、文字、分隔線永遠是那套灰白，所以不管選哪一組，
  * App 看起來都還是同一個 App，只是換了個調性。
- *
- * ⚠️ 第一組的 accent / brand 必須**完全等於**原本寫死的 #2563EB / #0F172A，
- *    預設值才會跟以前一模一樣。
  */
 val CHART_PALETTES = listOf(
-    // 1. App 標準色（藍）—— 預設
+    // A 霧灰藍
     ChartPalette(
-        "app",
-        accent = Color(0xFF2563EB), brand = Color(0xFF0F172A),
+        "mistblue",
+        accent = Color(0xFF4A6373), brand = Color(0xFF3E4A54),
         colors = listOf(
-            Color(0xFF2563EB), Color(0xFF0F172A), Color(0xFF60A5FA),
-            Color(0xFF475569), Color(0xFF93C5FD), Color(0xFF1E3A8A)
+            Color(0xFF3E4A54), Color(0xFF6E8695), Color(0xFFC08A85),
+            Color(0xFFD3A45E), Color(0xFF6E8078), Color(0xFFDEDEDC)
         ),
         tags = listOf(
-            Color(0xFF1D4ED8), Color(0xFF0891B2), Color(0xFF4338CA), Color(0xFF0F766E),
-            Color(0xFF16325C), Color(0xFF3B82F6), Color(0xFF64748B), Color(0xFF334155)
+            TagStyle(Color(0xFFF4E3E1), Color(0xFF9A554F)),   // 伴侶：霧玫瑰
+            TagStyle(Color(0xFFE3ECF3), Color(0xFF3C5B6E)),   // 家人：霧藍
+            TagStyle(Color(0xFFE7EEEA), Color(0xFF4A6459)),   // 朋友：霧綠
+            TagStyle(Color(0xFFF8EEDB), Color(0xFF8A6418)),   // 工作：赭黃
+            TagStyle(Color(0xFFDFE3E7), Color(0xFF39454F)),   // 其他：深板岩
+            TagStyle(Color(0xFFEFEFEE), Color(0xFF7C8287)),   // 系統通知：安靜灰
+            TagStyle(Color.Transparent, Color(0xFF8C939A), dashed = true) // 未分類
         )
     ),
-    // 2. 森林綠
+    // B 酒紅暖調
     ChartPalette(
-        "forest",
-        accent = Color(0xFF2A6B54), brand = Color(0xFF14302A),
+        "wine",
+        accent = Color(0xFFA8483C), brand = Color(0xFF6B322C),
         colors = listOf(
-            Color(0xFF173D30), Color(0xFF7FC8A9), Color(0xFF3E8E6E),
-            Color(0xFFD9EEE3), Color(0xFF2A6B54), Color(0xFFA3D7BE)
+            Color(0xFF6B322C), Color(0xFFC0685C), Color(0xFFCC7C9C),
+            Color(0xFFB49B6C), Color(0xFF6E9A97), Color(0xFFE6DCD6)
         ),
         tags = listOf(
-            Color(0xFF15803D), Color(0xFF0F766E), Color(0xFF4D7C0F), Color(0xFF046A4C),
-            Color(0xFF10462C), Color(0xFF6FA524), Color(0xFF6B7C6E), Color(0xFF3A4A40)
+            TagStyle(Color(0xFFF8E2DD), Color(0xFFA8483C)),   // 伴侶：赤陶
+            TagStyle(Color(0xFFF4DCE5), Color(0xFF9C4466)),   // 家人：玫瑰
+            TagStyle(Color(0xFFDFEDEC), Color(0xFF3C6E6A)),   // 朋友：霧青
+            TagStyle(Color(0xFFF3ECD9), Color(0xFF7A652C)),   // 工作：卡其
+            TagStyle(Color(0xFFEBDBD8), Color(0xFF5E2A25)),   // 其他：酒紅
+            TagStyle(Color(0xFFF0EBE8), Color(0xFF877C75)),   // 系統通知
+            TagStyle(Color.Transparent, Color(0xFF9C918A), dashed = true)
         )
     ),
-    // 3. 質感深色（炭灰＋駝＋米）
+    // C 抹茶灰綠
     ChartPalette(
-        "muted",
-        accent = Color(0xFF7A5C3E), brand = Color(0xFF242D30),
+        "matcha",
+        accent = Color(0xFF5F7A2E), brand = Color(0xFF46463E),
         colors = listOf(
-            Color(0xFF242D30), Color(0xFFA27B5C), Color(0xFF5C6E6F),
-            Color(0xFFE5E1D6), Color(0xFF3F4E4F), Color(0xFFB99B76)
+            Color(0xFF46463E), Color(0xFF84847C), Color(0xFFC79290),
+            Color(0xFF92B356), Color(0xFF93A38F), Color(0xFFDCDCD4)
         ),
         tags = listOf(
-            Color(0xFF8A6240), Color(0xFF232B2E), Color(0xFF5C6E6F), Color(0xFFB08A64),
-            Color(0xFF6B4F3A), Color(0xFF3F4E4F), Color(0xFF7A6A55), Color(0xFF3B342E)
+            TagStyle(Color(0xFFF6E4E2), Color(0xFF9E5B57)),   // 伴侶：霧粉
+            TagStyle(Color(0xFFE9F1DA), Color(0xFF587522)),   // 家人：抹茶
+            TagStyle(Color(0xFFE6EDE5), Color(0xFF48634C)),   // 朋友：灰綠
+            TagStyle(Color(0xFFF1EEDC), Color(0xFF6B5F30)),   // 工作：橄欖
+            TagStyle(Color(0xFFE4E4DF), Color(0xFF3F3F37)),   // 其他：深橄欖
+            TagStyle(Color(0xFFF1F1ED), Color(0xFF87877D)),   // 系統通知
+            TagStyle(Color.Transparent, Color(0xFF95958C), dashed = true)
         )
     ),
-    // 4. 霧藍灰
+    // D 大地棕調
     ChartPalette(
-        "mist",
-        accent = Color(0xFF3D6488), brand = Color(0xFF263D52),
+        "earth",
+        accent = Color(0xFFA85F14), brand = Color(0xFF3A2E2C),
         colors = listOf(
-            Color(0xFF2A3C4E), Color(0xFFAFC6D9), Color(0xFF5A7A94),
-            Color(0xFFE6EEF5), Color(0xFF7E9BB5), Color(0xFF93AEC7)
+            Color(0xFF3A2E2C), Color(0xFF6E5F5A), Color(0xFFBC8CA8),
+            Color(0xFFDD8C34), Color(0xFF7E8E80), Color(0xFFE0D6CC)
         ),
         tags = listOf(
-            Color(0xFF3D6488), Color(0xFF43596B), Color(0xFF5F7A8A), Color(0xFF22384A),
-            Color(0xFF7392AB), Color(0xFF2F5773), Color(0xFF7C8A95), Color(0xFF3A4650)
+            TagStyle(Color(0xFFF5E2EC), Color(0xFF8A4A6C)),   // 伴侶：藕紫
+            TagStyle(Color(0xFFFBEAD4), Color(0xFFA05A10)),   // 家人：琥珀
+            TagStyle(Color(0xFFE7EDE7), Color(0xFF4C6350)),   // 朋友：灰綠
+            TagStyle(Color(0xFFEDE7E4), Color(0xFF5C4E49)),   // 工作：灰褐
+            TagStyle(Color(0xFFE5DDD9), Color(0xFF352A28)),   // 其他：深棕
+            TagStyle(Color(0xFFF2EDEA), Color(0xFF8C817B)),   // 系統通知
+            TagStyle(Color.Transparent, Color(0xFF9E938D), dashed = true)
         )
     ),
-    // 5. 粉嫩
+    // E 山巒暮色
     ChartPalette(
-        "blush",
-        accent = Color(0xFFA85C74), brand = Color(0xFF7E3E52),
+        "dusk",
+        accent = Color(0xFF3A554E), brand = Color(0xFF22332E),
         colors = listOf(
-            Color(0xFFBE7488), Color(0xFFF6DCE4), Color(0xFFE0A3B6),
-            Color(0xFFFBEFF3), Color(0xFFD7B7C4), Color(0xFFEFCBD8)
+            Color(0xFF22332E), Color(0xFF4A625C), Color(0xFFE0AE86),
+            Color(0xFF92A896), Color(0xFF6E6A5E), Color(0xFFDCDAD2)
         ),
         tags = listOf(
-            Color(0xFFA85C74), Color(0xFFC07C93), Color(0xFF8E4A60), Color(0xFFB76E85),
-            Color(0xFF7E3E52), Color(0xFFD18FA5), Color(0xFFA98795), Color(0xFF6B3446)
+            TagStyle(Color(0xFFFBEADA), Color(0xFFA4663A)),   // 伴侶：杏
+            TagStyle(Color(0xFFE1ECE8), Color(0xFF35534C)),   // 家人：松綠
+            TagStyle(Color(0xFFE8EFE9), Color(0xFF4C6A56)),   // 朋友：霧綠
+            TagStyle(Color(0xFFDFE6E2), Color(0xFF1E2F2A)),   // 工作：深林
+            TagStyle(Color(0xFFEEEBE2), Color(0xFF5C584C)),   // 其他：暖灰
+            TagStyle(Color(0xFFF2F1EB), Color(0xFF8A8778)),   // 系統通知
+            TagStyle(Color.Transparent, Color(0xFF929182), dashed = true)
         )
     )
 )
@@ -302,8 +338,9 @@ object AppColors {
 
 // 標籤可挑選的配色。⚠️ 直接來自目前的圖表配色 ——
     // 標籤與圖表是同一批資料的兩種呈現，配色分家會很怪。
+    // ⚠️ 只給 0..5，不給 6（未分類的虛線樣式）
     val CategoryPalette: List<Pair<Color, Color>> get() =
-        Chart.tags.indices.map { Chart.tag(it) to Chart.tagBg(it) }
+        (0..5).map { Chart.tag(it) to Chart.tagBg(it) }
 
     /** 舊版寫死的標籤色，只用於把舊資料轉成索引 */
     val LegacyTagColors = listOf(
@@ -344,16 +381,20 @@ object D {
 data class ContactCategory(val id: String, val label: String, val colorInt: Int, val bgColorInt: Int) {
     val color: Color get() = if (colorInt in 0..15) AppColors.Chart.tag(colorInt) else Color(colorInt)
     val bgColor: Color get() = if (bgColorInt in 0..15) AppColors.Chart.tagBg(bgColorInt) else Color(bgColorInt)
+    /** 透明底＋虛線框（只有「未分類」是這樣）。舊資料用絕對色值的一律不是。 */
+    val dashed: Boolean get() = colorInt in 0..15 && AppColors.Chart.tagStyle(colorInt).dashed
     fun toCsvString() = listOf(id, label, colorInt.toString(), bgColorInt.toString()).joinToString("|cat|")
     companion object {
-// 數字是配色索引，不是色值 —— 換配色時這些標籤會跟著換色
-        val WORK = ContactCategory("WORK", "工作", 3, 3)
-        val FAMILY = ContactCategory("FAMILY", "家人", 0, 0)
+// 數字是配色索引，不是色值 —— 換配色時這些標籤會跟著換色。
+        // ⚠️ 索引對應 ChartPalette.tags 的固定順序：
+        //    0 伴侶　1 家人　2 朋友　3 工作　4 其他　5 系統通知　6 未分類
+        val PARTNER = ContactCategory("PARTNER", "伴侶", 0, 0)
+        val FAMILY = ContactCategory("FAMILY", "家人", 1, 1)
         val FRIEND = ContactCategory("FRIEND", "朋友", 2, 2)
-        val OTHER = ContactCategory("OTHER", "未分類", 6, 6)
+        val WORK = ContactCategory("WORK", "工作", 3, 3)
         // IG 讚／追蹤者／串文推播等非真人通知統一歸到這裡，排行預設不顯示
-        val SYSTEM = ContactCategory("SYSTEM", "系統通知", 7, 7)
-        val PARTNER = ContactCategory("PARTNER", "伴侶", 1, 1)
+        val SYSTEM = ContactCategory("SYSTEM", "系統通知", 5, 5)
+        val OTHER = ContactCategory("OTHER", "未分類", 6, 6)
 
         // 首次啟動的預設清單。名稱與顏色之後都可以在「標籤管理」裡改，
         // 但 OTHER / SYSTEM 這兩個 id 程式內部會用到，不可刪除。
@@ -1125,6 +1166,7 @@ object DataRepository {
         //    放在前面的話會對著舊值（或空清單）做轉換，然後把旗標設成已完成 ——
         //    既沒轉到東西，之後也不會再跑。
         migrateTagColorsToIndex(p)
+        migrateTagSlots(p)
 
         _wordSenders.value = runCatching {
             val out = HashMap<String, HashMap<String, Int>>()
@@ -1183,6 +1225,41 @@ object DataRepository {
             saveData(immediate = true)
         }
         p.edit().putBoolean("tag_palette_v317_done", true).apply()
+    }
+
+    /**
+     * 把舊的標籤色索引搬到新的七格順序。
+     *
+     * 舊順序：家人 0、伴侶 1、朋友 2、工作 3、未分類 6、系統通知 7
+     * 新順序：伴侶 0、家人 1、朋友 2、工作 3、其他 4、系統通知 5、未分類 6
+     *
+     * ⚠️ 不搬的話會出兩個問題：
+     *   1. 家人與伴侶的顏色對調（純外觀，但看起來像壞掉）
+     *   2. 系統通知停在索引 7 —— 新的 tags 只有 0..6，取模之後會拿到索引 0，
+     *      「系統通知」會長得跟「伴侶」一模一樣。
+     * ⚠️ 自訂標籤如果落在 5 或 6，也要拉回來 ——
+     *    那兩格是系統通知與未分類的保留樣式（尤其 6 是虛線，代表「還沒分類」）。
+     */
+    private fun migrateTagSlots(p: SharedPreferences) {
+        if (p.getBoolean("tag_slots_v323_done", false)) return
+        val fixed = mapOf(
+            ContactCategory.PARTNER.id to 0, ContactCategory.FAMILY.id to 1,
+            ContactCategory.FRIEND.id to 2, ContactCategory.WORK.id to 3,
+            ContactCategory.SYSTEM.id to 5, ContactCategory.OTHER.id to 6
+        )
+        val next = _availableCategories.value.map { c ->
+            val slot = fixed[c.id]
+            when {
+                slot != null -> c.copy(colorInt = slot, bgColorInt = slot)
+                c.colorInt in 5..15 -> c.copy(colorInt = 4, bgColorInt = 4)
+                else -> c
+            }
+        }
+        if (next != _availableCategories.value) {
+            _availableCategories.value = next
+            saveData(immediate = true)
+        }
+        p.edit().putBoolean("tag_slots_v323_done", true).apply()
     }
 
     private fun applyChartPalette(id: String) {
@@ -3943,7 +4020,8 @@ class RelateViewModel : ViewModel() {
 
     fun addNewCategory(label: String, targetUnifiedName: String? = null) {
         // 存的是配色索引，不是色值 —— 換配色時這個新標籤才會跟著變
-        val slot = AppColors.Chart.tags.indices.random()
+        // ⚠️ 不能挑到 6 —— 那是「未分類」的虛線樣式，自訂標籤長成那樣會很怪
+        val slot = (0..4).random()
         val newCat = ContactCategory(id = UUID.randomUUID().toString(), label = label, colorInt = slot, bgColorInt = slot)
         DataRepository.addCustomCategory(newCat)
         if (targetUnifiedName != null) DataRepository.updateCategory(targetUnifiedName, newCat.id)
@@ -4656,7 +4734,7 @@ fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -
                                     val secs = stat.totalDurationSeconds % 60
                                     Text("💬 ${stat.msgCount} 則 · 📞 ${stat.callCount} 通 · ⏳ $mins 分 $secs 秒", fontSize = T.Label, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
-                                Box(modifier = Modifier.background(stat.category.bgColor, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                                Box(modifier = Modifier.tagChip(stat.category, 4.dp).padding(horizontal = 6.dp, vertical = 2.dp)) {
                                     Text(stat.category.label, color = stat.category.color, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
@@ -4948,7 +5026,7 @@ fun QuickClassifyDialog(
                         row.forEach { cat ->
                             Box(
                                 modifier = Modifier.weight(1f)
-                                    .background(cat.bgColor, RoundedCornerShape(8.dp))
+                                    .tagChip(cat, 8.dp)
                                     .clickable { onAssign(current.unifiedName, cat.id); index++ }
                                     .padding(vertical = 10.dp),
                                 contentAlignment = Alignment.Center
@@ -4996,7 +5074,7 @@ fun QuickTagDialog(
                     Row(
                         modifier = Modifier.fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
-                            .background(cat.bgColor)
+                            .tagChip(cat, 8.dp)
                             .then(if (on) Modifier.border(2.dp, cat.color, RoundedCornerShape(8.dp)) else Modifier)
                             .clickable { onPick(cat.id) }
                             .padding(horizontal = 12.dp, vertical = 11.dp),
@@ -5163,6 +5241,24 @@ fun NoticeAction(label: String, tint: Color, filled: Boolean = false, onClick: (
             .padding(horizontal = 12.dp, vertical = 7.dp)
     )
 }
+
+/**
+ * 標籤 chip 的底。
+ *
+ * ⚠️ 一般標籤是實心底色；「未分類」是透明底＋虛線框 ——
+ *    它代表「還沒分」，不該長得像一個真正的標籤。
+ *    全 App 的 chip 都走這裡，不要再各自寫 .background(cat.bgColor, ...)，
+ *    不然新增樣式時會漏掉幾處。
+ */
+fun Modifier.tagChip(cat: ContactCategory, radius: Dp): Modifier =
+    if (cat.dashed) this.drawBehind {
+        val r = radius.toPx()
+        drawRoundRect(
+            color = cat.color.copy(alpha = 0.55f),
+            cornerRadius = CornerRadius(r, r),
+            style = Stroke(width = 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
+        )
+    } else this.background(cat.bgColor, RoundedCornerShape(radius))
 
 /** 區塊標題列：左標題、右可放切換器或說明 */
 @Composable
@@ -6189,7 +6285,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                                         Spacer(modifier = Modifier.width(5.dp))
                                         Text(cat.label, fontSize = T.Micro, fontWeight = FontWeight.Bold,
                                             color = cat.color, maxLines = 1, softWrap = false,
-                                            modifier = Modifier.background(cat.bgColor, RoundedCornerShape(5.dp))
+                                            modifier = Modifier.tagChip(cat, 5.dp)
                                                 .padding(horizontal = 5.dp, vertical = 1.dp))
                                     }
                                 }
@@ -6961,7 +7057,7 @@ fun ContactDetailDialog(
         title = {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.background(stat.category.bgColor, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 3.dp)) {
+                    Box(modifier = Modifier.tagChip(stat.category, 6.dp).padding(horizontal = 8.dp, vertical = 3.dp)) {
                         Text(stat.category.label, color = stat.category.color, fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                     }
                     if (stat.isGroup) {
@@ -7184,7 +7280,7 @@ fun RankRow(
         Column(modifier = Modifier.weight(1f).padding(start = 4.dp, end = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // 標籤才是使用者要看的資訊；群組只用一個小記號附註，不再蓋掉標籤
-                Box(modifier = Modifier.background(stat.category.bgColor, RoundedCornerShape(4.dp))
+                Box(modifier = Modifier.tagChip(stat.category, 4.dp)
                     .padding(horizontal = 5.dp, vertical = 1.dp)) {
                     Text(stat.category.label, color = stat.category.color, fontSize = T.Micro,
                         fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
@@ -7321,7 +7417,7 @@ fun LeaderboardView(viewModel: RelateViewModel) {
                     val on = catFilter?.id == cat.id
                     Box(modifier = Modifier
                         .clip(RoundedCornerShape(14.dp))
-                        .background(if (on) cat.color else cat.bgColor)
+                        .then(if (on) Modifier.background(cat.color) else Modifier.tagChip(cat, 14.dp))
                         .border(1.dp, if (on) cat.color else AppColors.BorderLight, RoundedCornerShape(14.dp))
                         .clickable { viewModel.setCategoryFilter(cat) }
                         .padding(horizontal = 12.dp, vertical = 5.dp)) {
@@ -8161,12 +8257,12 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         if (selectionMode) {
                             Text(currentCategory.label, color = currentCategory.color, fontWeight = FontWeight.Bold,
                                 fontSize = T.Micro, maxLines = 1, softWrap = false,
-                                modifier = Modifier.background(currentCategory.bgColor, RoundedCornerShape(6.dp))
+                                modifier = Modifier.tagChip(currentCategory, 6.dp)
                                     .padding(horizontal = 8.dp, vertical = 4.dp))
                         } else {
                             Row(
                                 modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                    .background(currentCategory.bgColor)
+                                    .tagChip(currentCategory, 6.dp)
                                     .clickable { quickTagTarget = unifiedName }
                                     .padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -8894,7 +8990,7 @@ fun CategoryManagerDialog(viewModel: RelateViewModel, categories: List<ContactCa
                         modifier = Modifier.fillMaxWidth().background(AppColors.Background, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(modifier = Modifier.background(cat.bgColor, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+                        Box(modifier = Modifier.tagChip(cat, 6.dp).padding(horizontal = 8.dp, vertical = 4.dp)) {
                             Text(cat.label, color = cat.color, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Spacer(modifier = Modifier.weight(1f))
@@ -9153,9 +9249,9 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
  */
 @Composable
 fun PaletteDialog(currentId: String, onPick: (String) -> Unit, onDismiss: () -> Unit) {
-    // ⚠️ 預覽一定要排滿六個標籤。只放四個看不出「六種標籤是不是分得開」，
-    //    而那正是上一版最大的問題。
-    val sampleTags = listOf("家人", "伴侶", "朋友", "工作", "同學", "其他")
+    // ⚠️ 預覽要排滿七個，順序跟 ChartPalette.tags 一致。
+    //    只放幾個的話看不出「標籤彼此分不分得開」，而那正是挑配色最想知道的事。
+    val sampleTags = listOf("伴侶", "家人", "朋友", "工作", "其他", "系統通知", "未分類")
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
@@ -9199,9 +9295,24 @@ fun PaletteDialog(currentId: String, onPick: (String) -> Unit, onDismiss: () -> 
                             sampleTags.forEachIndexed { i, label ->
                                 Text(
                                     label, fontSize = T.Micro, fontWeight = FontWeight.Bold,
-                                    color = p.tag(i), maxLines = 1, softWrap = false,
-                                    modifier = Modifier.clip(RoundedCornerShape(5.dp))
-                                        .background(p.tagBg(i))
+                                    color = p.tagStyle(i).text, maxLines = 1, softWrap = false,
+                                    modifier = Modifier
+                                        .then(
+                                            // 未分類：透明底＋虛線框，預覽裡也要看得到
+                                            p.tagStyle(i).let { st ->
+                                                if (st.dashed) Modifier.drawBehind {
+                                                    val r = 5.dp.toPx()
+                                                    drawRoundRect(
+                                                        color = st.text.copy(alpha = 0.55f),
+                                                        cornerRadius = CornerRadius(r, r),
+                                                        style = Stroke(
+                                                            width = 1.dp.toPx(),
+                                                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
+                                                        )
+                                                    )
+                                                } else Modifier.background(st.bg, RoundedCornerShape(5.dp))
+                                            }
+                                        )
                                         .padding(horizontal = 6.dp, vertical = 3.dp)
                                 )
                             }
