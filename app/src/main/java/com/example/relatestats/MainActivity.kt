@@ -8990,10 +8990,18 @@ fun ContactAccountsDialog(
                         maxLines = if (nameExpanded) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
                             .combinedClickable(onClick = { nameExpanded = !nameExpanded }, onLongClick = { nameExpanded = !nameExpanded }))
-                    Text("自訂名稱", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
-                        maxLines = 1, softWrap = false,
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onCustomName() }
-                            .padding(horizontal = 8.dp, vertical = 5.dp))
+                    // ⚠️ 以前只是一行藍字，跟旁邊的名字混在一起看不出是按鈕 —— 改成實心膠囊＋筆的圖示。
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Row(
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(AppColors.BrandPrimary)
+                            .clickable { onCustomName() }.padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("自訂暱稱", fontSize = T.Label, fontWeight = FontWeight.Bold, color = Color.White,
+                            maxLines = 1, softWrap = false)
+                    }
                 }
 
                 Text("已綁定的帳號（${rawNames.size}）", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
@@ -10209,7 +10217,8 @@ private val USER_GUIDE = listOf(
         "4", "聯絡人、合併與名稱",
         listOf(
             "同一個人在不同平台會被當成不同帳號。點聯絡人 →「帳號與名稱」可以把其他帳號綁到這個人身上，之後統計會合併計算。",
-            "在「帳號與名稱」裡看得到這個人綁了哪些帳號，可以挑其中一個當顯示名稱，或自訂名稱。改名只影響本 App，不會動到 LINE 或 IG。",
+            "在「帳號與名稱」裡看得到這個人綁了哪些帳號，可以挑其中一個按「用這個名字」，或按顯示名稱旁的藍色「✎ 自訂暱稱」自己打。改名只影響本 App，不會動到 LINE 或 IG。",
+            "帳號名稱太長被切掉時，長按（或點一下）名字就會展開全名，再按一次收回。",
             "綁錯了按「取消綁定」，那個帳號會變回獨立的聯絡人，紀錄跟著它走，不會遺失。",
             "卡片上寫「已合併 N 個帳號 ›」的那一行也可以直接點開。長按聯絡人可以多選，批次設定標籤或刪除。"
         )
@@ -10278,7 +10287,8 @@ private val USER_FAQ = listOf(
     "合併錯人了，怎麼拆開？" to
         "點那位聯絡人 →「帳號與名稱」，在綁錯的帳號旁按「取消綁定」。它會變回獨立的聯絡人，紀錄跟著它走，不會遺失。",
     "合併後想用另一個名字？" to
-        "同樣在「帳號與名稱」裡，挑一個帳號按「用這個名字」，或按「自訂名稱」自己打。",
+        "同樣在「帳號與名稱」裡，挑一個帳號按「用這個名字」，或按顯示名稱旁的藍色「✎ 自訂暱稱」自己打。" +
+        "帳號名稱被切掉分不出來時，長按名字可以看全名。",
     "為什麼有一堆不是人的「聯絡人」？" to
         "讚、追蹤者、推播這類通知也會被系統送出來，名稱還會把數字寫進去，所以同一種通知會被拆成很多筆。" +
         "聯絡人頁的提醒卡點開可以逐筆確認。不要用刪除的 —— 對方下次推播就會重建。",
