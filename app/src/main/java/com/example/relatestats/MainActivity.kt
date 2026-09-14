@@ -8960,6 +8960,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
  *    · 合併後顯示名稱固定是主帳號，不能挑
  *    全部收進這一個地方。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ContactAccountsDialog(
     unifiedName: String,
@@ -8983,9 +8984,12 @@ fun ContactAccountsDialog(
         text = {
             Column {
                 Text("顯示名稱", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
+                var nameExpanded by remember { mutableStateOf(false) }
                 Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(unifiedName, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        maxLines = if (nameExpanded) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
+                            .combinedClickable(onClick = { nameExpanded = !nameExpanded }, onLongClick = { nameExpanded = !nameExpanded }))
                     Text("自訂名稱", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
                         maxLines = 1, softWrap = false,
                         modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onCustomName() }
@@ -8993,18 +8997,24 @@ fun ContactAccountsDialog(
                 }
 
                 Text("已綁定的帳號（${rawNames.size}）", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
-                Text("點「用這個名字」把它設成顯示名稱；綁錯了按「取消綁定」，它會變回獨立的聯絡人，紀錄跟著它走。",
+                Text("名字太長被切掉時，長按名字看全名。點「用這個名字」把它設成顯示名稱；綁錯了按「取消綁定」，它會變回獨立的聯絡人，紀錄跟著它走。",
                     fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
                     modifier = Modifier.padding(top = 2.dp, bottom = 4.dp))
                 LazyColumn(modifier = Modifier.heightIn(max = 280.dp)) {
                     items(rawNames, key = { it }) { raw ->
                         val isCurrent = raw == unifiedName
+                        // ⚠️ 群組帳號常常開頭都一樣（「(lavender_0806) …」），截斷後八個看起來一模一樣，
+                        //    長按（或點一下）名字就展開全名，再按一次收回。
+                        var expanded by remember(raw) { mutableStateOf(false) }
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(raw, fontSize = T.Body, color = AppColors.TextPrimary,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 6.dp))
+                                maxLines = if (expanded) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f).padding(end = 6.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .combinedClickable(onClick = { expanded = !expanded }, onLongClick = { expanded = !expanded }))
                             if (isCurrent) {
                                 Text("目前顯示", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = AppColors.TextTertiary,
                                     maxLines = 1, softWrap = false)
