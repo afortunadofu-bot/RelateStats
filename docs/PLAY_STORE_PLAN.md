@@ -44,10 +44,10 @@
 依順序：
 
 1. [ ] **把現有資料搬到新版**（見第 3 節）
-2. [ ] **註冊 Play Console 開發者帳號**（US$25，身分驗證要等幾天，越早送越好）
+2. [x] **註冊 Play Console 開發者帳號**（US$25，身分驗證要等幾天，越早送越好）
 3. [ ] **產生 upload key**（見第 4 節）
 4. [ ] **開 GitHub Pages 讓隱私權政策上線**（見第 6 節）
-5. [ ] **隱私權政策與 SUBMISSION.md 填入聯絡信箱**（建議另開一個專用信箱，這會公開）
+5. [x] **隱私權政策與 SUBMISSION.md 填入聯絡信箱**：celine.fu.work@gmail.com
 6. [ ] **截圖與主題圖片**（用範例資料，規格見 SUBMISSION.md 第 1 節）
 7. [ ] **錄無障礙聲明影片**，上傳 YouTube 設為不公開（腳本見 SUBMISSION.md 第 3 節）
 8. [ ] **在 Console 建立 App、填所有表單**（照 SUBMISSION.md 貼上）
