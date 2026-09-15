@@ -2373,7 +2373,12 @@ object DailyRecap {
     data class RecapStat(
         val msgs: Int, val people: Int, val dur: Long,
         val yMsgs: Int, val yPeople: Int, val yDur: Long,
-        val top: List<Pair<String, Int>>
+        /** 聊最多的三個人：名字、筆數、主要在哪個 App */
+        val top: List<Triple<String, Int, String>>,
+        /** 今天每小時的互動筆數（24 格） */
+        val hourly: List<Int>,
+        /** 依標籤分的互動對象人數，由多到少 */
+        val catShare: List<Pair<ContactCategory, Int>>
     )
 
     /** 今天沒有真人互動就回 null —— 沒事就不要吵人。 */
@@ -2387,15 +2392,30 @@ object DailyRecap {
         val t = all.filter { it.timestamp >= today && !isExcludedFromStats(nameOf(it), cats) }
         if (t.isEmpty()) return null
         val y = all.filter { it.timestamp in yStart until today && !isExcludedFromStats(nameOf(it), cats) }
+
+        val cal = Calendar.getInstance()
+        val hourly = IntArray(24)
+        t.forEach { cal.timeInMillis = it.timestamp; hourly[cal.get(Calendar.HOUR_OF_DAY)]++ }
+
+        val catList = DataRepository.availableCategories.value
+        val people = t.mapTo(HashSet()) { nameOf(it) }
+        val catShare = people
+            .groupingBy { n -> catList.firstOrNull { it.id == cats[n] } ?: ContactCategory.OTHER }
+            .eachCount().entries.sortedByDescending { it.value }.map { it.key to it.value }
+
+        val byName = t.groupBy { nameOf(it) }
         return RecapStat(
             msgs = t.count { it.isIncoming && !it.isCall },
-            people = t.mapTo(HashSet()) { nameOf(it) }.size,
+            people = people.size,
             dur = t.sumOf { it.durationSeconds.toLong() },
             yMsgs = y.count { it.isIncoming && !it.isCall },
             yPeople = y.mapTo(HashSet()) { nameOf(it) }.size,
             yDur = y.sumOf { it.durationSeconds.toLong() },
-            top = t.groupingBy { nameOf(it) }.eachCount().entries
-                .sortedByDescending { it.value }.take(3).map { it.key to it.value }
+            top = byName.entries.sortedByDescending { it.value.size }.take(3).map { (n, rs) ->
+                Triple(n, rs.size, rs.groupingBy { it.appName }.eachCount().maxByOrNull { it.value }?.key ?: "")
+            },
+            hourly = hourly.toList(),
+            catShare = catShare
         )
     }
 
@@ -4317,75 +4337,233 @@ fun appColorScheme(): ColorScheme {
     )
 }
 
-/** 今天 vs 昨天的差，寫成人看得懂的一句 */
-private fun vsYesterday(cur: Long, prev: Long, fmt: (Long) -> String): String = when {
-    prev == 0L && cur == 0L -> "跟昨天一樣"
-    prev == 0L -> "昨天沒有"
-    cur == prev -> "跟昨天一樣"
-    cur > prev -> "比昨天 +" + fmt(cur - prev)
-    else -> "比昨天 −" + fmt(prev - cur)
+/** 今天 vs 昨天的差：(文字, 方向) 方向 1 多、-1 少、0 一樣或昨天沒有 */
+private fun recapDelta(cur: Long, prev: Long, fmt: (Long) -> String): Pair<String, Int> = when {
+    prev == 0L && cur == 0L -> "跟昨天一樣" to 0
+    prev == 0L -> "昨天沒有" to 0
+    cur == prev -> "跟昨天一樣" to 0
+    cur > prev -> ("+" + fmt(cur - prev)) to 1
+    else -> ("−" + fmt(prev - cur)) to -1
+}
+
+/** 標頭那句話：用訊息量跟昨天比，給一個有溫度的總結，而不是再重複一次數字 */
+private fun recapHeadline(r: DailyRecap.RecapStat): String {
+    val y = r.yMsgs
+    return when {
+        y == 0 -> "今天跟 ${r.people} 個人有互動"
+        r.msgs >= y * 1.3 -> "今天比昨天熱鬧不少"
+        r.msgs >= y * 1.05 -> "今天比昨天多聊了一些"
+        r.msgs <= y * 0.7 -> "今天比昨天安靜許多"
+        r.msgs <= y * 0.95 -> "今天比昨天少聊了一點"
+        else -> "今天跟昨天差不多熱絡"
+    }
 }
 
 /**
  * 每晚回顧的概要。
  *
- * 只放三個數字（各自跟昨天比）＋聊最多的三個人 —— 這是「看一眼」的份量。
- * ⚠️ 關掉（✕、點外面、按返回、按「看完整報告」）一律帶到分析頁的今天，
- *    概要看完想看細節是很自然的下一步，不要讓使用者自己去切日期。
+ * 版面由上而下：彩色標頭（總結一句＋主數字）→ 三張數字卡（各自跟昨天比）→
+ * 今天的節奏（24 小時長條）→ 聊天對象的關係分布 → 聊最多的三個人。
+ * ⚠️ 顏色全部取自目前的圖表配色（brand／accent／colors／tags），換配色時這裡會一起換，
+ *    不要寫死任何色值，否則選了奶茶色盤會跑出一塊藍色標頭。
+ * ⚠️ 關掉（✕、點外面、按返回、按「看完整報告」）一律帶到分析頁的今天。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RecapDialog(recap: DailyRecap.RecapStat?, onClose: () -> Unit) {
-    val dateText = remember { SimpleDateFormat("M/d（E）", Locale.TAIWAN).format(Date()) }
-    AlertDialog(
-        containerColor = AppColors.Surface,
-        onDismissRequest = onClose,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("今日互動報告", fontWeight = FontWeight.Black, fontSize = 18.sp, color = AppColors.TextPrimary)
-                    Text(dateText, fontSize = T.Micro, color = AppColors.TextTertiary)
+    val pal = AppColors.Chart
+    val dateText = remember { SimpleDateFormat("M 月 d 日 EEEE", Locale.TAIWAN).format(Date()) }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp).widthIn(max = 420.dp).fillMaxWidth()
+                .clip(RoundedCornerShape(28.dp)).background(AppColors.Surface)
+        ) {
+            // ── 標頭 ──
+            Box(
+                modifier = Modifier.fillMaxWidth()
+                    .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(pal.brand, pal.accent)))
+                    .padding(start = 22.dp, end = 10.dp, top = 18.dp, bottom = 20.dp)
+            ) {
+                Column(modifier = Modifier.padding(end = 40.dp)) {
+                    Text("今日互動報告", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = Color.White.copy(alpha = 0.85f), letterSpacing = 1.sp)
+                    Text(dateText, fontSize = T.Micro, color = Color.White.copy(alpha = 0.7f))
+                    Spacer(modifier = Modifier.height(14.dp))
+                    if (recap == null) {
+                        Text("今天還很安靜", fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White)
+                    } else {
+                        Text(recapHeadline(recap), fontSize = 20.sp, fontWeight = FontWeight.Black,
+                            color = Color.White, lineHeight = 26.sp)
+                        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 6.dp)) {
+                            Text("${recap.msgs}", fontSize = 40.sp, fontWeight = FontWeight.Black,
+                                color = Color.White, maxLines = 1, softWrap = false)
+                            Text(" 則訊息", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                color = Color.White.copy(alpha = 0.85f), modifier = Modifier.padding(bottom = 8.dp))
+                        }
+                    }
                 }
-                Text("✕", fontSize = T.Title, color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
-                    modifier = Modifier.clip(CircleShape).clickable { onClose() }.padding(8.dp))
+                Box(
+                    modifier = Modifier.align(Alignment.TopEnd).size(36.dp).clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.18f)).clickable { onClose() },
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.Close, contentDescription = "關閉", tint = Color.White, modifier = Modifier.size(18.dp)) }
             }
-        },
-        text = {
-            if (recap == null) {
-                Text("今天還沒有跟真人的互動紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
-            } else {
-                Column {
-                    Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatPair("訊息", "${recap.msgs} 則",
-                            vsYesterday(recap.msgs.toLong(), recap.yMsgs.toLong()) { "$it" }, Modifier.weight(1f))
-                        StatPair("互動對象", "${recap.people} 位",
-                            vsYesterday(recap.people.toLong(), recap.yPeople.toLong()) { "$it" }, Modifier.weight(1f))
+
+            Column(
+                modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
+            ) {
+                if (recap == null) {
+                    Text("今天還沒有跟真人的互動紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
+                } else {
+                    // ── 三張數字卡 ──
+                    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RecapTile("訊息", "${recap.msgs}", "則",
+                            recapDelta(recap.msgs.toLong(), recap.yMsgs.toLong()) { "$it" }, pal.tagStyle(1), Modifier.weight(1f))
+                        RecapTile("對象", "${recap.people}", "位",
+                            recapDelta(recap.people.toLong(), recap.yPeople.toLong()) { "$it" }, pal.tagStyle(2), Modifier.weight(1f))
+                        RecapTile("停留", formatDuration(recap.dur), "",
+                            recapDelta(recap.dur, recap.yDur) { formatDuration(it) }, pal.tagStyle(3), Modifier.weight(1f))
                     }
-                    if (recap.dur > 0 || recap.yDur > 0) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        StatPair("停留時間", formatDuration(recap.dur),
-                            vsYesterday(recap.dur, recap.yDur) { formatDuration(it) }, Modifier.fillMaxWidth())
+
+                    // ── 今天的節奏 ──
+                    val maxH = recap.hourly.maxOrNull() ?: 0
+                    if (maxH > 0) {
+                        val peak = recap.hourly.indexOf(maxH)
+                        RecapSectionTitle("今天的節奏", "最熱絡 $peak:00–${peak + 1}:00")
+                        Row(
+                            modifier = Modifier.fillMaxWidth().height(56.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            recap.hourly.forEachIndexed { h, c ->
+                                val frac = if (c == 0) 0.04f else 0.12f + 0.88f * c / maxH
+                                Box(
+                                    modifier = Modifier.weight(1f).fillMaxHeight(frac)
+                                        .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+                                        .background(
+                                            when {
+                                                h == peak -> pal.accent
+                                                c == 0 -> AppColors.BorderLight
+                                                else -> pal.primary.copy(alpha = 0.35f)
+                                            }
+                                        )
+                                )
+                            }
+                        }
+                        Row(modifier = Modifier.fillMaxWidth().padding(top = 3.dp)) {
+                            listOf("0", "6", "12", "18", "24").forEachIndexed { i, l ->
+                                Text(l, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
+                                    textAlign = when (i) { 0 -> TextAlign.Start; 4 -> TextAlign.End; else -> TextAlign.Center },
+                                    modifier = Modifier.weight(1f))
+                            }
+                        }
                     }
+
+                    // ── 關係分布 ──
+                    val shares = recap.catShare.filter { it.second > 0 }
+                    if (shares.isNotEmpty()) {
+                        RecapSectionTitle("跟誰聊", "${recap.people} 位")
+                        val total = shares.sumOf { it.second }.toFloat()
+                        Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            shares.forEach { (cat, n) ->
+                                Box(modifier = Modifier.weight(n / total).fillMaxHeight()
+                                    .background(if (cat.dashed) AppColors.BorderLight else cat.color))
+                            }
+                        }
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            shares.forEach { (cat, n) ->
+                                Text("${cat.label} $n", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = cat.color,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.tagChip(cat, 8.dp).padding(horizontal = 8.dp, vertical = 3.dp))
+                            }
+                        }
+                    }
+
+                    // ── 聊最多 ──
                     if (recap.top.isNotEmpty()) {
-                        Text("今天聊最多", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
-                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
-                        recap.top.forEachIndexed { i, (name, cnt) ->
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${i + 1}", fontSize = T.Label, fontWeight = FontWeight.Black,
-                                    color = AppColors.ActiveBlue, modifier = Modifier.widthIn(min = 18.dp))
-                                Text(name, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                Text("$cnt 筆", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                        RecapSectionTitle("今天聊最多", null)
+                        val topMax = recap.top.first().second.toFloat()
+                        recap.top.forEachIndexed { i, (name, cnt, app) ->
+                            val c = pal.at(i)
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(c.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center) {
+                                    Text(name.trim().take(1).ifEmpty { "?" }, fontSize = T.Body, fontWeight = FontWeight.Black,
+                                        color = c, maxLines = 1, softWrap = false)
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(name, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                        if (app.isNotBlank()) {
+                                            Text(" · $app", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                                        }
+                                    }
+                                    Box(modifier = Modifier.padding(top = 4.dp).fillMaxWidth().height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)).background(AppColors.BorderLight.copy(alpha = 0.6f))) {
+                                        Box(modifier = Modifier.fillMaxWidth(cnt / topMax).fillMaxHeight()
+                                            .clip(RoundedCornerShape(3.dp)).background(c))
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text("$cnt 筆", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
+                                    maxLines = 1, softWrap = false)
                             }
                         }
                     }
                 }
             }
-        },
-        confirmButton = {
-            Button(onClick = onClose, colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
-                shape = RoundedCornerShape(10.dp)) { Text("看完整報告", maxLines = 1, softWrap = false) }
+
+            Button(
+                onClick = onClose,
+                colors = ButtonDefaults.buttonColors(containerColor = pal.brand),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, bottom = 18.dp).heightIn(min = 48.dp)
+            ) { Text("看完整報告  →", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
         }
-    )
+    }
+}
+
+@Composable
+private fun RecapSectionTitle(title: String, trailing: String?) {
+    Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
+        if (trailing != null) Text(trailing, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+    }
+}
+
+/** 回顧的數字卡：底色吃標籤配色，差值用小膠囊標出多或少 */
+@Composable
+private fun RecapTile(label: String, value: String, unit: String, delta: Pair<String, Int>, style: TagStyle, modifier: Modifier) {
+    val bg = if (style.dashed) AppColors.BorderLight.copy(alpha = 0.4f) else style.bg
+    Column(
+        modifier = modifier.fillMaxHeight().clip(RoundedCornerShape(16.dp)).background(bg)
+            .padding(horizontal = 10.dp, vertical = 10.dp)
+    ) {
+        Text(label, fontSize = T.Micro, fontWeight = FontWeight.Bold, color = style.text.copy(alpha = 0.85f), maxLines = 1)
+        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 2.dp)) {
+            Text(value, fontSize = 20.sp, fontWeight = FontWeight.Black, color = style.text,
+                maxLines = 1, softWrap = false, overflow = TextOverflow.Visible)
+            if (unit.isNotEmpty()) Text(" $unit", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = style.text,
+                modifier = Modifier.padding(bottom = 3.dp))
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        val (txt, dir) = delta
+        Text(
+            (when (dir) { 1 -> "▲ "; -1 -> "▼ "; else -> "" }) + txt,
+            fontSize = T.Micro, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+            color = style.text,
+            modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.6f)).padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
 }
 
 @Composable
@@ -10258,7 +10436,7 @@ private val USER_GUIDE = listOf(
     GuideSection(
         "9", "每晚回顧",
         listOf(
-            "每天晚上九點左右會發一則通知。點開後先看概要：今天的訊息、互動對象、停留時間各自跟昨天比，以及聊最多的三個人。",
+            "每天晚上九點左右會發一則通知。點開後先看概要：一句今天跟昨天比的總結、訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）、今天幾點聊最多的節奏圖、聊天對象的標籤分布，以及聊最多的三個人。",
             "關掉概要（✕ 或「看完整報告」）會直接帶你到分析頁的今天。今天沒有互動就不會發；可以在「設定 → 偏好」關掉。",
             "如果停留時間偵測（無障礙服務）被系統關掉，也會另外發通知提醒你重新開啟。"
         )
