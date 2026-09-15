@@ -25,7 +25,7 @@ import android.os.Process
 import android.os.Build
 import android.Manifest
 import android.content.pm.PackageManager
-import android.provider.CallLog
+import android.net.Uri
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -1099,6 +1099,7 @@ object DataRepository {
             prefs = context.getSharedPreferences("RelateStatsData", Context.MODE_PRIVATE)
         }
         loadData()
+        loadCloudBackupState()
         val appContext = context.applicationContext
         ioScope.launch {
             runOneTimeCleanupIfNeeded(appContext)
@@ -1522,70 +1523,6 @@ object DataRepository {
         }
         if (newCats.isNotEmpty()) _categories.update { it + newCats }
         saveData(immediate = true)
-    }
-
-    /**
-     * 從系統通話紀錄匯入。
-     *
-     * 為什麼需要這個：Android 原生撥號 App 接通後不發通知，
-     * 只靠通知永遠拿不到「接通的通話有多長」，平均通話時長就永遠是 0。
-     * 只有讀系統通話紀錄才拿得到真實秒數。
-     *
-     * id 用固定規則而非隨機 UUID，重複匯入不會產生重複紀錄。
-     * @return (新增筆數, 已存在跳過筆數)
-     */
-    fun importCallLog(context: Context): Pair<Int, Int> {
-        val existing = _interactions.value.mapTo(HashSet()) { it.id }
-        val fresh = ArrayList<InteractionRecord>()
-        var skipped = 0
-        val cols = arrayOf(
-            CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME,
-            CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION
-        )
-        context.contentResolver.query(
-            CallLog.Calls.CONTENT_URI, cols, null, null, CallLog.Calls.DATE + " DESC"
-        )?.use { c ->
-            val iNum = c.getColumnIndex(CallLog.Calls.NUMBER)
-            val iName = c.getColumnIndex(CallLog.Calls.CACHED_NAME)
-            val iType = c.getColumnIndex(CallLog.Calls.TYPE)
-            val iDate = c.getColumnIndex(CallLog.Calls.DATE)
-            val iDur = c.getColumnIndex(CallLog.Calls.DURATION)
-            if (iDate < 0 || iType < 0) return@use
-            while (c.moveToNext()) {
-                val date = c.getLong(iDate)
-                val type = c.getInt(iType)
-                // 阻擋、語音信箱不是人對人的互動
-                if (type == CallLog.Calls.BLOCKED_TYPE || type == CallLog.Calls.VOICEMAIL_TYPE) continue
-                val id = "calllog-" + date
-                if (id in existing) { skipped++; continue }
-                val number = if (iNum >= 0) c.getString(iNum).orEmpty() else ""
-                val cached = if (iName >= 0) c.getString(iName).orEmpty() else ""
-                val name = cached.ifBlank { number }
-                if (name.isBlank()) continue
-                val missed = type == CallLog.Calls.MISSED_TYPE || type == CallLog.Calls.REJECTED_TYPE
-                val dur = if (iDur >= 0) c.getLong(iDur).toInt().coerceAtLeast(0) else 0
-                fresh.add(
-                    InteractionRecord(
-                        id = id,
-                        rawSenderName = name,
-                        appName = "電話",
-                        isIncoming = type != CallLog.Calls.OUTGOING_TYPE,
-                        wordCount = 0,
-                        durationSeconds = if (missed) 0 else dur,
-                        isGroup = false,
-                        timestamp = date,
-                        isMissedCall = missed,
-                        isCall = true
-                    )
-                )
-                existing.add(id)
-            }
-        }
-        if (fresh.isNotEmpty()) {
-            snapshotForUndo("匯入通話紀錄")
-            addInteractions(fresh.sortedBy { it.timestamp })
-        }
-        return fresh.size to skipped
     }
 
     /**
@@ -2253,6 +2190,74 @@ object DataRepository {
         }
     }
 
+    // ── 雲端備份 ──────────────────────────────────────────
+    /**
+     * 綁定 Google 雲端硬碟備份。
+     *
+     * ⚠️ 刻意不走「Google 登入＋Drive API」：那要加 INTERNET 權限、串 OAuth，
+     *    「App 沒有網路權限、資料傳不出去」這個最重要的隱私保證就沒了，
+     *    上架的資料安全性表單也會多出一堆要申報的項目。
+     *    改用系統檔案選擇器（SAF）：使用者在選擇器裡挑「雲端硬碟」建立一個檔案，
+     *    App 拿到那個檔案的長期寫入權限，之後每晚覆寫它，上傳由雲端硬碟 App 自己處理。
+     * ⚠️ 雲端硬碟的上傳是非同步的，手機離線時會等連上網才傳。
+     */
+    val cloudBackupUri = MutableStateFlow<String?>(null)
+    val cloudBackupLast = MutableStateFlow(0L)
+
+    private fun loadCloudBackupState() {
+        val p = prefs ?: return
+        cloudBackupUri.value = p.getString("cloud_backup_uri", null)
+        cloudBackupLast.value = p.getLong("cloud_backup_last", 0L)
+    }
+
+    private val uriRw = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+
+    /** @return 0 成功且之後會自動更新；1 這次寫入成功，但該位置不給長期權限（無法自動）；-1 寫入失敗 */
+    fun bindCloudBackup(context: Context, uri: Uri): Int {
+        val ctx = context.applicationContext
+        val persisted = runCatching { ctx.contentResolver.takePersistableUriPermission(uri, uriRw) }.isSuccess
+        if (!writeBackupTo(ctx, uri)) return -1
+        if (!persisted) return 1
+        // 換位置時放掉舊檔案的權限 —— 系統對每個 App 能保留的長期權限數量有上限
+        cloudBackupUri.value?.takeIf { it != uri.toString() }?.let { old ->
+            runCatching { ctx.contentResolver.releasePersistableUriPermission(Uri.parse(old), uriRw) }
+        }
+        cloudBackupUri.value = uri.toString()
+        prefs?.edit()?.putString("cloud_backup_uri", uri.toString())?.apply()
+        return 0
+    }
+
+    fun unbindCloudBackup(context: Context) {
+        cloudBackupUri.value?.let { old ->
+            runCatching { context.applicationContext.contentResolver.releasePersistableUriPermission(Uri.parse(old), uriRw) }
+        }
+        cloudBackupUri.value = null
+        prefs?.edit()?.remove("cloud_backup_uri")?.apply()
+    }
+
+    /** 覆寫已綁定的雲端備份檔。沒綁定或寫入失敗（檔案被移動、刪除）回 false。 */
+    fun writeCloudBackup(context: Context): Boolean {
+        val u = cloudBackupUri.value ?: return false
+        return writeBackupTo(context.applicationContext, Uri.parse(u))
+    }
+
+    private fun writeBackupTo(ctx: Context, uri: Uri): Boolean {
+        val payload = runCatching { exportBackupString("").toByteArray() }.getOrNull() ?: return false
+        // ⚠️ 先用 "wt"（先清空再寫）。部分文件提供者不認 "wt"，才退回 "w"。
+        //    "w" 在某些提供者不會截斷，新檔比舊檔短時尾巴會殘留舊內容，所以只當備援。
+        val ok = listOf("wt", "w").any { mode ->
+            runCatching {
+                ctx.contentResolver.openOutputStream(uri, mode)?.use { it.write(payload); it.flush() } != null
+            }.getOrDefault(false)
+        }
+        if (ok) {
+            val now = System.currentTimeMillis()
+            cloudBackupLast.value = now
+            prefs?.edit()?.putLong("cloud_backup_last", now)?.apply()
+        }
+        return ok
+    }
+
     fun exportBackupString(key: String): String = buildBackupString(
         _interactions.value, _aliases.value, _categories.value, _availableCategories.value, key
     )
@@ -2494,6 +2499,14 @@ class RecapReceiver : BroadcastReceiver() {
             DataRepository.init(context.applicationContext)
             if (DataRepository.recapEnabled.value) DailyRecap.notifyRecap(context)
             DailyRecap.notifyServiceOff(context)
+        }
+        // 每晚順便更新雲端備份。備份檔可能有好幾 MB，不能在主執行緒寫。
+        if (DataRepository.cloudBackupUri.value != null) {
+            val pr = goAsync()
+            Thread {
+                runCatching { DataRepository.writeCloudBackup(context) }
+                pr.finish()
+            }.start()
         }
         // setWindow 是一次性的，排下一次
         DailyRecap.schedule(context)
@@ -4206,7 +4219,11 @@ class RelateViewModel : ViewModel() {
     val undoLabel = DataRepository.undoLabel
     fun undoLastDestructive() = DataRepository.undoLastDestructive()
     fun refreshUndoState() = DataRepository.refreshUndoState()
-    fun importCallLog(context: Context) = DataRepository.importCallLog(context)
+    val cloudBackupUri = DataRepository.cloudBackupUri
+    val cloudBackupLast = DataRepository.cloudBackupLast
+    fun bindCloudBackup(context: Context, uri: Uri) = DataRepository.bindCloudBackup(context, uri)
+    fun unbindCloudBackup(context: Context) = DataRepository.unbindCloudBackup(context)
+    fun backupToCloudNow(context: Context) = DataRepository.writeCloudBackup(context)
     fun deleteRecordsByIds(ids: Set<String>) = DataRepository.deleteRecordsByIds(ids)
     fun findSimilarGroups(names: List<String>) = DataRepository.findSimilarGroups(names)
     fun countAbnormalRecords() = DataRepository.countAbnormalRecords()
@@ -4673,7 +4690,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
     val titles = listOf("洞察社交能量", "隱私與權限設定", "四大分頁解析")
     val descs = listOf(
         "透過精準的數據追蹤，了解你每天把時間和注意力花在哪些人、哪些 App 上。",
-        "為確保精準度，我們需要「通知存取」與「無障礙服務」權限。所有數據皆完全存放在您的手機本地，絕不上傳。",
+        "需要「通知存取」與「無障礙服務」才能開始記錄。開啟前會先說明讀取哪些資料；所有資料只存在手機，App 沒有網路權限。",
         "【總覽】查看個人性格與數位健康\n【排行】精準抓出時間黑洞與分析熱區\n【聯絡人】自訂群組、合併跨平台帳號\n【設定】自訂備份資料與設定"
     )
     val icons = listOf(Icons.Rounded.Face, Icons.Rounded.Lock, Icons.AutoMirrored.Rounded.List)
@@ -5228,6 +5245,11 @@ fun ServiceAlertBanner() {
             Text("目前沒有在記錄新資料", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(modifier = Modifier.height(5.dp))
+        var disclose by remember { mutableStateOf<String?>(null) }
+        disclose?.let { k ->
+            PermissionDisclosureDialog(k, onAgree = { disclose = null; openPermissionSettings(context, k) },
+                onDismiss = { disclose = null })
+        }
         val lines = buildList {
             if (!accOn) add("「無障礙服務」已關閉 → 停留時間不會被記錄")
             if (!notifOn) add("「通知存取」已關閉 → 訊息不會被記錄")
@@ -5242,7 +5264,7 @@ fun ServiceAlertBanner() {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (!accOn) {
                 Button(
-                    onClick = { runCatching { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } },
+                    onClick = { disclose = "access" },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
                     shape = RoundedCornerShape(9.dp),
@@ -5251,7 +5273,7 @@ fun ServiceAlertBanner() {
             }
             if (!notifOn) {
                 Button(
-                    onClick = { runCatching { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } },
+                    onClick = { disclose = "notif" },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
                     shape = RoundedCornerShape(9.dp),
@@ -10415,7 +10437,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "未接來電由通知取得。",
             "LINE、Messenger 等 App 的通話：從「通話中」通知出現到消失的時間會記成通話長度。部分 App 或機型不會掛這則通知，就無法取得秒數。",
-            "手機原生電話的秒數拿不到通知，請到「設定 → 匯入手機通話紀錄」補齊，可重複執行，不會重複計入。"
+            "手機原生電話接通後不會發通知，所以拿不到通話秒數，只記得到未接來電。"
         )
     ),
     GuideSection(
@@ -10446,7 +10468,9 @@ private val USER_GUIDE = listOf(
         listOf(
             "「設定 → 清除資料」只會刪互動紀錄（訊息、停留、通話），標籤、合併的帳號、改過的名稱、常用詞都不會動。刪之前會列出清單讓你逐人取消。",
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
-            "所有資料只存在這支手機。手機有登入 Google 帳號時，Android 會順便自動備份（上限 25MB）；沒登入就不會備份，換機或重灌前請到「設定 → 備份」存成檔案。"
+            "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟，之後每晚會自動更新那份備份檔；也可以按「立即備份」。",
+            "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
+            "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。"
         )
     )
 )
@@ -10461,7 +10485,7 @@ private val USER_FAQ = listOf(
         "到「設定 → 服務」把「停留時間偵測」打開；服務被關掉時 App 也會發通知提醒。",
     "LINE 通話的時間有算嗎？" to
         "有。LINE、Messenger 等 App 通話時會掛一則「通話中」通知，從它出現到消失的時間就記成通話長度。" +
-        "少數 App 或機型不會掛這則通知，就拿不到秒數。手機原生電話請用「設定 → 匯入手機通話紀錄」。",
+        "少數 App 或機型不會掛這則通知，就拿不到秒數。手機原生電話接通後不發通知，也拿不到秒數。",
     "合併錯人了，怎麼拆開？" to
         "點那位聯絡人 →「帳號與名稱」，在綁錯的帳號旁按「取消綁定」。它會變回獨立的聯絡人，紀錄跟著它走，不會遺失。",
     "合併後想用另一個名字？" to
@@ -10475,8 +10499,11 @@ private val USER_FAQ = listOf(
     "刪錯了可以救回來嗎？" to
         "可以。到「設定 → 最近刪除」，保留 7 天，可以整批還原，也可以只還原其中一個人。",
     "換手機資料會跟著走嗎？" to
-        "只有手機登入了 Google 帳號，Android 才會自動備份（上限 25MB）；沒登入就不會。" +
-        "最保險的做法是換機前到「設定 → 備份」存成檔案，新手機再從檔案還原。",
+        "先綁定雲端備份：「設定 → 備份 → ☁ 綁定 Google 雲端硬碟」，之後每晚自動更新。" +
+        "新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔。沒綁定的話，換機前請手動「存成檔案」。",
+    "App 會把我的資料傳出去嗎？" to
+        "不會。App 沒有網路權限，無法把任何資料傳出手機，開發者也看不到。" +
+        "唯一的例外是你自己綁定的雲端備份：備份檔由 Google 雲端硬碟 App 上傳到你自己的雲端硬碟。",
     "常用詞為什麼看不到是誰傳的？" to
         "發話者是 v3.20 之後才開始記錄的。之前累積的詞沒有這份資料，新收到的訊息才會有。",
     "晚上沒收到回顧通知？" to
@@ -10950,17 +10977,31 @@ fun SettingsView(viewModel: RelateViewModel) {
     val (hasAccel, setHasAccel) = remember { mutableStateOf(isAccessibilityServiceEnabled(context, ChatTrackerService::class.java)) }
     val (hasUsageStats, setHasUsageStats) = remember { mutableStateOf(hasUsageStatsPermission(context)) }
 
-    var callImportMsg by remember { mutableStateOf<String?>(null) }
-    fun runCallImport() {
-        val (added, skipped) = viewModel.importCallLog(context)
-        callImportMsg = when {
-            added > 0 -> "已匯入 $added 筆通話紀錄" + (if (skipped > 0) "（跳過 $skipped 筆重複）" else "")
-            skipped > 0 -> "沒有新的紀錄，$skipped 筆已匯入過"
-            else -> "手機裡沒有可匯入的通話紀錄"
-        }
+    // 開權限一律先經過明確揭露（見 PermissionDisclosureDialog）
+    var disclosureKind by remember { mutableStateOf<String?>(null) }
+    disclosureKind?.let { k ->
+        PermissionDisclosureDialog(k, onAgree = { disclosureKind = null; openPermissionSettings(context, k) },
+            onDismiss = { disclosureKind = null })
     }
-    val callLogLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) runCallImport() else callImportMsg = "沒有通話紀錄權限，無法匯入"
+    val cloudUri by viewModel.cloudBackupUri.collectAsState()
+    val cloudLast by viewModel.cloudBackupLast.collectAsState()
+    var confirmUnbindCloud by remember { mutableStateOf(false) }
+    if (confirmUnbindCloud) {
+        AlertDialog(
+            containerColor = AppColors.Surface,
+            onDismissRequest = { confirmUnbindCloud = false },
+            title = { Text("解除雲端備份？", fontWeight = FontWeight.Bold, fontSize = 17.sp) },
+            text = {
+                Text("之後不會再自動更新雲端上的備份檔。已經在雲端硬碟裡的檔案不會被刪除，之後仍然可以用來還原。",
+                    fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 20.sp)
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.unbindCloudBackup(context); confirmUnbindCloud = false }) {
+                    Text("解除綁定", color = AppColors.WorkText, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmUnbindCloud = false }) { Text("取消", color = AppColors.TextSecondary) } }
+        )
     }
 
     val (showDataManager, setShowDataManager) = remember { mutableStateOf(false) }
@@ -11038,6 +11079,20 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
     }
 
+    // 綁定雲端備份：在選擇器的儲存位置挑「雲端硬碟」建立檔案
+    val cloudBindLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) {
+            ioScope.launch {
+                val r = withContext(Dispatchers.IO) { viewModel.bindCloudBackup(context, uri) }
+                Toast.makeText(context, when (r) {
+                    0 -> "已綁定，之後每晚會自動更新這份備份"
+                    1 -> "已備份這一次，但這個位置不允許自動更新，請改選 Google 雲端硬碟"
+                    else -> "備份失敗，請換個位置再試"
+                }, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     // 版面規則（整頁一致，不要再各寫各的）：
     //   · 容器一律 SettingsCard —— Surface 底、1dp 邊框、14dp 圓角、無陰影
     //   · 群組之間用 SettingsSection 的小標分隔，不靠留白硬撐
@@ -11063,17 +11118,11 @@ fun SettingsView(viewModel: RelateViewModel) {
         item { SettingsSection("服務") }
         item {
             SettingsCard {
-                PermissionRow("通知存取", "計算訊息數與字數", hasNotif) {
-                    context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                }
+                PermissionRow("通知存取", "計算訊息數與常用詞", hasNotif) { disclosureKind = "notif" }
                 SettingsDivider()
-                PermissionRow("無障礙服務", "計算聊天室停留時間", hasAccel) {
-                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                }
+                PermissionRow("無障礙服務", "計算聊天室停留時間", hasAccel) { disclosureKind = "access" }
                 SettingsDivider()
-                PermissionRow("使用紀錄存取", "計算手機總用量佔比", hasUsageStats) {
-                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                }
+                PermissionRow("使用紀錄存取", "計算手機總用量佔比", hasUsageStats) { disclosureKind = "usage" }
                 if (!hasUsageStats) {
                     Text(
                         "找不到本 App 的話，到系統「應用程式」裡點右上角「允許受限制的設定」",
@@ -11083,6 +11132,10 @@ fun SettingsView(viewModel: RelateViewModel) {
                 }
                 SettingsDivider()
                 SettingsRow("使用說明", "常見問題與運作原理") { setShowGuideDialog(true) }
+                SettingsDivider()
+                SettingsRow("隱私權政策", "讀取哪些資料、存在哪裡") {
+                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }
+                }
             }
         }
 
@@ -11176,30 +11229,61 @@ fun SettingsView(viewModel: RelateViewModel) {
         item {
             SettingsCard {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text("所有資料只存在這支手機。換機或重灌前請務必先備份。",
-                        fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = {
-                            ioScope.launch {
-                                val intent = withContext(Dispatchers.IO) { viewModel.buildShareBackupIntent(context) }
-                                if (intent != null) {
-                                    runCatching { context.startActivity(Intent.createChooser(intent, "備份到雲端")) }
-                                        .onFailure { Toast.makeText(context, "找不到可接收的 App", Toast.LENGTH_SHORT).show() }
-                                } else {
-                                    Toast.makeText(context, "備份檔產生失敗", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(vertical = 12.dp)
-                    ) {
-                        Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("分享備份檔", fontSize = T.Body, maxLines = 1, softWrap = false)
+                    if (cloudUri != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(AppColors.FriendText))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("雲端備份已綁定", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        }
+                        Text(
+                            if (cloudLast > 0) "上次備份 " + SimpleDateFormat("M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast)) + "　·　每晚自動更新"
+                            else "每晚自動更新",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
+                            modifier = Modifier.padding(start = 16.dp, top = 2.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    ioScope.launch {
+                                        val ok = withContext(Dispatchers.IO) { viewModel.backupToCloudNow(context) }
+                                        Toast.makeText(context,
+                                            if (ok) "已更新雲端備份" else "備份失敗：檔案可能被移動或刪除，請按「更換位置」重新綁定",
+                                            Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                                shape = RoundedCornerShape(10.dp), contentPadding = PaddingValues(vertical = 10.dp)
+                            ) { Text("立即備份", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = { cloudBindLauncher.launch("RelateStats_雲端備份.txt") },
+                                modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(vertical = 10.dp)
+                            ) { Text("更換位置", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
+                        }
+                        Text("解除綁定", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText,
+                            maxLines = 1, softWrap = false,
+                            modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
+                                .clickable { confirmUnbindCloud = true }.padding(horizontal = 4.dp, vertical = 6.dp))
+                    } else {
+                        Text("所有資料只存在這支手機。綁定 Google 雲端硬碟後，每晚會自動把備份更新到雲端，換機或重灌都不怕。",
+                            fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { cloudBindLauncher.launch("RelateStats_雲端備份.txt") },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 12.dp)
+                        ) { Text("☁  綁定 Google 雲端硬碟", fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
+                        Text("按下後，在儲存位置選「雲端硬碟」再按儲存。",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
+                            modifier = Modifier.padding(top = 6.dp))
                     }
+
+                    HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(vertical = 12.dp))
+                    Text("手動備份", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
@@ -11214,9 +11298,8 @@ fun SettingsView(viewModel: RelateViewModel) {
                         ) { Text("從檔案還原", fontSize = T.Label, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false) }
                     }
                     Spacer(modifier = Modifier.height(10.dp))
-                    // ⚠️ 不要寫成「綁定你的 Google 帳號」—— 手機沒登入 Google 就根本不會備份，
-                    //    使用者會以為自己有備份而放心重灌。
-                    Text("手機有登入 Google 帳號時，Android 才會順便自動備份（上限 25MB）。沒登入就不會備份，換機前請用上面的「存成檔案」。",
+                    // ⚠️ 這裡要講清楚「App 自己沒有網路」，否則使用者會以為綁了雲端就代表 App 會上網。
+                    Text("換機時在新手機按「從檔案還原」，到雲端硬碟選那份備份檔。App 本身沒有網路權限，上傳由 Google 雲端硬碟 App 代為處理。",
                         fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                 }
             }
@@ -11265,16 +11348,6 @@ fun SettingsView(viewModel: RelateViewModel) {
                     Text("紀錄總數", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
                     Text("${records.size} 筆", fontSize = T.Body, fontWeight = FontWeight.Bold,
                         color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-                }
-                SettingsDivider()
-                SettingsRow("匯入手機通話紀錄", "補齊真實通話時長") {
-                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
-                        == PackageManager.PERMISSION_GRANTED
-                    ) runCallImport() else callLogLauncher.launch(Manifest.permission.READ_CALL_LOG)
-                }
-                callImportMsg?.let {
-                    Text(it, fontSize = T.Micro, color = AppColors.FriendText,
-                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp), lineHeight = 14.sp)
                 }
                 SettingsDivider()
                 SettingsRow("整理系統通知", "把讚、追蹤、推播歸到「系統通知」") { confirmAction = "retag" }
@@ -11449,6 +11522,82 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, onClick: 
             }
         }
     }
+}
+
+/**
+ * 隱私權政策網址（GitHub Pages，原始檔在 docs/privacy-policy.html）。
+ * ⚠️ Play Console 填的網址必須跟這裡一樣。
+ */
+const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/RelateStats/privacy-policy.html"
+
+/** 開系統權限頁。⚠️ 一律先經過 PermissionDisclosureDialog，不要直接呼叫。 */
+fun openPermissionSettings(context: Context, kind: String) {
+    val action = when (kind) {
+        "notif" -> Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+        "access" -> Settings.ACTION_ACCESSIBILITY_SETTINGS
+        else -> Settings.ACTION_USAGE_ACCESS_SETTINGS
+    }
+    runCatching { context.startActivity(Intent(action)) }
+}
+
+/**
+ * 權限的明確揭露（Google Play「使用者資料」政策要求的 Prominent Disclosure）。
+ *
+ * ⚠️ 規定：把使用者送去系統設定開權限**之前**，必須在 App 內用專門的畫面講清楚
+ *    讀什麼、拿來做什麼、存在哪、會不會分享，而且要使用者主動按「同意」。
+ *    只寫在隱私權政策、或引導頁的一句話都不算數。
+ * ⚠️ 所有開權限的入口都要走這裡（設定頁、概況頁的警告卡）。新增入口時不要直接 startActivity。
+ * ⚠️ 文字要跟 docs/play/SUBMISSION.md 的申報內容、docs/privacy-policy.html 一致 —— 審核會對照。
+ */
+@Composable
+fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () -> Unit) {
+    val (title, items) = when (kind) {
+        "notif" -> "通知存取" to listOf(
+            "會讀取" to "LINE、Messenger、Instagram、WhatsApp、Telegram、Threads 與電話 App 的通知：寄件人名稱、App 名稱、時間與訊息文字。",
+            "用來" to "計算你跟每個人的訊息數、聊天時段與常用詞。",
+            "訊息文字" to "只拆成詞並累計次數，不保存訊息原文。",
+            "其他 App" to "的通知會直接略過，不記錄。"
+        )
+        "access" -> "無障礙服務" to listOf(
+            "會讀取" to "你開著 LINE、Messenger、Instagram、WhatsApp、Telegram、Threads 或電話 App 時，畫面頂端的聊天室名稱。",
+            "用來" to "計算你在每個聊天室停留多久。",
+            "不會" to "保存訊息內容，也不會操作手機、代替你點擊或輸入。在其他 App 裡不運作。",
+            "說明" to "本 App 不是身障輔助工具，只借用無障礙服務辨識你正在看哪個聊天室。"
+        )
+        else -> "使用紀錄存取" to listOf(
+            "會讀取" to "各 App 在前景使用的時間長度。",
+            "用來" to "計算聊天 App 佔你手機總使用時間的比例。"
+        )
+    }
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = { Text("開啟「$title」前請先了解", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                items.forEach { (k, v) ->
+                    Row(modifier = Modifier.padding(bottom = 10.dp)) {
+                        Text(k, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
+                            modifier = Modifier.width(64.dp))
+                        Text(v, fontSize = T.Body, color = AppColors.TextPrimary, lineHeight = 20.sp, modifier = Modifier.weight(1f))
+                    }
+                }
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp).clip(RoundedCornerShape(10.dp))
+                        .background(AppColors.FriendBg).padding(10.dp)
+                ) {
+                    Text("資料只存在這支手機", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.FriendText)
+                    Text("本 App 沒有網路權限，無法把資料傳出手機，開發者也看不到。除非你自己綁定雲端備份，資料不會離開手機。隨時可以到系統設定關閉權限，或在 App 內清除資料。",
+                        fontSize = T.Micro, color = AppColors.FriendText, lineHeight = 16.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAgree, colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)) { Text("同意並前往設定", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("不同意", color = AppColors.TextSecondary) } }
+    )
 }
 
 fun isNotificationServiceEnabled(context: Context): Boolean {

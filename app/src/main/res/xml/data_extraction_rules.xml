@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 12 以上的備份／轉移規則。只備份主要資料檔，不含快取的分享暫存檔。 -->
+<!-- Android 12 以上的備份／轉移規則。只備份主要資料檔，不含快取的分享暫存檔。
+     ⚠️ 不要再加 exclude：已經只 include 一個檔，exclude 別的檔會被 release lint 判成致命錯誤。 -->
 <data-extraction-rules>
     <cloud-backup>
         <include domain="sharedpref" path="RelateStatsData.xml" />
-        <exclude domain="sharedpref" path="android.app.ActivityThread.IDS.xml" />
     </cloud-backup>
     <device-transfer>
         <include domain="sharedpref" path="RelateStatsData.xml" />
-        <exclude domain="sharedpref" path="android.app.ActivityThread.IDS.xml" />
     </device-transfer>
 </data-extraction-rules>

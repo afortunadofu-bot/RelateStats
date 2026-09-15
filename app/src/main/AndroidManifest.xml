@@ -3,8 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
-    <!-- 只用於「設定 → 匯入手機通話紀錄」，使用者主動按才會要求授權 -->
-    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- ⚠️ 不要加 READ_CALL_LOG：受限權限，社交統計不在 Play 允許的用途內（v3.28 已移除匯入通話紀錄）。
+         也不要加 INTERNET：「App 沒有網路權限」是隱私保證與資料安全性申報的基礎。 -->
     <!-- 每晚回顧與「服務被關掉」提醒 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

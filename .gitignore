@@ -14,3 +14,8 @@
 .cxx
 local.properties
 /.kotlin
+
+# 上架簽署金鑰：絕不能進版控
+keystore.properties
+*.jks
+*.keystore

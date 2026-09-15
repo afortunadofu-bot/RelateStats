@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">RelateStats</string>
-    <string name="accessibility_desc">允許 RelateStats 監測你在聊天室的真實停留時間</string>
+    <!-- ⚠️ 會顯示在系統無障礙設定頁，審核也會看。內容要跟 App 內揭露、隱私權政策一致。 -->
+    <string name="accessibility_desc">RelateStats 不是身障輔助工具。開啟後，當你使用 LINE、Messenger、Instagram、WhatsApp、Telegram、Threads 或電話 App 時，會擷取畫面頂端的聊天室名稱，用來計算你在每個聊天室停留多久。不保存訊息內容，不會操作手機或代替你點擊、輸入。資料只存在這支手機，App 沒有網路權限，無法上傳。</string>
 </resources>

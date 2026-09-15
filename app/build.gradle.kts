@@ -1,6 +1,15 @@
-﻿plugins {
+﻿import java.util.Properties
+
+plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+// 上架用的簽署金鑰資訊。⚠️ keystore.properties 與金鑰檔絕不能進版控（已列入 .gitignore）。
+// 範本見專案根目錄的 keystore.properties.example。沒有這個檔時 release 版不簽署，只能自己測。
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -13,18 +22,32 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.relatestats"
+        // ⚠️ 上架後永遠不能改。namespace（Kotlin 套件路徑）維持 com.example.relatestats 沒關係，Play 只看這個。
+        applicationId = "com.relatestats.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 51
-        versionName = "3.27"
+        versionCode = 52
+        versionName = "3.28"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (keystoreProps.containsKey("storeFile")) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            if (keystoreProps.containsKey("storeFile")) signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

@@ -9,6 +9,19 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
 - **完整修復與變更紀錄**：[docs/CHANGELOG.md](docs/CHANGELOG.md)
 - **上架 Google Play 規劃**：[docs/PLAY_STORE_PLAN.md](docs/PLAY_STORE_PLAN.md)
+- **Play Console 送審資料（可直接貼上）**：[docs/play/SUBMISSION.md](docs/play/SUBMISSION.md)
+- **隱私權政策**：[docs/privacy-policy.html](docs/privacy-policy.html)
+
+### ⚠️ 上架相關的硬規則
+
+- **`applicationId = com.relatestats.app` 第一次上傳後永遠不能改。**
+- **不要加 `INTERNET` 權限。** 「資料傳不出手機」是隱私權政策、資料安全性表單、無障礙聲明的共同前提，加了三份都要重寫。
+  雲端備份因此走系統檔案選擇器（SAF），上傳交給雲端硬碟 App，而不是 Google 登入＋Drive API。
+- **不要加 `READ_CALL_LOG`**（受限權限）。
+- **所有開權限的入口都要先經過 `PermissionDisclosureDialog`**，不能直接 `startActivity` 到系統設定頁（Play 明確揭露規定）。
+- **四份文字要一致**：`PermissionDisclosureDialog`、`strings.xml` 的 `accessibility_desc`、`docs/privacy-policy.html`、`docs/play/SUBMISSION.md`。改一份就四份一起改。
+- **`keystore.properties` 與 `.jks` 絕不能 commit**（已列入 `.gitignore`）。
+- 備份規則 xml 只 include 一個檔，**不要再加 exclude**，否則 release lint 會判致命錯誤。
 
 ---
 
@@ -369,8 +382,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   ⚠️ 未實機驗證：少數 App 或機型不會掛「通話中」通知，或標題不是對方名字。
 
 - **Android 原生撥號 App 接通後不發通知**，所以只靠通知監聽永遠拿不到接通通話的秒數。
-  要有真實平均時長，必須到「設定 → 匯入手機通話紀錄」（需 `READ_CALL_LOG` 權限，使用者主動授權）。
-- 匯入的 id 固定為 `calllog-<時間戳>`，**重複匯入不會重複計入**，可以定期按。
+- ⚠️ **不要再加回「匯入手機通話紀錄」**（v3.28 移除）。`READ_CALL_LOG` 是 Play 受限權限，
+  只有預設電話／簡訊 App 等少數用途能用，加回去就過不了審。舊資料裡 `calllog-` 開頭的紀錄保留不動。
 - 台灣原生撥號 App 的字樣是「**未接電話**」不是「未接來電」，兩者都要比對。
 - 平均時長只能除以「真的抓到秒數的通數」，不能除以接通數，否則會被稀釋成 0。
 
@@ -571,6 +584,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.28 | 2026-09-15 | 上架準備：套件名稱改 `com.relatestats.app`；移除匯入手機通話紀錄；權限明確揭露；綁定 Google 雲端硬碟每晚自動備份；隱私權政策；R8 與簽署設定 |
 | v3.27 | 2026-09-15 | 今日互動報告改版：漸層標頭＋總結一句、彩色數字卡（▲▼）、今天的節奏、跟誰聊（標籤分布）、聊最多附比例條與 App |
 | v3.26 | 2026-09-14 | 「自訂暱稱」改成實心按鈕；使用說明與常見問題補上長按看全名、自訂暱稱 |
 | v3.25 | 2026-09-14 | 帳號與名稱：長按（或點）名字展開全名 |

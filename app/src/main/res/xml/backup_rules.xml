@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 11 以下的自動備份規則。資料綁定手機登入的 Google 帳號，換機自動還原。 -->
+<!-- Android 11 以下的自動備份規則。只含主要資料檔。
+     ⚠️ 不要再加 exclude：已經只 include 一個檔，exclude 別的檔會被 release lint 判成致命錯誤。 -->
 <full-backup-content>
     <include domain="sharedpref" path="RelateStatsData.xml" />
-    <exclude domain="sharedpref" path="android.app.ActivityThread.IDS.xml" />
 </full-backup-content>
