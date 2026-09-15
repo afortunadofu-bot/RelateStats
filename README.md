@@ -8,6 +8,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
 - **完整修復與變更紀錄**：[docs/CHANGELOG.md](docs/CHANGELOG.md)
+- **上架 Google Play 規劃**：[docs/PLAY_STORE_PLAN.md](docs/PLAY_STORE_PLAN.md)
 
 ---
 
@@ -642,7 +643,8 @@ app/src/main/
 └── AndroidManifest.xml
 docs/
 ├── BLUEPRINT.md    # 原始架構與邏輯藍圖
-└── CHANGELOG.md    # 完整修復與變更紀錄
+├── CHANGELOG.md    # 完整修復與變更紀錄
+└── PLAY_STORE_PLAN.md  # 上架 Google Play 規劃
 ```
 
 ---
