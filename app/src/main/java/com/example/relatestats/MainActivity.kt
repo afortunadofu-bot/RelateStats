@@ -2203,11 +2203,58 @@ object DataRepository {
      */
     val cloudBackupUri = MutableStateFlow<String?>(null)
     val cloudBackupLast = MutableStateFlow(0L)
+    /** 自動備份週期（天）。0 = 不自動，只在按「立即備份」時更新 */
+    val cloudBackupInterval = MutableStateFlow(1)
+    /** 給人看的位置，例如「Google 雲端硬碟 › RelateStats_雲端備份.txt」 */
+    val cloudBackupLocation = MutableStateFlow<String?>(null)
 
     private fun loadCloudBackupState() {
         val p = prefs ?: return
         cloudBackupUri.value = p.getString("cloud_backup_uri", null)
         cloudBackupLast.value = p.getLong("cloud_backup_last", 0L)
+        cloudBackupInterval.value = p.getInt("cloud_backup_interval", 1)
+        cloudBackupLocation.value = p.getString("cloud_backup_label", null)
+    }
+
+    fun setCloudBackupInterval(days: Int) {
+        cloudBackupInterval.value = days
+        prefs?.edit()?.putInt("cloud_backup_interval", days)?.apply()
+    }
+
+    /**
+     * 每晚鬧鐘呼叫：距離上次備份滿週期才寫。
+     * ⚠️ 容許 3 小時誤差 —— 鬧鐘給了一小時的窗，每天觸發時間不固定，
+     *    嚴格比「滿 24 小時」會常常差幾分鐘沒到，變成隔一天才備份。
+     */
+    fun cloudBackupIfDue(context: Context): Boolean {
+        val days = cloudBackupInterval.value
+        if (cloudBackupUri.value == null || days <= 0) return false
+        if (System.currentTimeMillis() - cloudBackupLast.value < days * 86_400_000L - 3 * 3_600_000L) return false
+        return writeCloudBackup(context)
+    }
+
+    /**
+     * 把 SAF 的 content:// 網址翻成人看得懂的位置。
+     * ⚠️ SAF 拿不到資料夾路徑，只拿得到「哪個提供者」＋「檔名」，所以只顯示這兩段。
+     * ⚠️ 綁定當下算好存進偏好設定，不要每次開設定頁都去查 —— 查雲端硬碟可能要等網路。
+     */
+    private fun describeCloudLocation(ctx: Context, uri: Uri): String {
+        val auth = uri.authority.orEmpty()
+        val app = when {
+            auth.startsWith("com.google.android.apps.docs") -> "Google 雲端硬碟"
+            auth == "com.android.externalstorage.documents" -> "手機儲存空間"
+            auth == "com.android.providers.downloads.documents" -> "手機「下載」資料夾"
+            auth == "com.android.providers.media.documents" -> "手機媒體資料夾"
+            else -> runCatching {
+                ctx.packageManager.resolveContentProvider(auth, 0)?.loadLabel(ctx.packageManager)?.toString()
+            }.getOrNull()
+        }
+        val name = runCatching {
+            ctx.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+        return listOfNotNull(app?.takeIf { it.isNotBlank() }, name?.takeIf { it.isNotBlank() })
+            .joinToString(" › ").ifEmpty { "已選擇的位置" }
     }
 
     private val uriRw = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
@@ -2222,8 +2269,10 @@ object DataRepository {
         cloudBackupUri.value?.takeIf { it != uri.toString() }?.let { old ->
             runCatching { ctx.contentResolver.releasePersistableUriPermission(Uri.parse(old), uriRw) }
         }
+        val label = describeCloudLocation(ctx, uri)
         cloudBackupUri.value = uri.toString()
-        prefs?.edit()?.putString("cloud_backup_uri", uri.toString())?.apply()
+        cloudBackupLocation.value = label
+        prefs?.edit()?.putString("cloud_backup_uri", uri.toString())?.putString("cloud_backup_label", label)?.apply()
         return 0
     }
 
@@ -2232,7 +2281,8 @@ object DataRepository {
             runCatching { context.applicationContext.contentResolver.releasePersistableUriPermission(Uri.parse(old), uriRw) }
         }
         cloudBackupUri.value = null
-        prefs?.edit()?.remove("cloud_backup_uri")?.apply()
+        cloudBackupLocation.value = null
+        prefs?.edit()?.remove("cloud_backup_uri")?.remove("cloud_backup_label")?.apply()
     }
 
     /** 覆寫已綁定的雲端備份檔。沒綁定或寫入失敗（檔案被移動、刪除）回 false。 */
@@ -2504,7 +2554,7 @@ class RecapReceiver : BroadcastReceiver() {
         if (DataRepository.cloudBackupUri.value != null) {
             val pr = goAsync()
             Thread {
-                runCatching { DataRepository.writeCloudBackup(context) }
+                runCatching { DataRepository.cloudBackupIfDue(context) }
                 pr.finish()
             }.start()
         }
@@ -4221,6 +4271,9 @@ class RelateViewModel : ViewModel() {
     fun refreshUndoState() = DataRepository.refreshUndoState()
     val cloudBackupUri = DataRepository.cloudBackupUri
     val cloudBackupLast = DataRepository.cloudBackupLast
+    val cloudBackupInterval = DataRepository.cloudBackupInterval
+    val cloudBackupLocation = DataRepository.cloudBackupLocation
+    fun setCloudBackupInterval(days: Int) = DataRepository.setCloudBackupInterval(days)
     fun bindCloudBackup(context: Context, uri: Uri) = DataRepository.bindCloudBackup(context, uri)
     fun unbindCloudBackup(context: Context) = DataRepository.unbindCloudBackup(context)
     fun backupToCloudNow(context: Context) = DataRepository.writeCloudBackup(context)
@@ -10468,7 +10521,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "「設定 → 清除資料」只會刪互動紀錄（訊息、停留、通話），標籤、合併的帳號、改過的名稱、常用詞都不會動。刪之前會列出清單讓你逐人取消。",
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
-            "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟，之後每晚會自動更新那份備份檔；也可以按「立即備份」。",
+            "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟。綁定後可以看到備份存在哪裡、上次備份時間，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
             "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
             "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。"
         )
@@ -10499,7 +10552,7 @@ private val USER_FAQ = listOf(
     "刪錯了可以救回來嗎？" to
         "可以。到「設定 → 最近刪除」，保留 7 天，可以整批還原，也可以只還原其中一個人。",
     "換手機資料會跟著走嗎？" to
-        "先綁定雲端備份：「設定 → 備份 → ☁ 綁定 Google 雲端硬碟」，之後每晚自動更新。" +
+        "先綁定雲端備份：「設定 → 備份 → ☁ 綁定 Google 雲端硬碟」，之後依你設定的週期自動更新（預設每天）。" +
         "新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔。沒綁定的話，換機前請手動「存成檔案」。",
     "App 會把我的資料傳出去嗎？" to
         "不會。App 沒有網路權限，無法把任何資料傳出手機，開發者也看不到。" +
@@ -10985,6 +11038,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     }
     val cloudUri by viewModel.cloudBackupUri.collectAsState()
     val cloudLast by viewModel.cloudBackupLast.collectAsState()
+    val cloudInterval by viewModel.cloudBackupInterval.collectAsState()
+    val cloudLocation by viewModel.cloudBackupLocation.collectAsState()
     var confirmUnbindCloud by remember { mutableStateOf(false) }
     if (confirmUnbindCloud) {
         AlertDialog(
@@ -11085,7 +11140,7 @@ fun SettingsView(viewModel: RelateViewModel) {
             ioScope.launch {
                 val r = withContext(Dispatchers.IO) { viewModel.bindCloudBackup(context, uri) }
                 Toast.makeText(context, when (r) {
-                    0 -> "已綁定，之後每晚會自動更新這份備份"
+                    0 -> "已綁定，預設每天自動備份，可以在設定頁調整週期"
                     1 -> "已備份這一次，但這個位置不允許自動更新，請改選 Google 雲端硬碟"
                     else -> "備份失敗，請換個位置再試"
                 }, Toast.LENGTH_LONG).show()
@@ -11235,11 +11290,57 @@ fun SettingsView(viewModel: RelateViewModel) {
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("雲端備份已綁定", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
                         }
+
+                        // 綁在哪裡：使用者要能確認自己真的綁到雲端，而不是手機裡的某個資料夾
+                        val cloudAuth = remember(cloudUri) { runCatching { Uri.parse(cloudUri).authority.orEmpty() }.getOrDefault("") }
+                        val isOnPhone = cloudAuth.startsWith("com.android.externalstorage") ||
+                            cloudAuth.startsWith("com.android.providers.downloads") ||
+                            cloudAuth.startsWith("com.android.providers.media")
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp))
+                                .background(AppColors.Background).padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Text("備份位置", fontSize = T.Micro, color = AppColors.TextTertiary)
+                            Text(cloudLocation ?: "已選擇的位置", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                color = AppColors.TextPrimary, lineHeight = 20.sp)
+                            Text(
+                                if (cloudLast > 0) "上次備份 " + SimpleDateFormat("yyyy/M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast))
+                                else "尚未備份",
+                                fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.padding(top = 2.dp)
+                            )
+                            if (isOnPhone) {
+                                Text("⚠ 這個位置在手機裡，換機或重灌時不會跟著走。建議按「更換位置」改選雲端硬碟。",
+                                    fontSize = T.Micro, color = AppColors.WorkText, lineHeight = 15.sp,
+                                    modifier = Modifier.padding(top = 6.dp))
+                            }
+                        }
+
+                        // 自動備份週期
+                        Text("自動備份", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)
+                        ) {
+                            listOf(1 to "每天", 3 to "每 3 天", 7 to "每週", 0 to "不自動").forEach { (days, label) ->
+                                val on = cloudInterval == days
+                                Box(
+                                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
+                                        .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                        .clickable { viewModel.setCloudBackupInterval(days) }
+                                        .padding(vertical = 7.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
+                                        color = if (on) Color.White else AppColors.TextSecondary,
+                                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
+                                }
+                            }
+                        }
                         Text(
-                            if (cloudLast > 0) "上次備份 " + SimpleDateFormat("M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast)) + "　·　每晚自動更新"
-                            else "每晚自動更新",
+                            if (cloudInterval == 0) "不會自動更新，只在你按「立即備份」時更新。"
+                            else "每晚 9 點左右檢查，距離上次備份滿 ${if (cloudInterval == 1) "1 天" else if (cloudInterval == 7) "7 天" else "$cloudInterval 天"}就自動更新。",
                             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
-                            modifier = Modifier.padding(start = 16.dp, top = 2.dp)
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -11267,7 +11368,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                             modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
                                 .clickable { confirmUnbindCloud = true }.padding(horizontal = 4.dp, vertical = 6.dp))
                     } else {
-                        Text("所有資料只存在這支手機。綁定 Google 雲端硬碟後，每晚會自動把備份更新到雲端，換機或重灌都不怕。",
+                        Text("所有資料只存在這支手機。綁定 Google 雲端硬碟後會定期自動把備份更新到雲端（週期可調），換機或重灌都不怕。",
                             fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(

@@ -18,6 +18,8 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **不要加 `INTERNET` 權限。** 「資料傳不出手機」是隱私權政策、資料安全性表單、無障礙聲明的共同前提，加了三份都要重寫。
   雲端備份因此走系統檔案選擇器（SAF），上傳交給雲端硬碟 App，而不是 Google 登入＋Drive API。
 - **不要加 `READ_CALL_LOG`**（受限權限）。
+- 雲端備份位置只存「提供者＋檔名」（SAF 拿不到資料夾路徑），**在綁定當下算好存起來**，不要每次開設定頁去查雲端硬碟。
+- 雲端備份週期由每晚回顧鬧鐘檢查，比對時容許 3 小時誤差（鬧鐘有一小時的窗），否則每天備份會常常變成隔天。
 - **所有開權限的入口都要先經過 `PermissionDisclosureDialog`**，不能直接 `startActivity` 到系統設定頁（Play 明確揭露規定）。
 - **四份文字要一致**：`PermissionDisclosureDialog`、`strings.xml` 的 `accessibility_desc`、`docs/privacy-policy.html`、`docs/play/SUBMISSION.md`。改一份就四份一起改。
 - **`keystore.properties` 與 `.jks` 絕不能 commit**（已列入 `.gitignore`）。
@@ -584,6 +586,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.29 | 2026-09-15 | 雲端備份顯示綁定位置與上次備份時間、可調整週期（每天／每 3 天／每週／不自動），綁在手機裡時提醒 |
 | v3.28 | 2026-09-15 | 上架準備：套件名稱改 `com.relatestats.app`；移除匯入手機通話紀錄；權限明確揭露；綁定 Google 雲端硬碟每晚自動備份；隱私權政策；R8 與簽署設定 |
 | v3.27 | 2026-09-15 | 今日互動報告改版：漸層標頭＋總結一句、彩色數字卡（▲▼）、今天的節奏、跟誰聊（標籤分布）、聊最多附比例條與 App |
 | v3.26 | 2026-09-14 | 「自訂暱稱」改成實心按鈕；使用說明與常見問題補上長按看全名、自訂暱稱 |
