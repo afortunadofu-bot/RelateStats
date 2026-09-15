@@ -19,3 +19,5 @@ local.properties
 keystore.properties
 *.jks
 *.keystore
+# Android Studio 精靈產出的簽署版 AAB／APK，不進版控
+/app/release/
