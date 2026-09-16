@@ -725,9 +725,14 @@ data class InteractionRecord(
     val timestamp: Long = System.currentTimeMillis(),
     val isMissedCall: Boolean = false,
     val isCall: Boolean = false,
-    val subSender: String? = null
+    val subSender: String? = null,
+    /**
+     * 通話方向：0 不知道、1 對方打來、2 我打出去。
+     * ⚠️ 只有真的抓得到證據才標（先看到來電鈴響＝對方打來），抓不到就留 0 顯示「通話」，不要猜。
+     */
+    val callDirection: Int = 0
 ) {
-    // 11 個欄位；仍相容舊的 8 欄位資料
+    // 12 個欄位；仍相容舊的 8 欄位資料
     fun toCsvString() = listOf(
         id,
         sanitizeForCsv(rawSenderName),
@@ -739,7 +744,8 @@ data class InteractionRecord(
         timestamp.toString(),
         isMissedCall.toString(),
         isCall.toString(),
-        subSender?.let { sanitizeForCsv(it) } ?: ""
+        subSender?.let { sanitizeForCsv(it) } ?: "",
+        callDirection.toString()
     ).joinToString("|#|")
 
     companion object {
@@ -758,7 +764,8 @@ data class InteractionRecord(
                     timestamp = parts[7].toLongOrNull() ?: 0L,
                     isMissedCall = parts.getOrNull(8)?.toBoolean() ?: false,
                     isCall = parts.getOrNull(9)?.toBoolean() ?: false,
-                    subSender = parts.getOrNull(10)?.takeIf { it.isNotBlank() }
+                    subSender = parts.getOrNull(10)?.takeIf { it.isNotBlank() },
+                    callDirection = parts.getOrNull(11)?.toIntOrNull() ?: 0
                 )
             } catch (_: Exception) { }
             return null
@@ -2589,7 +2596,14 @@ class RelateNotificationService : NotificationListenerService() {
      * 這是不讀取任何內容、也不需要額外權限就能拿到秒數的方法。
      * ⚠️ 用 putIfAbsent：通話中通知每秒都會重新 post（上面的計時在跳），只能記第一次。
      */
-    private val ongoingCalls = java.util.concurrent.ConcurrentHashMap<String, Triple<String, String, Long>>()
+    private data class CallStart(val name: String, val app: String, val start: Long, val dir: Int)
+    private val ongoingCalls = java.util.concurrent.ConcurrentHashMap<String, CallStart>()
+    /**
+     * 最近看到「來電鈴響中」通知的對象 → 時間。
+     * 對方打來時會先跳鈴響通知，接著才變成「通話中」；我自己撥出去則只有「通話中」。
+     * 這是不讀通話紀錄、也沒有權限可問的情況下，唯一分得出方向的線索。
+     */
+    private val ringingCalls = java.util.concurrent.ConcurrentHashMap<String, Long>()
     /** 對象 → 最近一次靠「通知移除」算出通話的時間，用來避免跟「通話結束」通知重複計算 */
     private val recentEndedCalls = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -2610,20 +2624,22 @@ class RelateNotificationService : NotificationListenerService() {
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         try {
             val start = ongoingCalls.remove(sbn.key) ?: return
-            val secs = ((System.currentTimeMillis() - start.third) / 1000L).toInt()
+            val secs = ((System.currentTimeMillis() - start.start) / 1000L).toInt()
             // 3 秒以下多半是沒接通就掛掉；超過 6 小時一定是通知卡住沒被移除
             if (secs < 3 || secs > 6 * 3600) return
-            recentEndedCalls[start.first] = System.currentTimeMillis()
+            recentEndedCalls[start.name] = System.currentTimeMillis()
+            ringingCalls.remove(start.name)
             DataRepository.addInteraction(
                 InteractionRecord(
-                    rawSenderName = start.first,
-                    appName = start.second,
-                    isIncoming = true,
+                    rawSenderName = start.name,
+                    appName = start.app,
+                    isIncoming = start.dir != 2,
                     wordCount = 0,
                     durationSeconds = secs,
                     isGroup = false,
                     isMissedCall = false,
-                    isCall = true
+                    isCall = true,
+                    callDirection = start.dir
                 )
             )
         } catch (_: Exception) {
@@ -2659,7 +2675,18 @@ class RelateNotificationService : NotificationListenerService() {
                     .replace(Regex("(語音通話|視訊通話|通話中|正在通話|LINE|Messenger)"), "")
                     .trim().trim('-', '·', '•', ' ')
                 if (name.isNotBlank() && !isNonPersonContact(name)) {
-                    ongoingCalls.putIfAbsent(sbn.key, Triple(name, appName, System.currentTimeMillis()))
+                    val blob = "$title $body"
+                    // ⚠️ 鈴響中的通知不是通話本身，只拿來記「這通是對方打來的」——
+                    //    接通後會換成「通話中」通知，那時才開始計時。
+                    val ringing = listOf("來電", "通話邀請", "邀請你", "正在響鈴", "Incoming call", "is calling")
+                        .any { blob.contains(it, ignoreCase = true) }
+                    if (ringing) {
+                        ringingCalls[name] = System.currentTimeMillis()
+                    } else {
+                        val ring = ringingCalls[name]
+                        val dir = if (ring != null && System.currentTimeMillis() - ring < 120_000L) 1 else 2
+                        ongoingCalls.putIfAbsent(sbn.key, CallStart(name, appName, System.currentTimeMillis(), dir))
+                    }
                 }
             }
             return
@@ -2693,7 +2720,10 @@ class RelateNotificationService : NotificationListenerService() {
                     durationSeconds = callInfo.second,
                     isGroup = false,
                     isMissedCall = callInfo.first,
-                    isCall = true
+                    isCall = true,
+                    // 未接一定是對方打來；已接的結束通知看不出方向，除非剛剛有鈴響過
+                    callDirection = if (callInfo.first) 1
+                    else ringingCalls[cleanName]?.takeIf { System.currentTimeMillis() - it < 300_000L }?.let { 1 } ?: 0
                 )
             )
             return
@@ -4445,7 +4475,10 @@ fun RecapDialog(recap: DailyRecap.RecapStat?, onClose: () -> Unit) {
     val dateText = remember { SimpleDateFormat("M 月 d 日 EEEE", Locale.TAIWAN).format(Date()) }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp).widthIn(max = 420.dp).fillMaxWidth()
+            // ⚠️ 一定要 safeDrawingPadding()：這個對話框是滿版的，
+            //    沒有它時「看完整報告」會被系統導覽列／手勢條蓋住，按不到。
+            modifier = Modifier.safeDrawingPadding()
+                .padding(horizontal = 20.dp, vertical = 12.dp).widthIn(max = 420.dp).fillMaxWidth()
                 .clip(RoundedCornerShape(28.dp)).background(AppColors.Surface)
         ) {
             // ── 標頭 ──
@@ -9598,8 +9631,8 @@ fun RecordManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                                         append(fmt.format(Date(rec.timestamp)))
                                         if (rec.durationSeconds > 0) append(" · 停留 ${formatDuration(rec.durationSeconds)}")
                                         if (rec.wordCount > 0) append(" · ${rec.wordCount} 字")
-                                        if (rec.isMissedCall) append(" · 未接")
-                                        else if (rec.isCall) append(" · 通話")
+                                        if (rec.isMissedCall) append(" · 未接來電")
+                                        else if (rec.isCall) append(" · " + callDirectionLabel(rec))
                                         rec.subSender?.let { append(" · $it") }
                                     },
                                     fontSize = 10.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -10490,7 +10523,8 @@ private val USER_GUIDE = listOf(
         listOf(
             "未接來電由通知取得。",
             "LINE、Messenger 等 App 的通話：從「通話中」通知出現到消失的時間會記成通話長度。部分 App 或機型不會掛這則通知，就無法取得秒數。",
-            "手機原生電話接通後不會發通知，所以拿不到通話秒數，只記得到未接來電。"
+            "手機原生電話接通後不會發通知，所以拿不到通話秒數，只記得到未接來電。",
+            "「逐筆檢視紀錄」裡，通話那一列會寫「對方打來」或「我打出去」：對方打來時會先跳來電通知，我方撥出則不會，靠這個分辨。分辨不出來時只寫「通話」。"
         )
     ),
     GuideSection(
@@ -10559,6 +10593,9 @@ private val USER_FAQ = listOf(
         "唯一的例外是你自己綁定的雲端備份：備份檔由 Google 雲端硬碟 App 上傳到你自己的雲端硬碟。",
     "常用詞為什麼看不到是誰傳的？" to
         "發話者是 v3.20 之後才開始記錄的。之前累積的詞沒有這份資料，新收到的訊息才會有。",
+    "想回報問題或給建議？" to
+        "到「設定 → 意見回饋」，選類型、寫幾句話，App 會把手機型號、Android 版本與 App 版本一起帶進郵件草稿，" +
+        "用你自己的郵件 App 寄給開發者。不會附上你的聊天紀錄或任何統計資料。",
     "晚上沒收到回顧通知？" to
         "今天沒有跟真人的互動就不會發。另外請確認通知權限有開，並把本 App 從省電限制中排除，否則系統可能延後或擋掉。"
 )
@@ -11036,6 +11073,8 @@ fun SettingsView(viewModel: RelateViewModel) {
         PermissionDisclosureDialog(k, onAgree = { disclosureKind = null; openPermissionSettings(context, k) },
             onDismiss = { disclosureKind = null })
     }
+    var showFeedback by remember { mutableStateOf(false) }
+    if (showFeedback) FeedbackDialog { showFeedback = false }
     val cloudUri by viewModel.cloudBackupUri.collectAsState()
     val cloudLast by viewModel.cloudBackupLast.collectAsState()
     val cloudInterval by viewModel.cloudBackupInterval.collectAsState()
@@ -11191,6 +11230,8 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsRow("隱私權政策", "讀取哪些資料、存在哪裡") {
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }
                 }
+                SettingsDivider()
+                SettingsRow("意見回饋", "回報問題或提建議") { showFeedback = true }
             }
         }
 
@@ -11699,6 +11740,98 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("不同意", color = AppColors.TextSecondary) } }
     )
+}
+
+const val FEEDBACK_EMAIL = "celine.fu.work@gmail.com"
+
+/**
+ * 意見回饋。
+ *
+ * ⚠️ App 沒有網路權限，所以不可能自己送出表單 ——
+ *    改成幫使用者把內容與裝置資訊寫好，交給他自己的郵件 App 寄出，
+ *    沒有郵件 App 時退而求其次複製到剪貼簿。
+ *    不要為了做表單去加 INTERNET，那會毀掉整個隱私說法與資料安全性申報。
+ */
+@Composable
+fun FeedbackDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val kinds = listOf("問題回報", "功能建議", "數字不對", "其他")
+    var kind by remember { mutableStateOf(kinds[0]) }
+    var text by remember { mutableStateOf("") }
+    val deviceInfo = remember {
+        "裝置：" + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL +
+            "\nAndroid：" + android.os.Build.VERSION.RELEASE + "（API " + android.os.Build.VERSION.SDK_INT + "）" +
+            "\nApp：v" + BuildConfig.VERSION_NAME
+    }
+    fun send() {
+        val body = text.trim() + "\n\n———\n" + deviceInfo
+        val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL)).apply {
+            putExtra(Intent.EXTRA_SUBJECT, "RelateStats 回饋：$kind")
+            putExtra(Intent.EXTRA_TEXT, body)
+        }
+        val ok = runCatching { context.startActivity(mail) }.isSuccess
+        if (!ok) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+            cm?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 回饋", "[$kind] " + body))
+            Toast.makeText(context, "找不到郵件 App，內容已複製，請貼給 $FEEDBACK_EMAIL", Toast.LENGTH_LONG).show()
+        }
+        onDismiss()
+    }
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = { Text("意見回饋", fontWeight = FontWeight.Black, fontSize = 18.sp, color = AppColors.TextPrimary) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Row(modifier = Modifier.fillMaxWidth().background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
+                    kinds.forEach { k ->
+                        val on = kind == k
+                        Box(
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
+                                .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                .clickable { kind = k }.padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(k, fontSize = T.Micro, maxLines = 1, softWrap = false,
+                                color = if (on) Color.White else AppColors.TextSecondary,
+                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 120.dp),
+                    placeholder = { Text("發生什麼事？在哪個畫面？", fontSize = T.Body, color = AppColors.TextTertiary) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp))
+                        .background(AppColors.Background).padding(10.dp)
+                ) {
+                    Text("會一起附上", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
+                    Text(deviceInfo, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp)
+                    Text("不會附上你的聊天紀錄、聯絡人或任何統計資料。",
+                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { send() }, enabled = text.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)) { Text("用郵件送出", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+    )
+}
+
+/** 通話那一列要寫「誰打的」。抓不到方向就只寫「通話」，不要猜。 */
+fun callDirectionLabel(r: InteractionRecord): String = when (r.callDirection) {
+    1 -> "對方打來"
+    2 -> "我打出去"
+    else -> "通話"
 }
 
 fun isNotificationServiceEnabled(context: Context): Boolean {
