@@ -7251,7 +7251,7 @@ fun OverviewView(viewModel: RelateViewModel) {
             item { LengthsCard(bundle.lengths, bundle.extras.avgWordsPerMsg, overviewDrill) }
         }
         if (bundle.calls.total > 0) {
-            item { CallsCard(bundle.calls) }
+            item { CallsCard(bundle.calls, overviewDrill) }
         }
 
     }
@@ -10214,26 +10214,41 @@ fun SectionOrderDialog(
  * drill 統一由呼叫端提供：兩頁各自有自己的下鑽對話框。
  */
 @Composable
-fun CallsCard(calls: CallSummary) {
+fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
+    // 舊資料沒有 isCall 欄位，靠 appName 補判斷（跟 getCallSummary 的條件一致）
+    fun isCallRec(r: InteractionRecord) = r.isCall || r.isMissedCall || r.appName == "電話"
     Panel {
         // ⚠️ 不要再解釋「為什麼沒有通話時長」。
         //    沒有秒數時就整格不畫（見下方），畫面上根本不會有空欄位，
         //    沒有東西缺席就不需要道歉 —— 多一個 ⓘ 反而是在提醒使用者這裡少了東西。
         SectionHead("通話統計")
+        // ⚠️ 每一格都要點得進去看是「誰」——只給一個總數，使用者看不出這幾通是跟誰通的。
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatPair("總通話", "${calls.total} 通", null, Modifier.weight(1f))
-            StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f))
+            StatPair("總通話", "${calls.total} 通", "點看是誰", Modifier.weight(1f)) {
+                drill("通話對象") { r -> isCallRec(r) }
+            }
+            StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f)) {
+                drill("接通的通話對象") { r -> isCallRec(r) && !r.isMissedCall }
+            }
         }
         Spacer(modifier = Modifier.height(6.dp))
         // 誰打給誰：只有「對方打來」沒有「我打出去」的話，看起來會像從來沒主動找過人
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatPair("對方打來", "${calls.incoming} 通", null, Modifier.weight(1f))
+            StatPair("對方打來", "${calls.incoming} 通", "點看是誰", Modifier.weight(1f)) {
+                drill("打電話給我的人") { r ->
+                    isCallRec(r) && (r.callDirection == 1 || (r.callDirection == 0 && r.isMissedCall))
+                }
+            }
             StatPair("我打出去", "${calls.outgoing} 通",
-                if (calls.unknownDir > 0) "另有 ${calls.unknownDir} 通分不出方向" else null, Modifier.weight(1f))
+                if (calls.unknownDir > 0) "另有 ${calls.unknownDir} 通分不出方向" else "點看是誰", Modifier.weight(1f)) {
+                drill("我打電話給誰") { r -> isCallRec(r) && r.callDirection == 2 }
+            }
         }
         Spacer(modifier = Modifier.height(6.dp))
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatPair("未接", "${calls.missed} 通", "未接率 ${calls.missRate}%", Modifier.weight(1f))
+            StatPair("未接", "${calls.missed} 通", "未接率 ${calls.missRate}%", Modifier.weight(1f)) {
+                drill("未接來電是誰打的") { r -> r.isMissedCall }
+            }
             // ⚠️ 沒有秒數時**整格拿掉**，不要留一個「—　需匯入通話紀錄」的空欄位。
             //    永遠是空的欄位只會佔位置又讓人以為壞了；
             //    「為什麼沒有時長」的說明已經在標題旁的 ⓘ 裡了。
@@ -10554,6 +10569,7 @@ private val USER_GUIDE = listOf(
             "未接來電由通知取得。",
             "LINE、Messenger 等 App 的通話：從「通話中」通知出現到消失的時間會記成通話長度。部分 App 或機型不會掛這則通知，就無法取得秒數。",
             "手機原生電話：接通後系統會掛一則通話中的常駐通知，從它出現到消失的時間就是秒數。撥號等待的那段不算，但掛斷後通知晚幾秒才消失時會多算幾秒。",
+            "「通話統計」上的每個數字都可以點，會列出是跟誰通的：總通話、接通、對方打來、我打出去、未接各自一份名單。",
             "「逐筆檢視紀錄」裡，通話那一列會寫「對方打來」或「我打出去」：對方打來時會先跳來電通知，我方撥出則不會，靠這個分辨。分辨不出來時只寫「通話」。"
         )
     ),
@@ -10623,6 +10639,9 @@ private val USER_FAQ = listOf(
         "唯一的例外是你自己綁定的雲端備份：備份檔由 Google 雲端硬碟 App 上傳到你自己的雲端硬碟。",
     "常用詞為什麼看不到是誰傳的？" to
         "發話者是 v3.20 之後才開始記錄的。之前累積的詞沒有這份資料，新收到的訊息才會有。",
+    "怎麼知道是誰打給我的？" to
+        "到總覽的「通話統計」，點「對方打來」或「未接」，會列出這段期間打給你的人與通數；" +
+        "點「我打出去」則是你主動打給誰。要看每一通的時間，到「設定 → 逐筆檢視紀錄」。",
     "為什麼只看得到別人打給我的電話？" to
         "舊版只認得未接來電的通知，所以自己打出去的不會被記錄。v3.31 起，只要通話中會掛常駐通知（LINE、Messenger 與手機原生電話都會），" +
         "打出去的也會記下來，通話統計裡可以看到「對方打來」與「我打出去」各幾通。更新前的舊紀錄補不回來，會算在「分不出方向」。",
