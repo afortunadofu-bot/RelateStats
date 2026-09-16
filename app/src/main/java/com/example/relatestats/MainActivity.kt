@@ -930,7 +930,9 @@ data class ChurnStat(val newcomers: List<String>, val dormant: List<Pair<String,
  */
 data class CallSummary(
     val total: Int, val answered: Int, val missed: Int,
-    val totalSeconds: Long, val timed: Int = 0
+    val totalSeconds: Long, val timed: Int = 0,
+    /** 對方打來（含未接）、我打出去、分不出方向的通數 */
+    val incoming: Int = 0, val outgoing: Int = 0, val unknownDir: Int = 0
 ) {
     val avgSeconds: Long get() = if (timed > 0) totalSeconds / timed else 0L
     val missRate: Int get() = if (total > 0) (missed * 100) / total else 0
@@ -2662,8 +2664,11 @@ class RelateNotificationService : NotificationListenerService() {
         // 群組摘要與常駐通知不是真實訊息
         val flags = n.flags
         if (flags and Notification.FLAG_GROUP_SUMMARY != 0) return
-        if (flags and Notification.FLAG_ONGOING_EVENT != 0 && appName != "電話") {
-            // 常駐通知不是訊息，但「通話中」那則要記下開始時間
+        if (flags and Notification.FLAG_ONGOING_EVENT != 0) {
+            // 常駐通知不是訊息，但「通話中」那則要記下開始時間。
+            // ⚠️ 手機原生電話也要走這裡：撥號 App 接通後不會發一般通知，
+            //    只靠通知偵測的話，「我打出去的電話」永遠不會被記錄，
+            //    使用者看到的就只有別人打給他的未接來電。
             val ex = n.extras
             val title = ex?.getString("android.title")?.trim().orEmpty()
             val body = ex?.getCharSequence("android.text")?.toString().orEmpty()
@@ -2676,10 +2681,22 @@ class RelateNotificationService : NotificationListenerService() {
                     .trim().trim('-', '·', '•', ' ')
                 if (name.isNotBlank() && !isNonPersonContact(name)) {
                     val blob = "$title $body"
+                    // ⚠️ 撥號 App 從「撥號中」就掛著常駐通知，要等真的接通才開始計時，
+                    //    否則響很久沒人接也會被記成一通。接通的證據＝通知上開始跳 0:07 這種計時。
+                    if (appName == "電話" &&
+                        !Regex("\\d{1,2}:\\d{2}").containsMatchIn(blob) &&
+                        !blob.contains("通話中")
+                    ) {
+                        if (listOf("來電", "Incoming call").any { blob.contains(it, ignoreCase = true) }) {
+                            ringingCalls[name] = System.currentTimeMillis()
+                        }
+                        return
+                    }
                     // ⚠️ 鈴響中的通知不是通話本身，只拿來記「這通是對方打來的」——
                     //    接通後會換成「通話中」通知，那時才開始計時。
-                    val ringing = listOf("來電", "通話邀請", "邀請你", "正在響鈴", "Incoming call", "is calling")
-                        .any { blob.contains(it, ignoreCase = true) }
+                    val ringing = appName != "電話" &&
+                        listOf("來電", "通話邀請", "邀請你", "正在響鈴", "Incoming call", "is calling")
+                            .any { blob.contains(it, ignoreCase = true) }
                     if (ringing) {
                         ringingCalls[name] = System.currentTimeMillis()
                     } else {
@@ -3748,12 +3765,18 @@ class RelateViewModel : ViewModel() {
         val answeredCalls = calls.filter { !it.isMissedCall }
         // 只有真的帶秒數的才能拿來算平均
         val timedCalls = answeredCalls.filter { it.durationSeconds > 0 }
+        // 未接一定是對方打來；舊資料沒有方向欄位，算進「分不出方向」而不是硬塞給某一邊
+        val incoming = calls.count { it.callDirection == 1 || (it.callDirection == 0 && it.isMissedCall) }
+        val outgoing = calls.count { it.callDirection == 2 }
         return CallSummary(
             total = calls.size,
             answered = answeredCalls.size,
             missed = missed,
             totalSeconds = timedCalls.sumOf { it.durationSeconds.toLong() },
-            timed = timedCalls.size
+            timed = timedCalls.size,
+            incoming = incoming,
+            outgoing = outgoing,
+            unknownDir = calls.size - incoming - outgoing
         )
     }
 
@@ -10202,6 +10225,13 @@ fun CallsCard(calls: CallSummary) {
             StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f))
         }
         Spacer(modifier = Modifier.height(6.dp))
+        // 誰打給誰：只有「對方打來」沒有「我打出去」的話，看起來會像從來沒主動找過人
+        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatPair("對方打來", "${calls.incoming} 通", null, Modifier.weight(1f))
+            StatPair("我打出去", "${calls.outgoing} 通",
+                if (calls.unknownDir > 0) "另有 ${calls.unknownDir} 通分不出方向" else null, Modifier.weight(1f))
+        }
+        Spacer(modifier = Modifier.height(6.dp))
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatPair("未接", "${calls.missed} 通", "未接率 ${calls.missRate}%", Modifier.weight(1f))
             // ⚠️ 沒有秒數時**整格拿掉**，不要留一個「—　需匯入通話紀錄」的空欄位。
@@ -10523,7 +10553,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "未接來電由通知取得。",
             "LINE、Messenger 等 App 的通話：從「通話中」通知出現到消失的時間會記成通話長度。部分 App 或機型不會掛這則通知，就無法取得秒數。",
-            "手機原生電話接通後不會發通知，所以拿不到通話秒數，只記得到未接來電。",
+            "手機原生電話：接通後系統會掛一則通話中的常駐通知，從它出現到消失的時間就是秒數。撥號等待的那段不算，但掛斷後通知晚幾秒才消失時會多算幾秒。",
             "「逐筆檢視紀錄」裡，通話那一列會寫「對方打來」或「我打出去」：對方打來時會先跳來電通知，我方撥出則不會，靠這個分辨。分辨不出來時只寫「通話」。"
         )
     ),
@@ -10572,7 +10602,7 @@ private val USER_FAQ = listOf(
         "到「設定 → 服務」把「停留時間偵測」打開；服務被關掉時 App 也會發通知提醒。",
     "LINE 通話的時間有算嗎？" to
         "有。LINE、Messenger 等 App 通話時會掛一則「通話中」通知，從它出現到消失的時間就記成通話長度。" +
-        "少數 App 或機型不會掛這則通知，就拿不到秒數。手機原生電話接通後不發通知，也拿不到秒數。",
+        "有。手機原生電話也一樣，接通後的通話中通知消失時就算出秒數。少數 App 或機型不會掛這則通知，那就拿不到秒數。",
     "合併錯人了，怎麼拆開？" to
         "點那位聯絡人 →「帳號與名稱」，在綁錯的帳號旁按「取消綁定」。它會變回獨立的聯絡人，紀錄跟著它走，不會遺失。",
     "合併後想用另一個名字？" to
@@ -10593,6 +10623,9 @@ private val USER_FAQ = listOf(
         "唯一的例外是你自己綁定的雲端備份：備份檔由 Google 雲端硬碟 App 上傳到你自己的雲端硬碟。",
     "常用詞為什麼看不到是誰傳的？" to
         "發話者是 v3.20 之後才開始記錄的。之前累積的詞沒有這份資料，新收到的訊息才會有。",
+    "為什麼只看得到別人打給我的電話？" to
+        "舊版只認得未接來電的通知，所以自己打出去的不會被記錄。v3.31 起，只要通話中會掛常駐通知（LINE、Messenger 與手機原生電話都會），" +
+        "打出去的也會記下來，通話統計裡可以看到「對方打來」與「我打出去」各幾通。更新前的舊紀錄補不回來，會算在「分不出方向」。",
     "想回報問題或給建議？" to
         "到「設定 → 意見回饋」，選類型、寫幾句話，App 會把手機型號、Android 版本與 App 版本一起帶進郵件草稿，" +
         "用你自己的郵件 App 寄給開發者。不會附上你的聊天紀錄或任何統計資料。",
