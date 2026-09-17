@@ -75,6 +75,8 @@ RelateStats 與上述 App 的開發公司無任何關聯。
 
 > ⚠️ **宣傳圖文與商店截圖一律用截圖模式拍的實機畫面**（真實數據、假名字），不可出現真實聯絡人名字。
 
+成品在 Downloads\\play商店\\relatestat\\上架素材\\；重拍後用 docs/play/tools/make_assets.py 重新產生（strip_nums.py＋ocr.ps1 用來去掉名字編號）。
+
 截圖順序與圖上標語：
 
 1. 概況 —「看見你把時間花在誰身上」
