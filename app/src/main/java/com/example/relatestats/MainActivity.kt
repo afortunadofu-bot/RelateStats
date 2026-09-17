@@ -2309,6 +2309,19 @@ object DataRepository {
     val cloudBackupInterval = MutableStateFlow(1)
     /** 給人看的位置，例如「Google 雲端硬碟 › RelateStats_雲端備份.txt」 */
     val cloudBackupLocation = MutableStateFlow<String?>(null)
+    /**
+     * 備份存在哪個 Google 帳號。
+     * ⚠️ 雲端硬碟的檔案網址裡只有「第幾個帳號」的編號，沒有 email，
+     *    而列出帳號的 API 一般 App 沒有權限呼叫 —— 能從檔案資訊裡找到 email 就自動填，
+     *    找不到就讓使用者自己標註。手機上登入好幾個 Google 帳號時，這是唯一分得清楚的辦法。
+     */
+    val cloudBackupAccount = MutableStateFlow<String?>(null)
+
+    fun setCloudBackupAccount(account: String?) {
+        val v = account?.trim()?.takeIf { it.isNotBlank() }
+        cloudBackupAccount.value = v
+        prefs?.edit()?.apply { if (v == null) remove("cloud_backup_account") else putString("cloud_backup_account", v) }?.apply()
+    }
 
     private fun loadCloudBackupState() {
         val p = prefs ?: return
@@ -2316,6 +2329,7 @@ object DataRepository {
         cloudBackupLast.value = p.getLong("cloud_backup_last", 0L)
         cloudBackupInterval.value = p.getInt("cloud_backup_interval", 1)
         cloudBackupLocation.value = p.getString("cloud_backup_label", null)
+        cloudBackupAccount.value = p.getString("cloud_backup_account", null)
     }
 
     fun setCloudBackupInterval(days: Int) {
@@ -2340,6 +2354,20 @@ object DataRepository {
      * ⚠️ SAF 拿不到資料夾路徑，只拿得到「哪個提供者」＋「檔名」，所以只顯示這兩段。
      * ⚠️ 綁定當下算好存進偏好設定，不要每次開設定頁都去查 —— 查雲端硬碟可能要等網路。
      */
+    /** 盡量從檔案資訊或網址裡找出 email；找不到回 null */
+    private fun findAccountEmail(ctx: Context, uri: Uri): String? {
+        val re = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+        re.find(Uri.decode(uri.toString()))?.let { return it.value }
+        return runCatching {
+            ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                if (!c.moveToFirst()) null
+                else (0 until c.columnCount).firstNotNullOfOrNull { i ->
+                    runCatching { c.getString(i) }.getOrNull()?.let { v -> re.find(v)?.value }
+                }
+            }
+        }.getOrNull()
+    }
+
     private fun describeCloudLocation(ctx: Context, uri: Uri): String {
         val auth = uri.authority.orEmpty()
         val app = when {
@@ -2372,9 +2400,14 @@ object DataRepository {
             runCatching { ctx.contentResolver.releasePersistableUriPermission(Uri.parse(old), uriRw) }
         }
         val label = describeCloudLocation(ctx, uri)
+        val account = findAccountEmail(ctx, uri)
         cloudBackupUri.value = uri.toString()
         cloudBackupLocation.value = label
-        prefs?.edit()?.putString("cloud_backup_uri", uri.toString())?.putString("cloud_backup_label", label)?.apply()
+        // 換了位置，舊的帳號標註就不一定對了
+        cloudBackupAccount.value = account
+        prefs?.edit()?.putString("cloud_backup_uri", uri.toString())?.putString("cloud_backup_label", label)
+            ?.apply { if (account == null) remove("cloud_backup_account") else putString("cloud_backup_account", account) }
+            ?.apply()
         return 0
     }
 
@@ -2384,7 +2417,8 @@ object DataRepository {
         }
         cloudBackupUri.value = null
         cloudBackupLocation.value = null
-        prefs?.edit()?.remove("cloud_backup_uri")?.remove("cloud_backup_label")?.apply()
+        cloudBackupAccount.value = null
+        prefs?.edit()?.remove("cloud_backup_uri")?.remove("cloud_backup_label")?.remove("cloud_backup_account")?.apply()
     }
 
     /** 覆寫已綁定的雲端備份檔。沒綁定或寫入失敗（檔案被移動、刪除）回 false。 */
@@ -4592,6 +4626,8 @@ class RelateViewModel : ViewModel() {
     val cloudBackupLast = DataRepository.cloudBackupLast
     val cloudBackupInterval = DataRepository.cloudBackupInterval
     val cloudBackupLocation = DataRepository.cloudBackupLocation
+    val cloudBackupAccount = DataRepository.cloudBackupAccount
+    fun setCloudBackupAccount(a: String?) = DataRepository.setCloudBackupAccount(a)
     fun setCloudBackupInterval(days: Int) = DataRepository.setCloudBackupInterval(days)
     fun bindCloudBackup(context: Context, uri: Uri) = DataRepository.bindCloudBackup(context, uri)
     fun unbindCloudBackup(context: Context) = DataRepository.unbindCloudBackup(context)
@@ -10940,7 +10976,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "「設定 → 清除資料」只會刪互動紀錄（訊息、停留、通話），標籤、合併的帳號、改過的名稱、常用詞都不會動。刪之前會列出清單讓你逐人取消。",
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
-            "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟。綁定後可以看到備份存在哪裡、上次備份時間，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
+            "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
             "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
             "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。"
         )
@@ -11476,6 +11512,39 @@ fun SettingsView(viewModel: RelateViewModel) {
     val cloudLast by viewModel.cloudBackupLast.collectAsState()
     val cloudInterval by viewModel.cloudBackupInterval.collectAsState()
     val cloudLocation by viewModel.cloudBackupLocation.collectAsState()
+    val cloudAccount by viewModel.cloudBackupAccount.collectAsState()
+    var editCloudAccount by remember { mutableStateOf(false) }
+    if (editCloudAccount) {
+        var input by remember { mutableStateOf(cloudAccount.orEmpty()) }
+        AlertDialog(
+            containerColor = AppColors.Surface,
+            onDismissRequest = { editCloudAccount = false },
+            title = { Text("備份存在哪個帳號？", fontWeight = FontWeight.Bold, fontSize = 17.sp) },
+            text = {
+                Column {
+                    Text("手機上有好幾個 Google 帳號時，App 分辨不出你剛剛選的是哪一個。填上帳號，之後一看就知道去哪裡找備份。",
+                        fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 18.sp)
+                    OutlinedTextField(
+                        value = input, onValueChange = { input = it }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                        placeholder = { Text("例：name@gmail.com", fontSize = T.Body, color = AppColors.TextTertiary) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    Text("不確定的話，按「開啟備份檔」，雲端硬碟會顯示這份檔案在哪個帳號。",
+                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                        modifier = Modifier.padding(top = 8.dp))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.setCloudBackupAccount(input); editCloudAccount = false }) {
+                    Text("儲存", color = AppColors.ActiveBlue, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { editCloudAccount = false }) { Text("取消", color = AppColors.TextSecondary) } }
+        )
+    }
     var confirmUnbindCloud by remember { mutableStateOf(false) }
     if (confirmUnbindCloud) {
         AlertDialog(
@@ -11760,6 +11829,35 @@ fun SettingsView(viewModel: RelateViewModel) {
                             Text("備份位置", fontSize = T.Micro, color = AppColors.TextTertiary)
                             Text(cloudLocation ?: "已選擇的位置", fontSize = T.Body, fontWeight = FontWeight.Bold,
                                 color = AppColors.TextPrimary, lineHeight = 20.sp)
+                            // 哪個 Google 帳號：抓得到就顯示，抓不到讓使用者自己標
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                                Text(
+                                    if (cloudAccount != null) "帳號：$cloudAccount" else "帳號：未標註",
+                                    fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    color = if (cloudAccount != null) AppColors.TextSecondary else AppColors.WorkText,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Text(if (cloudAccount != null) "修改" else "標註帳號",
+                                    fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(6.dp))
+                                        .clickable { editCloudAccount = true }.padding(horizontal = 6.dp, vertical = 4.dp))
+                                Text("開啟備份檔", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            val u = cloudUri ?: return@clickable
+                                            val ok = runCatching {
+                                                context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                                    setDataAndType(Uri.parse(u), "text/plain")
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                })
+                                            }.isSuccess
+                                            if (!ok) Toast.makeText(context,
+                                                "這個位置無法直接開啟，請到雲端硬碟 App 搜尋「RelateStats_雲端備份」",
+                                                Toast.LENGTH_LONG).show()
+                                        }.padding(horizontal = 6.dp, vertical = 4.dp))
+                            }
                             Text(
                                 if (cloudLast > 0) "上次備份 " + SimpleDateFormat("yyyy/M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast))
                                 else "尚未備份",
@@ -11835,7 +11933,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(vertical = 12.dp)
                         ) { Text("☁  綁定 Google 雲端硬碟", fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
-                        Text("按下後，在儲存位置選「雲端硬碟」再按儲存。",
+                        Text("按下後，在左側選「雲端硬碟」並留意下方的帳號，再按儲存。手機有多個 Google 帳號時，存好後可以標註是哪一個。",
                             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
                             modifier = Modifier.padding(top = 6.dp))
                     }

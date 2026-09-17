@@ -26,8 +26,8 @@ android {
         applicationId = "com.relatestats.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 60
-        versionName = "3.36"
+        versionCode = 61
+        versionName = "3.37"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -44,6 +44,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // ⚠️ 開發版一定要跟 Play 版不同套件名稱。同一個套件名稱、不同簽章時，
+            //    手機上裝著開發版就無法從 Play 安裝測試版（Play 只會顯示「伺服器端發生錯誤」）。
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-dev"
+        }
         release {
             if (keystoreProps.containsKey("storeFile")) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true

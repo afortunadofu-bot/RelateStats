@@ -1,0 +1,4 @@
+<resources>
+    <!-- 開發版：名稱加註，跟從 Play 裝的測試版分得出來 -->
+    <string name="app_name">RelateStats 開發版</string>
+</resources>
