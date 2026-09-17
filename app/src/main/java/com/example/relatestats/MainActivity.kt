@@ -2459,7 +2459,8 @@ object DataRepository {
         val aliases = aliasMap.map { "${it.key}|=|${it.value}" }.joinToString(";")
         val categories = catMap.map { "${it.key}|=|${it.value}" }.joinToString(";")
         val customCats = availCats.joinToString(";") { it.toCsvString() }
-        val combined = "V11||$records||$aliases||$categories||$customCats"
+        // V12：區段改用 \u001D 分隔（見 splitBackupSections）
+        val combined = listOf("V12", records, aliases, categories, customCats).joinToString(BACKUP_SECTION_SEP)
 
         if (key.isEmpty()) return Base64.encodeToString(combined.toByteArray(), Base64.NO_WRAP)
 
@@ -2469,6 +2470,26 @@ object DataRepository {
             bytes[i] = (bytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
         }
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+
+    private const val BACKUP_SECTION_SEP = "\u001D"
+
+    /**
+     * 把備份字串切成 [版本, 紀錄, 別名, 標籤對照, 自訂標籤]。
+     *
+     * ⚠️ V11 用「||」切區段，但 v3.30 起每筆紀錄結尾是「…|#||#|0」
+     *    （空的 subSender 夾在兩個欄位分隔中間），紀錄本身就含「||」——
+     *    直接 split("||") 會把第一筆之後全部切爛，還原後只剩一筆。
+     *    做法：先把所有欄位分隔符換成佔位字元，剩下的「||」才是真正的區段分隔，切完再換回來。
+     *    這樣 v3.30～v3.37 產生的 V11 備份檔也能完整還原。
+     * ⚠️ V12 起改用 \u001D（群組分隔字元），任何聯絡人名稱或訊息都不會出現。
+     */
+    private fun splitBackupSections(s: String): List<String> {
+        if (s.startsWith("V12")) return s.split(BACKUP_SECTION_SEP)
+        val guarded = s.replace("|#|", "\u0001").replace("|=|", "\u0002").replace("|cat|", "\u0003")
+        return guarded.split("||").map {
+            it.replace("\u0001", "|#|").replace("\u0002", "|=|").replace("\u0003", "|cat|")
+        }
     }
 
     fun importBackupString(backupStr: String, key: String): Boolean {
@@ -2485,7 +2506,7 @@ object DataRepository {
                 String(bytes)
             }
 
-            val parts = decodedStr.split("||")
+            val parts = splitBackupSections(decodedStr)
             // 欄位數不足代表備份檔損毀
             if (parts.size < 5 || !parts[0].startsWith("V")) return false
             val newRecords = parts[1].split(";").filter { it.isNotBlank() }
@@ -2494,6 +2515,8 @@ object DataRepository {
             val newCategories = parsePairs(parts[3].split(";").filter { it.isNotBlank() }.toSet())
             val newCustomCats = parts[4].split(";").filter { it.isNotBlank() }.mapNotNull { ContactCategory.fromCsvString(it) }
             if (newRecords.isEmpty() && newAliases.isEmpty() && newCategories.isEmpty()) return false
+            // 還原會整份蓋掉現有紀錄：先放進最近刪除，選錯檔案還救得回來
+            if (_interactions.value.isNotEmpty()) moveToTrash("還原備份前的紀錄", _interactions.value)
             _interactions.value = newRecords; _aliases.value = newAliases; _categories.value = newCategories; _availableCategories.value = ContactCategory.ensureEssential(
                 // 舊備份只含自訂標籤（沒有 OTHER），要補回種子清單
                 if (newCustomCats.none { it.id == ContactCategory.OTHER.id }) ContactCategory.seedCategories + newCustomCats
@@ -10978,6 +11001,7 @@ private val USER_GUIDE = listOf(
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
             "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
             "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
+            "還原會整份取代目前的紀錄，原本的紀錄會先放進「最近刪除」保留 7 天，選錯檔案可以救回來。",
             "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。"
         )
     )
@@ -11635,7 +11659,10 @@ fun SettingsView(viewModel: RelateViewModel) {
                     runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }.getOrNull()
                 }
                 val ok = content != null && viewModel.importBackup(content, "")
-                Toast.makeText(context, if (ok) "資料還原成功！" else "檔案無效或格式錯誤", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context,
+                    if (ok) "已還原 ${DataRepository.interactions.value.size} 筆紀錄；還原前的紀錄放在「最近刪除」"
+                    else "檔案無效或格式錯誤",
+                    Toast.LENGTH_LONG).show()
             }
         }
     }
