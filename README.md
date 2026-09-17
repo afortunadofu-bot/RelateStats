@@ -360,6 +360,10 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   不同手機的通知寬度不同，全形空白一換行就歪，也沒辦法跟昨天比。數字放在 App 內的 `RecapDialog`。
 - 流程：通知 →（`EXTRA_OPEN_RECAP`）→ `pendingRecap = true` → 主畫面開概要彈窗 →
   關掉（✕／點外面／返回／「看完整報告」）一律切到分析頁、日期設成今天。
+- ⚠️ **截圖模式只換「顯示」**：`RelateViewModel` 提供給畫面的 interactions／aliases／categories 等是假名版本，
+  `DataRepository` 的真實資料不動。開啟期間所有以名字為參數的寫入都會被 `screenshotGuard()` 擋下 ——
+  **新增這類寫入函式時，第一行一定要呼叫它**，否則會把假名字寫進真實資料。
+  直接讀 `DataRepository` 顯示名字的地方（例如每日報告）要自己包 `ScreenshotMode.display()`。
 - ⚠️ **群組判定不能只信 `android.isGroupConversation`**：LINE 群組常常不帶這個旗標。
   LINE 另外用「對話名 ≠ 發言人」與「名稱後有（人數）」判斷；這兩條**只能套在 LINE**，IG 一對一也會帶對話名。
   同一個名稱只要有一筆是群組，整個對話都算群組（`knownGroups`），使用者手動指定（`groupOverrides`）優先於一切。
@@ -599,6 +603,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.34 | 2026-09-17 | 截圖模式：畫面上的聯絡人名字全部換成假名字，方便截圖與錄影 |
 | v3.33 | 2026-09-17 | LINE 群組判斷改善＋可手動改群組／個人；每日報告高度上限、避開導覽列；上方「每日報告」按鈕可翻看過去每一天 |
 | v3.32 | 2026-09-16 | 通話統計每個數字都點得進去，看是誰打來、我打給誰 |
 | v3.31 | 2026-09-16 | 我自己打出去的通話也會記錄（含手機原生電話）；通話統計分出「對方打來／我打出去」 |

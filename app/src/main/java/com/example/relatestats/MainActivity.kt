@@ -117,6 +117,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +127,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1437,7 +1442,21 @@ object DataRepository {
     }
 
     /** 使用者在聯絡人選單手動改：true 群組、false 個人 */
+    /**
+     * 截圖模式開著時擋下所有「用名字改資料」的動作。回傳 true 代表被擋下。
+     * ⚠️ 新增任何以名字為參數的寫入函式，第一行都要呼叫這個。
+     */
+    private fun screenshotGuard(): Boolean {
+        if (!ScreenshotMode.enabled.value) return false
+        val ctx = appContext ?: return true
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(ctx, "截圖模式中，暫停編輯聯絡人。到「設定 → 截圖模式」關閉即可。", Toast.LENGTH_SHORT).show()
+        }
+        return true
+    }
+
     fun setGroupOverride(unified: String, isGroup: Boolean) {
+        if (screenshotGuard()) return
         groupOverrides.update { it + (unified to isGroup) }
         if (isGroup) knownGroups.add(unified) else knownGroups.remove(unified)
         prefs?.edit()?.putStringSet(
@@ -1545,6 +1564,7 @@ object DataRepository {
      *    否則還原一個人等於順手永久刪掉同一批的其他人。
      */
     fun restoreTrashNames(fileName: String, names: Set<String>): Int {
+        if (screenshotGuard()) return 0
         val dir = trashDir() ?: return 0
         return runCatching {
             val f = File(dir, fileName)
@@ -1806,6 +1826,7 @@ object DataRepository {
 
     /** 批次設定標籤，只寫一次檔 */
     fun updateCategories(names: Collection<String>, categoryId: String) {
+        if (screenshotGuard()) return
         if (names.isEmpty()) return
         _categories.update { cur -> cur + names.associateWith { categoryId } }
         saveData(immediate = true)
@@ -1818,6 +1839,7 @@ object DataRepository {
      * 互動紀錄不動 —— 紀錄存的是原始發話者名，歸戶一律走 aliases。
      */
     fun renameContact(oldName: String, newName: String) {
+        if (screenshotGuard()) return
         val target = newName.trim()
         if (target.isEmpty() || target == oldName) return
         snapshotForUndo("修改顯示名稱")
@@ -1837,6 +1859,7 @@ object DataRepository {
     }
 
     fun deleteContactsWithTrash(names: Set<String>): Int {
+        if (screenshotGuard()) return 0
         val doomed = _interactions.value.filter { (_aliases.value[it.rawSenderName] ?: it.rawSenderName) in names }
         moveToTrash("刪除聯絡人", doomed)
         return deleteContacts(names)
@@ -1884,12 +1907,14 @@ object DataRepository {
     val junkIgnored: StateFlow<Set<String>> = _junkIgnored
 
     fun ignoreJunk(names: Collection<String>) {
+        if (screenshotGuard()) return
         if (names.isEmpty()) return
         _junkIgnored.update { it + names }
         prefs?.edit()?.putStringSet("junk_ignored", _junkIgnored.value)?.apply()
     }
 
     fun unignoreJunk(name: String) {
+        if (screenshotGuard()) return
         _junkIgnored.update { it - name }
         prefs?.edit()?.putStringSet("junk_ignored", _junkIgnored.value)?.apply()
     }
@@ -1900,6 +1925,7 @@ object DataRepository {
     fun isBlocked(name: String): Boolean = name.trim() in _blockedNames.value
 
     fun blockName(name: String) {
+        if (screenshotGuard()) return
         _blockedNames.update { it + name }
         _deletedNames.update { it - name }
         saveData(immediate = true)
@@ -1907,12 +1933,14 @@ object DataRepository {
 
     /** 使用者說「這個人要留著」：從刪除名單移除，之後不再詢問 */
     fun forgetDeleted(name: String) {
+        if (screenshotGuard()) return
         _deletedNames.update { it - name }
         _blockedNames.update { it - name }
         saveData(immediate = true)
     }
 
     fun unblockName(name: String) {
+        if (screenshotGuard()) return
         _blockedNames.update { it - name }
         saveData(immediate = true)
     }
@@ -1931,6 +1959,7 @@ object DataRepository {
     }
 
     fun deleteContacts(names: Set<String>): Int {
+        if (screenshotGuard()) return 0
         if (names.isEmpty()) return 0
         snapshotForUndo("刪除 ${names.size} 位聯絡人")
         val now = System.currentTimeMillis()
@@ -2029,12 +2058,13 @@ object DataRepository {
         return groups
     }
 
-    fun updateCategory(unifiedName: String, categoryId: String) { _categories.update { it + (unifiedName to categoryId) }; saveData(immediate = true) }
+    fun updateCategory(unifiedName: String, categoryId: String) { if (screenshotGuard()) return; _categories.update { it + (unifiedName to categoryId) }; saveData(immediate = true) }
     /**
      * 帳號合併。
      * 目標解析到最終節點，並把原本指向來源的別名一起改指，支援鏈式合併。
      */
     fun setAlias(rawName: String, unifiedName: String) {
+        if (screenshotGuard()) return
         if (rawName == unifiedName || rawName.isBlank() || unifiedName.isBlank()) return
         _aliases.update { current ->
             val target = resolveAlias(unifiedName, current)
@@ -2052,6 +2082,7 @@ object DataRepository {
      * ⚠️ 只刪別名，不動紀錄 —— 綁錯了要能無損拆回來。
      */
     fun unmergeAccount(rawName: String) {
+        if (screenshotGuard()) return
         if (!_aliases.value.containsKey(rawName)) return
         snapshotForUndo("取消綁定帳號")
         _aliases.update { it - rawName }
@@ -2540,7 +2571,7 @@ object DailyRecap {
             yPeople = y.mapTo(HashSet()) { nameOf(it) }.size,
             yDur = y.sumOf { it.durationSeconds.toLong() },
             top = byName.entries.sortedByDescending { it.value.size }.take(3).map { (n, rs) ->
-                Triple(n, rs.size, rs.groupingBy { it.appName }.eachCount().maxByOrNull { it.value }?.key ?: "")
+                Triple(ScreenshotMode.display(n), rs.size, rs.groupingBy { it.appName }.eachCount().maxByOrNull { it.value }?.key ?: "")
             },
             hourly = hourly.toList(),
             catShare = catShare
@@ -3332,11 +3363,119 @@ class ChatTrackerService : AccessibilityService() {
 // ==========================================
 // 5. ViewModel
 // ==========================================
+/**
+ * 截圖模式：把畫面上所有聯絡人名字換成假名字，方便截圖、錄影、分享。
+ *
+ * ⚠️ 只在「顯示」這一層換（ViewModel 提供給畫面的資料），DataRepository 裡的真實資料完全不動，
+ *    通知服務照常用真名記錄，備份也是真名。
+ * ⚠️ 開啟期間所有「會用名字去改資料」的動作一律暫停（DataRepository.screenshotGuard）——
+ *    畫面上拿到的是假名字，拿去改標籤、合併、刪除，會把假名字寫進真實資料。
+ * ⚠️ 不存檔：重開 App 自動關閉，避免忘記關掉以為資料壞了。
+ * ⚠️ 假名字必須一對一（兩個真人不能拿到同一個假名字），否則統計會把兩個人併成一個。
+ */
+object ScreenshotMode {
+    val enabled = MutableStateFlow(false)
+    /** 真名（統一後名稱與群組發言人）→ 假名 */
+    @Volatile var mapping: Map<String, String> = emptyMap()
+
+    private val PEOPLE = listOf(
+        "小安", "阿哲", "Mia", "品妤", "家豪", "Ruby", "志明", "思涵", "Kevin", "雅婷",
+        "柏宇", "Zoe", "宥廷", "怡君", "Leo", "佳穎", "冠廷", "Nina", "子晴", "俊傑",
+        "Amy", "承恩", "詠晴", "Jason", "若瑜", "彥廷", "Ivy", "書豪", "欣妤", "Ryan",
+        "宜蓁", "明哲", "Chloe", "郁婷", "家瑋", "Emma", "昱辰", "語彤", "Ben", "芷若",
+        "宗翰", "Lily", "詩涵", "威廷", "Tina", "偉誠", "安琪", "Max", "雨柔", "峻宇"
+    )
+    private val GROUPS = listOf(
+        "週末爬山團", "大學同學會", "家族群", "讀書會", "專案小組", "羽球揪團", "午餐吃什麼",
+        "旅行規劃", "社團幹部", "室友群", "健身打卡", "咖啡同好", "桌遊之夜", "爸媽與我們", "新生群組"
+    )
+
+    private fun pick(pool: List<String>, i: Int): String =
+        if (i < pool.size) pool[i] else pool[i % pool.size] + " " + (i / pool.size + 1)
+
+    /** 沒在對照表裡的名字也不能露出真名 */
+    fun display(real: String): String =
+        if (!enabled.value) real
+        else mapping[real] ?: ("聯絡人 " + (Math.floorMod(real.hashCode(), 900) + 100))
+
+    data class Masked(
+        val records: List<InteractionRecord>,
+        val aliases: Map<String, String>,
+        val categories: Map<String, String>
+    )
+
+    fun mask(recs: List<InteractionRecord>, al: Map<String, String>, cats: Map<String, String>): Masked {
+        val groups = HashSet<String>()
+        val all = LinkedHashSet<String>()
+        recs.forEach { r ->
+            val u = al[r.rawSenderName] ?: r.rawSenderName
+            all.add(u)
+            if (r.isGroup) groups.add(u)
+        }
+        all.addAll(cats.keys)
+        all.addAll(al.values)
+        val map = HashMap<String, String>()
+        var p = 0; var g = 0; var n = 0
+        // 依名字的雜湊排序，同一份資料每次得到一樣的對照
+        all.sortedWith(compareBy<String>({ it.hashCode() }, { it })).forEach { u ->
+            map[u] = when {
+                // ⚠️ 非真人來源要換成「還是會被判定成非真人」的假名字，不然會混進排行
+                isNonPersonContact(u) || cats[u] == ContactCategory.SYSTEM.id -> "${++n} 則新訊息"
+                u in groups -> pick(GROUPS, g++)
+                else -> pick(PEOPLE, p++)
+            }
+        }
+        recs.mapNotNullTo(HashSet()) { it.subSender }
+            .sortedWith(compareBy<String>({ it.hashCode() }, { it }))
+            .forEach { s -> if (s !in map) map[s] = pick(PEOPLE, p++) }
+        // 被合併的帳號：「假名（帳號 2）」，帳號與名稱對話框裡才分得出幾個
+        val rawMap = HashMap<String, String>()
+        val counter = HashMap<String, Int>()
+        al.entries.sortedBy { it.key.hashCode() }.forEach { (raw, u) ->
+            if (raw != u) {
+                val k = (counter[u] ?: 1) + 1
+                counter[u] = k
+                rawMap[raw] = (map[u] ?: display(u)) + "（帳號 $k）"
+            }
+        }
+        fun rawName(raw: String) = rawMap[raw] ?: map[raw] ?: display(raw)
+        mapping = map
+        return Masked(
+            records = recs.map { r ->
+                r.copy(rawSenderName = rawName(r.rawSenderName), subSender = r.subSender?.let { map[it] ?: display(it) })
+            },
+            aliases = al.entries.associate { rawName(it.key) to (map[it.value] ?: display(it.value)) },
+            categories = cats.entries.associate { (map[it.key] ?: display(it.key)) to it.value }
+        )
+    }
+}
+
 class RelateViewModel : ViewModel() {
     val isFirstLaunch = DataRepository.isFirstLaunch
-    val interactions = DataRepository.interactions
-    val categories = DataRepository.categories
-    val aliases = DataRepository.aliases
+    val screenshotMode = ScreenshotMode.enabled
+    fun setScreenshotMode(on: Boolean) { ScreenshotMode.enabled.value = on }
+
+    /**
+     * 畫面用的資料。截圖模式關著時原封不動傳遞（同一個物件，快取照常命中）；
+     * 開著時換成假名字的版本。
+     */
+    private val masked = combine(
+        DataRepository.interactions, DataRepository.aliases, DataRepository.categories, ScreenshotMode.enabled
+    ) { recs, al, cats, on ->
+        if (on) ScreenshotMode.mask(recs, al, cats) else ScreenshotMode.Masked(recs, al, cats)
+    }.flowOn(Dispatchers.Default).stateIn(
+        viewModelScope, SharingStarted.Eagerly,
+        ScreenshotMode.Masked(DataRepository.interactions.value, DataRepository.aliases.value, DataRepository.categories.value)
+    )
+    val interactions: StateFlow<List<InteractionRecord>> =
+        combine(masked, ScreenshotMode.enabled) { m, _ -> m.records }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.interactions.value)
+    val categories: StateFlow<Map<String, String>> =
+        combine(masked, ScreenshotMode.enabled) { m, _ -> m.categories }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.categories.value)
+    val aliases: StateFlow<Map<String, String>> =
+        combine(masked, ScreenshotMode.enabled) { m, _ -> m.aliases }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.aliases.value)
     val availableCategories = DataRepository.availableCategories
     val weekStartDay = DataRepository.weekStartDay
     val chartPaletteId = DataRepository.chartPaletteId
@@ -4357,7 +4496,13 @@ class RelateViewModel : ViewModel() {
     fun previewJunkWords() = DataRepository.previewJunkWords()
     fun purgeWords(words: Set<String>) = DataRepository.purgeWords(words)
     val lastWordPurge = DataRepository.lastWordPurge
-    val wordSenders = DataRepository.wordSenders
+    val wordSenders: StateFlow<Map<String, Map<String, Int>>> =
+        combine(DataRepository.wordSenders, masked) { ws, _ ->
+            if (!ScreenshotMode.enabled.value) ws
+            else ws.mapValues { (_, senders) ->
+                senders.entries.groupBy({ ScreenshotMode.display(it.key) }, { it.value }).mapValues { it.value.sum() }
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.wordSenders.value)
     fun retagSystemContacts() = DataRepository.retagSystemContacts()
     fun previewRetagTargets() = DataRepository.previewRetagTargets()
     val debugLog = DataRepository.debugLog
@@ -4377,7 +4522,10 @@ class RelateViewModel : ViewModel() {
         DataRepository.addCustomCategory(ContactCategory(UUID.randomUUID().toString(), name, colorInt, bgColorInt))
     }
     fun deleteContacts(names: Set<String>) = DataRepository.deleteContactsWithTrash(names)
-    val blockedNames = DataRepository.blockedNames
+    val blockedNames: StateFlow<Set<String>> =
+        combine(DataRepository.blockedNames, masked) { b, _ ->
+            if (ScreenshotMode.enabled.value) b.mapTo(LinkedHashSet()) { ScreenshotMode.display(it) } else b
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.blockedNames.value)
     val sectionOrder = DataRepository.sectionOrder
     val hiddenSections = DataRepository.hiddenSections
     fun setSectionOrder(ids: List<String>) = DataRepository.setSectionOrder(ids)
@@ -4387,13 +4535,22 @@ class RelateViewModel : ViewModel() {
     fun blockName(n: String) = DataRepository.blockName(n)
     fun forgetDeleted(n: String) = DataRepository.forgetDeleted(n)
     fun unblockName(n: String) = DataRepository.unblockName(n)
-    fun listTrash() = DataRepository.listTrash()
+    fun listTrash() = DataRepository.listTrash().let { list ->
+        if (ScreenshotMode.enabled.value) list.map { it.copy(label = "已刪除的紀錄") } else list
+    }
     fun restoreTrashNames(file: String, names: Set<String>) = DataRepository.restoreTrashNames(file, names)
     fun restoreTrash(f: String) = DataRepository.restoreTrash(f)
     fun purgeTrash(f: String) = DataRepository.purgeTrash(f)
-    fun peekTrash(f: String) = DataRepository.peekTrash(f)
-    fun listJunkContacts() = DataRepository.listJunkContacts()
-    val junkIgnored = DataRepository.junkIgnored
+    fun peekTrash(f: String) = DataRepository.peekTrash(f).let { list ->
+        if (ScreenshotMode.enabled.value) list.map { it.copy(first = ScreenshotMode.display(it.first)) } else list
+    }
+    fun listJunkContacts() = DataRepository.listJunkContacts().let { list ->
+        if (ScreenshotMode.enabled.value) list.map { ScreenshotMode.display(it) } else list
+    }
+    val junkIgnored: StateFlow<Set<String>> =
+        combine(DataRepository.junkIgnored, masked) { k, _ ->
+            if (ScreenshotMode.enabled.value) k.mapTo(LinkedHashSet()) { ScreenshotMode.display(it) } else k
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.junkIgnored.value)
     fun ignoreJunk(names: Collection<String>) = DataRepository.ignoreJunk(names)
     fun unignoreJunk(name: String) = DataRepository.unignoreJunk(name)
     val undoAvailable = DataRepository.undoAvailable
@@ -10799,6 +10956,9 @@ private val USER_FAQ = listOf(
     "LINE 群組被當成個人了？" to
         "LINE 的群組通知常常沒有帶群組標記，App 會用「對話名稱跟發言人不同」「名稱後面有人數」來判斷，還是可能漏掉。" +
         "長按那個聯絡人 →「改成群組聊天室」即可，之後這個名稱的所有紀錄都算群組；判斷錯成群組的也能用同一處改回個人。",
+    "想截圖分享，但不想露出朋友的名字？" to
+        "到「設定 → 偏好」打開「截圖模式」，所有聯絡人名字會換成假名字，數字與圖表不變。" +
+        "只改畫面、不改資料；開啟期間暫停編輯聯絡人，重開 App 會自動關閉。",
     "想回報問題或給建議？" to
         "到「設定 → 意見回饋」，選類型、寫幾句話，App 會把手機型號、Android 版本與 App 版本一起帶進郵件草稿，" +
         "用你自己的郵件 App 寄給開發者。不會附上你的聊天紀錄或任何統計資料。",
@@ -11321,6 +11481,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showKept by remember { mutableStateOf(false) }
     var showPalette by remember { mutableStateOf(false) }
     val recapEnabled by viewModel.recapEnabled.collectAsState()
+    val shotMode by viewModel.screenshotMode.collectAsState()
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -11477,6 +11638,24 @@ fun SettingsView(viewModel: RelateViewModel) {
                             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                     }
                     Switch(checked = recapEnabled, onCheckedChange = { viewModel.setRecapEnabled(it) })
+                }
+                SettingsDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { viewModel.setScreenshotMode(!shotMode) }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("截圖模式", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text(
+                            if (shotMode) "開啟中：名字都是假的，暫停編輯聯絡人；重開 App 會自動關閉"
+                            else "把所有聯絡人名字換成假名字，方便截圖或錄影分享",
+                            fontSize = T.Micro, lineHeight = 14.sp,
+                            color = if (shotMode) AppColors.WorkText else AppColors.TextTertiary
+                        )
+                    }
+                    Switch(checked = shotMode, onCheckedChange = { viewModel.setScreenshotMode(it) })
                 }
                 SettingsDivider()
                 Row(
