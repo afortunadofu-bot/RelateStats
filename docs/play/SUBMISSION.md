@@ -63,7 +63,7 @@ RelateStats 與上述 App 的開發公司無任何關聯。
 | 標記 | 生產力、生活品質（依 Console 可選項目挑相近的） |
 | 電子郵件 | celine.fu.work@gmail.com |
 | 網站 | 可留空 |
-| 隱私權政策 | `https://afortunadofu-bot.github.io/RelateStats/privacy-policy.html` |
+| 隱私權政策 | `https://afortunadofu-bot.github.io/relatestats-privacy/` |
 
 ### 圖片素材
 
@@ -93,7 +93,7 @@ RelateStats 與上述 App 的開發公司無任何關聯。
 ### 2.1 隱私權政策
 
 ```
-https://afortunadofu-bot.github.io/RelateStats/privacy-policy.html
+https://afortunadofu-bot.github.io/relatestats-privacy/
 ```
 
 ### 2.2 應用程式存取權（App access）

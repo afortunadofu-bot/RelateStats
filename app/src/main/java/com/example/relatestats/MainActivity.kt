@@ -12083,10 +12083,12 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, onClick: 
 }
 
 /**
- * 隱私權政策網址（GitHub Pages，原始檔在 docs/privacy-policy.html）。
+ * 隱私權政策網址（GitHub Pages）。
+ * ⚠️ 放在獨立的公開 repo「relatestats-privacy」—— 主 repo 是私人的，免費帳號的私人 repo 不能開 Pages。
+ *    原始檔仍在本專案 docs/privacy-policy.html，改完要複製到那個 repo 的 index.html。
  * ⚠️ Play Console 填的網址必須跟這裡一樣。
  */
-const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/RelateStats/privacy-policy.html"
+const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-privacy/"
 
 /** 開系統權限頁。⚠️ 一律先經過 PermissionDisclosureDialog，不要直接呼叫。 */
 fun openPermissionSettings(context: Context, kind: String) {

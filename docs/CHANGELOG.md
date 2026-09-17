@@ -1,5 +1,11 @@
 # 修復紀錄
 
+## v3.36（2026-09-17）— 隱私權政策網址
+
+| # | 問題 | 根因 | 修法 |
+|---|------|------|------|
+| 1 | 隱私權政策網址 404。 | 主 repo 是私人的，免費帳號的私人 repo 不能開 GitHub Pages。 | 另開公開 repo `relatestats-privacy` 只放這一頁；App 內「隱私權政策」、送審資料、上架規劃的網址改成 `https://afortunadofu-bot.github.io/relatestats-privacy/`。 |
+
 ## v3.35（2026-09-17）— 截圖模式的名字
 
 | # | 症狀 | 根因 | 修法 |

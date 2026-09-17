@@ -10,7 +10,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **完整修復與變更紀錄**：[docs/CHANGELOG.md](docs/CHANGELOG.md)
 - **上架 Google Play 規劃**：[docs/PLAY_STORE_PLAN.md](docs/PLAY_STORE_PLAN.md)
 - **Play Console 送審資料（可直接貼上）**：[docs/play/SUBMISSION.md](docs/play/SUBMISSION.md)
-- **隱私權政策**：[docs/privacy-policy.html](docs/privacy-policy.html)
+- **隱私權政策**：[docs/privacy-policy.html](docs/privacy-policy.html)（線上版放在公開 repo `relatestats-privacy`：https://afortunadofu-bot.github.io/relatestats-privacy/，改完要同步過去）
 
 ### ⚠️ 上架相關的硬規則
 
@@ -603,6 +603,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.36 | 2026-09-17 | 隱私權政策改放獨立公開 repo `relatestats-privacy`，App 內連結同步更新 |
 | v3.35 | 2026-09-17 | 截圖模式的假名字不再帶編號，互動多的人拿到最自然的名字；宣傳素材一律用截圖模式拍 |
 | v3.34 | 2026-09-17 | 截圖模式：畫面上的聯絡人名字全部換成假名字，方便截圖與錄影 |
 | v3.33 | 2026-09-17 | LINE 群組判斷改善＋可手動改群組／個人；每日報告高度上限、避開導覽列；上方「每日報告」按鈕可翻看過去每一天 |

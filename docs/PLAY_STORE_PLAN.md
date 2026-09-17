@@ -125,14 +125,16 @@ $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"; .\gradlew.bat bund
 檔案已在 `docs/privacy-policy.html`，網址預定為：
 
 ```
-https://afortunadofu-bot.github.io/RelateStats/privacy-policy.html
+https://afortunadofu-bot.github.io/relatestats-privacy/
 ```
 
-1. GitHub → RelateStats repo → **Settings → Pages**
-2. Source 選 **Deploy from a branch**，Branch 選 `master`、資料夾選 `/docs` → Save
+主 repo 維持私人，隱私權政策放在另一個**公開** repo `afortunadofu-bot/relatestats-privacy`
+（本機資料夾 `C:\Users\user\AndroidStudioProjects\relatestats-privacy`，只有這一頁）。
+
+1. 建立公開 repo `relatestats-privacy`，推上本機資料夾的內容
+2. 該 repo → **Settings → Pages** → Source 選 **Deploy from a branch**，Branch 選 `main`、資料夾選 `/ (root)` → Save
 3. 等幾分鐘，用手機開上面的網址確認看得到
-4. ⚠️ 免費帳號的 GitHub Pages **需要 repo 是公開的**。若不想公開原始碼：另開一個公開 repo（例如 `relatestats-privacy`）只放這個 HTML，
-   然後把 `MainActivity.kt` 的 `PRIVACY_POLICY_URL` 與 SUBMISSION.md 的網址一起改掉
+4. 之後改 `docs/privacy-policy.html` 時，要複製到那個 repo 的 `index.html` 與 `privacy-policy.html` 再推上去
 
 ---
 
