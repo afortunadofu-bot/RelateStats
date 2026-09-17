@@ -46,7 +46,7 @@
 1. [ ] **把現有資料搬到新版**（見第 3 節）
 2. [x] **註冊 Play Console 開發者帳號**（US$25，身分驗證要等幾天，越早送越好）
 3. [ ] **產生 upload key**（見第 4 節）
-4. [ ] **開 GitHub Pages 讓隱私權政策上線**（見第 6 節）
+4. [x] **隱私權政策上線**：https://afortunadofu-bot.github.io/relatestats-privacy/（公開 repo `relatestats-privacy`，見第 6 節）
 5. [x] **隱私權政策與 SUBMISSION.md 填入聯絡信箱**：celine.fu.work@gmail.com
 6. [x] **截圖與主題圖片**：已產出在 Downloads\\play商店\\relatestat\\上架素材\\（商店截圖 7 張、主題圖片、圖示、社群貼文 5 張＋文案）。產生器在 docs/play/tools/
 7. [ ] **錄無障礙聲明影片**，上傳 YouTube 設為不公開（腳本見 SUBMISSION.md 第 3 節）
