@@ -99,6 +99,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.foundation.verticalScroll
@@ -1109,6 +1110,7 @@ object DataRepository {
         }
         loadData()
         loadCloudBackupState()
+        loadGroupState()
         val appContext = context.applicationContext
         ioScope.launch {
             runOneTimeCleanupIfNeeded(appContext)
@@ -1387,9 +1389,68 @@ object DataRepository {
         }
     }
 
-    fun addInteraction(record: InteractionRecord) {
+    // ── 群組判定 ──────────────────────────────────────────
+    /** 使用者手動指定：名稱 → true 群組／false 個人。比自動判斷優先。 */
+    val groupOverrides = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    /**
+     * 曾經被判定為群組的名稱。
+     * ⚠️ 同一個 LINE 群組有時帶群組訊號、有時沒有（例如停留時間紀錄一律不帶），
+     *    只看單筆紀錄會讓同一個群組一半算群組、一半算個人。只要有一次是群組，整個對話都算群組。
+     */
+    private val knownGroups = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    fun isGroupName(unified: String): Boolean = groupOverrides.value[unified] ?: (unified in knownGroups)
+
+    private fun resolveGroup(r: InteractionRecord): InteractionRecord {
+        val unified = _aliases.value[r.rawSenderName] ?: r.rawSenderName
+        val o = groupOverrides.value[unified]
+        val g = o ?: (r.isGroup || unified in knownGroups)
+        if (g && o == null) knownGroups.add(unified)
+        return if (g == r.isGroup) r else r.copy(isGroup = g)
+    }
+
+    private fun loadGroupState() {
+        val p = prefs ?: return
+        groupOverrides.value = (p.getStringSet("group_overrides", emptySet()) ?: emptySet()).mapNotNull { e ->
+            val parts = e.split("|=|")
+            if (parts.size == 2) parts[0] to (parts[1] == "1") else null
+        }.toMap()
+        val aliases = _aliases.value
+        _interactions.value.forEach { if (it.isGroup) knownGroups.add(aliases[it.rawSenderName] ?: it.rawSenderName) }
+        applyGroupState()
+    }
+
+    /** 把群組判定套回所有既有紀錄，讓統計、篩選、群組 vs 個人卡片看到的是同一個答案 */
+    private fun applyGroupState() {
+        val aliases = _aliases.value
+        val ov = groupOverrides.value
+        var changed = false
+        val next = _interactions.value.map { r ->
+            val u = aliases[r.rawSenderName] ?: r.rawSenderName
+            val g = ov[u] ?: (r.isGroup || u in knownGroups)
+            if (g != r.isGroup) { changed = true; r.copy(isGroup = g) } else r
+        }
+        if (changed) {
+            _interactions.value = next
+            saveData()
+        }
+    }
+
+    /** 使用者在聯絡人選單手動改：true 群組、false 個人 */
+    fun setGroupOverride(unified: String, isGroup: Boolean) {
+        groupOverrides.update { it + (unified to isGroup) }
+        if (isGroup) knownGroups.add(unified) else knownGroups.remove(unified)
+        prefs?.edit()?.putStringSet(
+            "group_overrides",
+            groupOverrides.value.map { it.key + "|=|" + (if (it.value) "1" else "0") }.toSet()
+        )?.apply()
+        applyGroupState()
+    }
+
+    fun addInteraction(incoming: InteractionRecord) {
         // 服務可能先於 Activity 啟動，prefs 未就緒時不能靜靜丟資料
         if (prefs == null) return
+        val record = resolveGroup(incoming)
 
         _interactions.update { list ->
             val next = list + record
@@ -1517,8 +1578,9 @@ object DataRepository {
     }
 
     /** 批次新增：匯入時用，避免每筆都觸發一次存檔與分類建立 */
-    fun addInteractions(records: List<InteractionRecord>) {
-        if (records.isEmpty() || prefs == null) return
+    fun addInteractions(incoming: List<InteractionRecord>) {
+        if (incoming.isEmpty() || prefs == null) return
+        val records = incoming.map { resolveGroup(it) }
         _interactions.update { list ->
             val next = list + records
             if (next.size > MAX_RECORDS) next.takeLast(MAX_RECORDS) else next
@@ -2448,12 +2510,14 @@ object DailyRecap {
     /** 今天沒有真人互動就回 null —— 沒事就不要吵人。 */
     fun buildRecap(now: Long = System.currentTimeMillis()): RecapStat? {
         val today = startOfDayMs(now)
+        // ⚠️ 看過去某一天時一定要有結束時間，不然「那天」會把之後每一天都算進來
+        val dayEnd = today + 86_400_000L
         val yStart = today - 86_400_000L
         val cats = DataRepository.categories.value
         val aliases = DataRepository.aliases.value
         fun nameOf(r: InteractionRecord) = aliases[r.rawSenderName] ?: r.rawSenderName
         val all = DataRepository.interactions.value
-        val t = all.filter { it.timestamp >= today && !isExcludedFromStats(nameOf(it), cats) }
+        val t = all.filter { it.timestamp in today until dayEnd && !isExcludedFromStats(nameOf(it), cats) }
         if (t.isEmpty()) return null
         val y = all.filter { it.timestamp in yStart until today && !isExcludedFromStats(nameOf(it), cats) }
 
@@ -2767,6 +2831,17 @@ class RelateNotificationService : NotificationListenerService() {
         //    不是群組。誤判會讓不同的人被併成同一個「群組」。
         //    非群組時每則訊息各自歸戶到自己的發話者即可正確拆開。
         val isGroupFlag = extras.getBoolean("android.isGroupConversation", false)
+        // ⚠️ LINE 的群組通知常常「沒有」帶官方群組旗標，只看旗標會把大部分 LINE 群組當成個人。
+        //    LINE 群組的通知：對話名＝群組名、發言人＝群組裡的某個人，兩者不同；
+        //    一對一則沒有對話名、或對話名就是對方名字。群組名後面帶「(人數)」也一定是群組。
+        //    這個判斷只套在 LINE —— IG 一對一私訊也會帶對話名，不能沿用。
+        fun lineGroup(conv: String?, speaker: String?): Boolean {
+            if (appName != "LINE") return false
+            val c = conv?.trim()?.takeIf { it.isNotBlank() } ?: return false
+            if (Regex("[（(]\\s*\\d{1,4}\\s*[)）]\\s*$").containsMatchIn(c)) return true
+            val sp = speaker?.trim()?.takeIf { it.isNotBlank() } ?: return false
+            return !c.equals(sp, ignoreCase = true)
+        }
 
         if (incoming.isNotEmpty()) {
             val convName = convTitle?.trim()?.takeIf { it.isNotBlank() }
@@ -2782,10 +2857,11 @@ class RelateNotificationService : NotificationListenerService() {
                 if (msg.time > newest) newest = msg.time
                 if (isNoise(msg.text)) return@forEach
                 val speaker = msg.sender?.trim()?.takeIf { it.isNotBlank() }
+                val grp = isGroupFlag || lineGroup(convName, speaker)
                 // 群組才用對話名當歸戶對象；一對一一律用實際發話者
-                val senderName = if (isGroupFlag && convName != null) convName else (speaker ?: convName ?: baseTitle)
-                val subSender = if (isGroupFlag) speaker else null
-                addMessage(appName, senderName, subSender, msg.text, isGroupFlag, msg.time)
+                val senderName = if (grp && convName != null) convName else (speaker ?: convName ?: baseTitle)
+                val subSender = if (grp) speaker else null
+                addMessage(appName, senderName, subSender, msg.text, grp, msg.time)
                 handled++
             }
             lastHandledTime[convKey] = newest
@@ -2803,7 +2879,7 @@ class RelateNotificationService : NotificationListenerService() {
         // ---- 沒有 MessagingStyle 的後備路徑 ----
         var senderName = baseTitle.trim()
         var subSender: String? = null
-        var isGroup = isGroupFlag
+        var isGroup = isGroupFlag || lineGroup(convTitle, baseTitle)
         var content = fallbackContent
 
         // 只有官方旗標說是群組時，才用對話名歸戶、把標題當發話者
@@ -4254,6 +4330,8 @@ class RelateViewModel : ViewModel() {
     }
 
     fun setCategory(name: String, categoryId: String) { DataRepository.updateCategory(name, categoryId) }
+    fun isGroupName(name: String) = DataRepository.isGroupName(name)
+    fun setGroupOverride(name: String, isGroup: Boolean) = DataRepository.setGroupOverride(name, isGroup)
     fun setTimeFilter(filter: DateFilter) { timeFilter.value = filter }
     fun setSortType(type: SortType) { sortType.value = type }
     fun setCategoryFilter(cat: ContactCategory?) { categoryFilter.value = cat }
@@ -4460,76 +4538,118 @@ fun appColorScheme(): ColorScheme {
     )
 }
 
-/** 今天 vs 昨天的差：(文字, 方向) 方向 1 多、-1 少、0 一樣或昨天沒有 */
-private fun recapDelta(cur: Long, prev: Long, fmt: (Long) -> String): Pair<String, Int> = when {
-    prev == 0L && cur == 0L -> "跟昨天一樣" to 0
-    prev == 0L -> "昨天沒有" to 0
-    cur == prev -> "跟昨天一樣" to 0
+/** 這天 vs 前一天的差：(文字, 方向) 方向 1 多、-1 少、0 一樣或前一天沒有 */
+private fun recapDelta(cur: Long, prev: Long, prevLabel: String, fmt: (Long) -> String): Pair<String, Int> = when {
+    prev == 0L && cur == 0L -> "跟${prevLabel}一樣" to 0
+    prev == 0L -> "${prevLabel}沒有" to 0
+    cur == prev -> "跟${prevLabel}一樣" to 0
     cur > prev -> ("+" + fmt(cur - prev)) to 1
     else -> ("−" + fmt(prev - cur)) to -1
 }
 
-/** 標頭那句話：用訊息量跟昨天比，給一個有溫度的總結，而不是再重複一次數字 */
-private fun recapHeadline(r: DailyRecap.RecapStat): String {
+/** 標頭那句話：用訊息量跟前一天比，給一個有溫度的總結，而不是再重複一次數字 */
+private fun recapHeadline(r: DailyRecap.RecapStat, isToday: Boolean): String {
+    val d = if (isToday) "今天" else "這天"
+    val p = if (isToday) "昨天" else "前一天"
     val y = r.yMsgs
     return when {
-        y == 0 -> "今天跟 ${r.people} 個人有互動"
-        r.msgs >= y * 1.3 -> "今天比昨天熱鬧不少"
-        r.msgs >= y * 1.05 -> "今天比昨天多聊了一些"
-        r.msgs <= y * 0.7 -> "今天比昨天安靜許多"
-        r.msgs <= y * 0.95 -> "今天比昨天少聊了一點"
-        else -> "今天跟昨天差不多熱絡"
+        y == 0 -> "${d}跟 ${r.people} 個人有互動"
+        r.msgs >= y * 1.3 -> "${d}比${p}熱鬧不少"
+        r.msgs >= y * 1.05 -> "${d}比${p}多聊了一些"
+        r.msgs <= y * 0.7 -> "${d}比${p}安靜許多"
+        r.msgs <= y * 0.95 -> "${d}比${p}少聊了一點"
+        else -> "${d}跟${p}差不多熱絡"
     }
 }
 
 /**
- * 每晚回顧的概要。
+ * 每日報告的概要。
  *
- * 版面由上而下：彩色標頭（總結一句＋主數字）→ 三張數字卡（各自跟昨天比）→
- * 今天的節奏（24 小時長條）→ 聊天對象的關係分布 → 聊最多的三個人。
- * ⚠️ 顏色全部取自目前的圖表配色（brand／accent／colors／tags），換配色時這裡會一起換，
- *    不要寫死任何色值，否則選了奶茶色盤會跑出一塊藍色標頭。
- * ⚠️ 關掉（✕、點外面、按返回、按「看完整報告」）一律帶到分析頁的今天。
+ * 版面由上而下：彩色標頭（日期切換＋總結一句＋主數字）→ 三張數字卡（各自跟前一天比）→
+ * 這天的節奏（24 小時長條）→ 聊天對象的關係分布 → 聊最多的三個人。
+ * ⚠️ 顏色全部取自目前的圖表配色（brand／accent／colors／tags），換配色時這裡會一起換。
+ * ⚠️ 高度上限是螢幕的 78%，內容區自己捲動 —— 不設上限時，資料多的日子會把卡片撐到螢幕底，
+ *    「看完整報告」就跟系統導覽列疊在一起。
+ * ⚠️ 關掉（✕、點外面、按返回、按「看完整報告」）一律帶到分析頁的「這一天」。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun RecapDialog(recap: DailyRecap.RecapStat?, onClose: () -> Unit) {
+fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
     val pal = AppColors.Chart
-    val dateText = remember { SimpleDateFormat("M 月 d 日 EEEE", Locale.TAIWAN).format(Date()) }
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    val todayStart = remember { startOfDayMs(System.currentTimeMillis()) }
+    val isToday = day >= todayStart
+    val earliest = remember {
+        DataRepository.interactions.value.minOfOrNull { it.timestamp }?.let { startOfDayMs(it) } ?: todayStart
+    }
+    val recap = remember(day) { DailyRecap.buildRecap(day + 12 * 3_600_000L) }
+    val dateText = remember(day) { SimpleDateFormat("M 月 d 日 EEEE", Locale.TAIWAN).format(Date(day)) }
+    val maxH = (LocalConfiguration.current.screenHeightDp * 0.78f).dp
+    val prevLabel = if (isToday) "昨天" else "前一天"
+    val d = if (isToday) "今天" else "這天"
+    fun shift(days: Int) {
+        val c = Calendar.getInstance().apply { timeInMillis = day; add(Calendar.DATE, days) }
+        onDayChange(startOfDayMs(c.timeInMillis))
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            // ⚠️ decorFitsSystemWindows = false 才拿得到系統列的邊界；再加 safeDrawingPadding()
+            //    與額外的下邊距，卡片底緣一定會停在導覽列上方。
+            modifier = Modifier.fillMaxSize().safeDrawingPadding()
+                .padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 28.dp),
+            contentAlignment = Alignment.Center
+        ) {
         Column(
-            // ⚠️ 一定要 safeDrawingPadding()：這個對話框是滿版的，
-            //    沒有它時「看完整報告」會被系統導覽列／手勢條蓋住，按不到。
-            modifier = Modifier.safeDrawingPadding()
-                .padding(horizontal = 20.dp, vertical = 12.dp).widthIn(max = 420.dp).fillMaxWidth()
+            modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth().heightIn(max = maxH)
                 .clip(RoundedCornerShape(28.dp)).background(AppColors.Surface)
         ) {
             // ── 標頭 ──
             Box(
                 modifier = Modifier.fillMaxWidth()
                     .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(pal.brand, pal.accent)))
-                    .padding(start = 22.dp, end = 10.dp, top = 18.dp, bottom = 20.dp)
+                    .padding(start = 18.dp, end = 10.dp, top = 12.dp, bottom = 16.dp)
             ) {
                 Column(modifier = Modifier.padding(end = 40.dp)) {
-                    Text("今日互動報告", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                    Text(if (isToday) "今日互動報告" else "每日互動報告", fontSize = T.Label, fontWeight = FontWeight.Bold,
                         color = Color.White.copy(alpha = 0.85f), letterSpacing = 1.sp)
-                    Text(dateText, fontSize = T.Micro, color = Color.White.copy(alpha = 0.7f))
-                    Spacer(modifier = Modifier.height(14.dp))
+                    // 日期切換：‹ 前一天　日期　後一天 ›
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                        val canPrev = day > earliest
+                        Text("‹", fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                            color = Color.White.copy(alpha = if (canPrev) 0.95f else 0.3f),
+                            modifier = Modifier.clip(CircleShape).clickable(enabled = canPrev) { shift(-1) }
+                                .padding(horizontal = 8.dp))
+                        Text(dateText, fontSize = T.Label, fontWeight = FontWeight.Bold, color = Color.White,
+                            maxLines = 1, softWrap = false)
+                        Text("›", fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                            color = Color.White.copy(alpha = if (!isToday) 0.95f else 0.3f),
+                            modifier = Modifier.clip(CircleShape).clickable(enabled = !isToday) { shift(1) }
+                                .padding(horizontal = 8.dp))
+                        if (!isToday) {
+                            Text("回今天", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = pal.brand,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.9f))
+                                    .clickable { onDayChange(todayStart) }.padding(horizontal = 8.dp, vertical = 2.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     if (recap == null) {
-                        Text("今天還很安靜", fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White)
+                        Text("${d}很安靜", fontSize = 20.sp, fontWeight = FontWeight.Black, color = Color.White)
                     } else {
-                        Text(recapHeadline(recap), fontSize = 20.sp, fontWeight = FontWeight.Black,
-                            color = Color.White, lineHeight = 26.sp)
-                        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 6.dp)) {
-                            Text("${recap.msgs}", fontSize = 40.sp, fontWeight = FontWeight.Black,
+                        Text(recapHeadline(recap, isToday), fontSize = 18.sp, fontWeight = FontWeight.Black,
+                            color = Color.White, lineHeight = 24.sp)
+                        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 2.dp)) {
+                            Text("${recap.msgs}", fontSize = 34.sp, fontWeight = FontWeight.Black,
                                 color = Color.White, maxLines = 1, softWrap = false)
                             Text(" 則訊息", fontSize = T.Body, fontWeight = FontWeight.Bold,
-                                color = Color.White.copy(alpha = 0.85f), modifier = Modifier.padding(bottom = 8.dp))
+                                color = Color.White.copy(alpha = 0.85f), modifier = Modifier.padding(bottom = 6.dp))
                         }
                     }
                 }
                 Box(
-                    modifier = Modifier.align(Alignment.TopEnd).size(36.dp).clip(CircleShape)
+                    modifier = Modifier.align(Alignment.TopEnd).size(34.dp).clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.18f)).clickable { onClose() },
                     contentAlignment = Alignment.Center
                 ) { Icon(Icons.Default.Close, contentDescription = "關閉", tint = Color.White, modifier = Modifier.size(18.dp)) }
@@ -4537,33 +4657,33 @@ fun RecapDialog(recap: DailyRecap.RecapStat?, onClose: () -> Unit) {
 
             Column(
                 modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
-                    .padding(horizontal = 18.dp, vertical = 16.dp)
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
                 if (recap == null) {
-                    Text("今天還沒有跟真人的互動紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
+                    Text("${d}沒有跟真人的互動紀錄。", fontSize = T.Body, color = AppColors.TextSecondary)
                 } else {
                     // ── 三張數字卡 ──
                     Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         RecapTile("訊息", "${recap.msgs}", "則",
-                            recapDelta(recap.msgs.toLong(), recap.yMsgs.toLong()) { "$it" }, pal.tagStyle(1), Modifier.weight(1f))
+                            recapDelta(recap.msgs.toLong(), recap.yMsgs.toLong(), prevLabel) { "$it" }, pal.tagStyle(1), Modifier.weight(1f))
                         RecapTile("對象", "${recap.people}", "位",
-                            recapDelta(recap.people.toLong(), recap.yPeople.toLong()) { "$it" }, pal.tagStyle(2), Modifier.weight(1f))
+                            recapDelta(recap.people.toLong(), recap.yPeople.toLong(), prevLabel) { "$it" }, pal.tagStyle(2), Modifier.weight(1f))
                         RecapTile("停留", formatDuration(recap.dur), "",
-                            recapDelta(recap.dur, recap.yDur) { formatDuration(it) }, pal.tagStyle(3), Modifier.weight(1f))
+                            recapDelta(recap.dur, recap.yDur, prevLabel) { formatDuration(it) }, pal.tagStyle(3), Modifier.weight(1f))
                     }
 
-                    // ── 今天的節奏 ──
-                    val maxH = recap.hourly.maxOrNull() ?: 0
-                    if (maxH > 0) {
-                        val peak = recap.hourly.indexOf(maxH)
-                        RecapSectionTitle("今天的節奏", "最熱絡 $peak:00–${peak + 1}:00")
+                    // ── 這天的節奏 ──
+                    val maxHour = recap.hourly.maxOrNull() ?: 0
+                    if (maxHour > 0) {
+                        val peak = recap.hourly.indexOf(maxHour)
+                        RecapSectionTitle("${d}的節奏", "最熱絡 $peak:00–${peak + 1}:00")
                         Row(
-                            modifier = Modifier.fillMaxWidth().height(56.dp),
+                            modifier = Modifier.fillMaxWidth().height(44.dp),
                             horizontalArrangement = Arrangement.spacedBy(2.dp),
                             verticalAlignment = Alignment.Bottom
                         ) {
                             recap.hourly.forEachIndexed { h, c ->
-                                val frac = if (c == 0) 0.04f else 0.12f + 0.88f * c / maxH
+                                val frac = if (c == 0) 0.04f else 0.12f + 0.88f * c / maxHour
                                 Box(
                                     modifier = Modifier.weight(1f).fillMaxHeight(frac)
                                         .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
@@ -4613,12 +4733,12 @@ fun RecapDialog(recap: DailyRecap.RecapStat?, onClose: () -> Unit) {
 
                     // ── 聊最多 ──
                     if (recap.top.isNotEmpty()) {
-                        RecapSectionTitle("今天聊最多", null)
+                        RecapSectionTitle("${d}聊最多", null)
                         val topMax = recap.top.first().second.toFloat()
                         recap.top.forEachIndexed { i, (name, cnt, app) ->
                             val c = pal.at(i)
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(c.copy(alpha = 0.16f)),
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(c.copy(alpha = 0.16f)),
                                     contentAlignment = Alignment.Center) {
                                     Text(name.trim().take(1).ifEmpty { "?" }, fontSize = T.Body, fontWeight = FontWeight.Black,
                                         color = c, maxLines = 1, softWrap = false)
@@ -4651,8 +4771,9 @@ fun RecapDialog(recap: DailyRecap.RecapStat?, onClose: () -> Unit) {
                 onClick = onClose,
                 colors = ButtonDefaults.buttonColors(containerColor = pal.brand),
                 shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, bottom = 18.dp).heightIn(min = 48.dp)
-            ) { Text("看完整報告  →", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 14.dp).heightIn(min = 46.dp)
+            ) { Text("看${d}的完整報告  →", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
+        }
         }
     }
 }
@@ -4868,13 +4989,19 @@ fun MainAppContent(viewModel: RelateViewModel) {
     }
     BackHandler(enabled = tabStack.size > 1) { tabStack.removeAt(tabStack.lastIndex) }
 
-    // 每晚回顧：通知 → 概要彈窗 → 關掉（✕ 或「看完整報告」）就切到分析頁的今天
+    // 每日報告：通知點進來、或上方「每日報告」按鈕 → 概要彈窗（可翻前後天）→ 關掉就看那天的完整分析
     val pendingRecap by viewModel.pendingRecap.collectAsState()
-    if (pendingRecap) {
-        val recap = remember { DailyRecap.buildRecap() }
-        RecapDialog(recap) {
+    var recapDay by rememberSaveable { mutableStateOf<Long?>(null) }
+    LaunchedEffect(pendingRecap) {
+        if (pendingRecap) {
+            recapDay = startOfDayMs(System.currentTimeMillis())
             viewModel.pendingRecap.value = false
-            viewModel.setTimeFilter(DateFilter(FilterType.SPECIFIC_DAY, System.currentTimeMillis()))
+        }
+    }
+    recapDay?.let { day ->
+        RecapDialog(day, onDayChange = { recapDay = it }) {
+            recapDay = null
+            viewModel.setTimeFilter(DateFilter(FilterType.SPECIFIC_DAY, day + 12 * 3_600_000L))
             setActiveTab("insights")
         }
     }
@@ -4905,7 +5032,21 @@ fun MainAppContent(viewModel: RelateViewModel) {
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    // 隨時都能打開每日報告，不必等晚上的通知；打開後可以往前翻
+                    Row(
+                        modifier = Modifier.clip(RoundedCornerShape(50))
+                            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(50))
+                            .clickable { recapDay = startOfDayMs(System.currentTimeMillis()) }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Rounded.DateRange, contentDescription = null, tint = AppColors.ActiveBlue, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("每日報告", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                            maxLines = 1, softWrap = false)
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
                     Text("RelateStats", color = AppColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.4).sp)
                 }
                 HorizontalDivider(color = AppColors.BorderLight)
@@ -9151,6 +9292,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     }
 
     longPressTarget?.let { target ->
+        val isGrp = remember(target) { viewModel.isGroupName(target) }
         AlertDialog(
             containerColor = AppColors.Surface,
             onDismissRequest = { longPressTarget = null },
@@ -9164,6 +9306,8 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                         // 改名、合併、看綁了哪些、取消綁定 —— 全部在「帳號與名稱」裡
                         "\ud83d\udc65 帳號與名稱（改名、合併、取消綁定）" to "accounts",
                         "\ud83c\udff7\ufe0f 設定標籤" to "tag",
+                        // 自動判斷難免出錯（LINE 群組常被當成個人），一定要能手動改
+                        (if (isGrp) "\ud83d\udc64 改成個人（不是群組）" else "\ud83d\udcac 改成群組聊天室") to "group",
                         "\ud83d\uddd1\ufe0f 刪除這位聯絡人與其紀錄" to "delete"
                     ).forEach { (label, action) ->
                         Text(
@@ -9182,6 +9326,12 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                         //    「新增自訂分類」時用來記住要套用給誰，
                                         //    本身不會開任何對話框 —— 所以按了完全沒反應。
                                         "tag" -> quickTagTarget = target
+                                        "group" -> {
+                                            viewModel.setGroupOverride(target, !isGrp)
+                                            Toast.makeText(context,
+                                                if (isGrp) "「$target」已改成個人" else "「$target」已改成群組",
+                                                Toast.LENGTH_SHORT).show()
+                                        }
                                         "delete" -> pendingDelete = setOf(target)
                                     }
                                     longPressTarget = null
@@ -10592,7 +10742,8 @@ private val USER_GUIDE = listOf(
         "9", "每晚回顧",
         listOf(
             "每天晚上九點左右會發一則通知。點開後先看概要：一句今天跟昨天比的總結、訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）、今天幾點聊最多的節奏圖、聊天對象的標籤分布，以及聊最多的三個人。",
-            "關掉概要（✕ 或「看完整報告」）會直接帶你到分析頁的今天。今天沒有互動就不會發；可以在「設定 → 偏好」關掉。",
+            "關掉概要（✕ 或「看完整報告」）會直接帶你到分析頁的那一天。今天沒有互動就不會發通知；可以在「設定 → 偏好」關掉。",
+            "不必等通知：畫面上方的「每日報告」隨時打開今天的報告，用日期旁的 ‹ › 翻看過去每一天，「回今天」一鍵回來。",
             "如果停留時間偵測（無障礙服務）被系統關掉，也會另外發通知提醒你重新開啟。"
         )
     ),
@@ -10645,6 +10796,9 @@ private val USER_FAQ = listOf(
     "為什麼只看得到別人打給我的電話？" to
         "舊版只認得未接來電的通知，所以自己打出去的不會被記錄。v3.31 起，只要通話中會掛常駐通知（LINE、Messenger 與手機原生電話都會），" +
         "打出去的也會記下來，通話統計裡可以看到「對方打來」與「我打出去」各幾通。更新前的舊紀錄補不回來，會算在「分不出方向」。",
+    "LINE 群組被當成個人了？" to
+        "LINE 的群組通知常常沒有帶群組標記，App 會用「對話名稱跟發言人不同」「名稱後面有人數」來判斷，還是可能漏掉。" +
+        "長按那個聯絡人 →「改成群組聊天室」即可，之後這個名稱的所有紀錄都算群組；判斷錯成群組的也能用同一處改回個人。",
     "想回報問題或給建議？" to
         "到「設定 → 意見回饋」，選類型、寫幾句話，App 會把手機型號、Android 版本與 App 版本一起帶進郵件草稿，" +
         "用你自己的郵件 App 寄給開發者。不會附上你的聊天紀錄或任何統計資料。",
