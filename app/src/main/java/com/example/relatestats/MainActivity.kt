@@ -3390,8 +3390,34 @@ object ScreenshotMode {
         "旅行規劃", "社團幹部", "室友群", "健身打卡", "咖啡同好", "桌遊之夜", "爸媽與我們", "新生群組"
     )
 
+    // ⚠️ 假名字不能帶編號（「明哲 8」）—— 截圖是拿來宣傳的，編號一看就是假的。
+    //    聯絡人常常好幾百位，所以用「姓＋名」組合出上千個不重複的全名，
+    //    前面先用暱稱，讓排行前幾名看起來最自然。
+    private val SURNAMES = listOf(
+        "陳", "林", "黃", "張", "李", "王", "吳", "劉", "蔡", "楊",
+        "許", "鄭", "謝", "郭", "洪", "曾", "邱", "廖", "賴", "周", "葉", "蘇", "莊", "呂"
+    )
+    private val GIVEN = listOf(
+        "品妤", "家豪", "思涵", "雅婷", "柏宇", "宥廷", "怡君", "佳穎", "冠廷", "子晴",
+        "俊傑", "承恩", "詠晴", "若瑜", "彥廷", "書豪", "欣妤", "宜蓁", "明哲", "郁婷",
+        "家瑋", "昱辰", "語彤", "芷若", "宗翰", "詩涵", "威廷", "偉誠", "安琪", "雨柔",
+        "峻宇", "心怡", "建宏", "婉婷", "志豪", "佩珊", "翊安", "品睿", "采潔", "育綸",
+        "政霖", "筱涵", "韋翔", "靜宜", "奕辰", "語喬", "士傑", "亭妤", "宇軒", "沛瑜"
+    )
+    private val GROUP_HEAD = listOf(
+        "大學", "高中", "公司", "社區", "週末", "研究所", "籃球", "登山", "烘焙", "攝影",
+        "美食", "旅遊", "專案", "跑步", "露營", "咖啡", "電影", "親子", "寵物", "吉他"
+    )
+    private val GROUP_TAIL = listOf("同學會", "小群", "揪團", "討論區", "夥伴", "分享團", "聊天室", "俱樂部")
+    private val PEOPLE_POOL: List<String> by lazy {
+        (PEOPLE + SURNAMES.flatMap { sn -> GIVEN.map { sn + it } }).distinct()
+    }
+    private val GROUP_POOL: List<String> by lazy {
+        (GROUPS + GROUP_HEAD.flatMap { h -> GROUP_TAIL.map { h + it } }).distinct()
+    }
+
     private fun pick(pool: List<String>, i: Int): String =
-        if (i < pool.size) pool[i] else pool[i % pool.size] + " " + (i / pool.size + 1)
+        if (i < pool.size) pool[i] else pool[i % pool.size] + "・" + (i / pool.size + 1)
 
     /** 沒在對照表裡的名字也不能露出真名 */
     fun display(real: String): String =
@@ -3416,18 +3442,23 @@ object ScreenshotMode {
         all.addAll(al.values)
         val map = HashMap<String, String>()
         var p = 0; var g = 0; var n = 0
-        // 依名字的雜湊排序，同一份資料每次得到一樣的對照
-        all.sortedWith(compareBy<String>({ it.hashCode() }, { it })).forEach { u ->
+        // 互動越多排越前面，拿到最自然的暱稱；同樣多的再依雜湊排序，同一份資料每次得到一樣的對照
+        val activity = HashMap<String, Int>()
+        recs.forEach { r ->
+            val u = al[r.rawSenderName] ?: r.rawSenderName
+            activity[u] = (activity[u] ?: 0) + 1
+        }
+        all.sortedWith(compareBy<String>({ -(activity[it] ?: 0) }, { it.hashCode() }, { it })).forEach { u ->
             map[u] = when {
                 // ⚠️ 非真人來源要換成「還是會被判定成非真人」的假名字，不然會混進排行
                 isNonPersonContact(u) || cats[u] == ContactCategory.SYSTEM.id -> "${++n} 則新訊息"
-                u in groups -> pick(GROUPS, g++)
-                else -> pick(PEOPLE, p++)
+                u in groups -> pick(GROUP_POOL, g++)
+                else -> pick(PEOPLE_POOL, p++)
             }
         }
         recs.mapNotNullTo(HashSet()) { it.subSender }
             .sortedWith(compareBy<String>({ it.hashCode() }, { it }))
-            .forEach { s -> if (s !in map) map[s] = pick(PEOPLE, p++) }
+            .forEach { s -> if (s !in map) map[s] = pick(PEOPLE_POOL, p++) }
         // 被合併的帳號：「假名（帳號 2）」，帳號與名稱對話框裡才分得出幾個
         val rawMap = HashMap<String, String>()
         val counter = HashMap<String, Int>()
