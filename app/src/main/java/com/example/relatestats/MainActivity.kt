@@ -10610,50 +10610,92 @@ fun SectionOrderDialog(
  *
  * drill 統一由呼叫端提供：兩頁各自有自己的下鑽對話框。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean) -> Unit) {
     // 舊資料沒有 isCall 欄位，靠 appName 補判斷（跟 getCallSummary 的條件一致）
     fun isCallRec(r: InteractionRecord) = r.isCall || r.isMissedCall || r.appName == "電話"
+    val pal = AppColors.Chart
+
+    /**
+     * ⚠️ 四段必須互斥、加總等於總通話，比例條才畫得對：
+     *    對方打來（接通）＋我打出去＋未接＋分不出方向。
+     *    以前是六格數字卡（總通話／接通／對方打來／我打出去／未接／平均），
+     *    「接通」只是總數扣掉未接，「對方打來」又包含未接 —— 同一件事講三遍、佔掉半個螢幕，
+     *    使用者還會以為「接通＝對方打來」。
+     */
+    data class Seg(val label: String, val n: Int, val color: Color, val title: String, val pred: (InteractionRecord) -> Boolean)
+    val segs = listOf(
+        Seg("對方打來", calls.incoming - calls.missed, pal.at(0), "打電話給我的人") { r ->
+            isCallRec(r) && !r.isMissedCall && r.callDirection == 1
+        },
+        Seg("我打出去", calls.outgoing, pal.at(1), "我打電話給誰") { r -> isCallRec(r) && r.callDirection == 2 },
+        Seg("未接", calls.missed, AppColors.WorkText, "未接來電是誰打的") { r -> r.isMissedCall },
+        Seg("分不出方向", calls.unknownDir, AppColors.BorderStrong, "分不出方向的通話") { r ->
+            isCallRec(r) && !r.isMissedCall && r.callDirection == 0
+        }
+    ).filter { it.n > 0 }
+
     Panel {
-        // ⚠️ 不要再解釋「為什麼沒有通話時長」。
-        //    沒有秒數時就整格不畫（見下方），畫面上根本不會有空欄位，
-        //    沒有東西缺席就不需要道歉 —— 多一個 ⓘ 反而是在提醒使用者這裡少了東西。
-        SectionHead("通話統計")
-        // ⚠️ 每一格都要點得進去看是「誰」——只給一個總數，使用者看不出這幾通是跟誰通的。
-        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatPair("總通話", "${calls.total} 通", "點看是誰", Modifier.weight(1f)) {
-                drill("通話對象") { r -> isCallRec(r) }
-            }
-            StatPair("接通", "${calls.answered} 通", null, Modifier.weight(1f)) {
-                drill("接通的通話對象") { r -> isCallRec(r) && !r.isMissedCall }
+        SectionHead("通話統計") {
+            if (calls.hasDuration) {
+                Text("平均 " + formatDuration(calls.avgSeconds), fontSize = T.Micro, color = AppColors.TextTertiary,
+                    maxLines = 1, softWrap = false)
             }
         }
-        Spacer(modifier = Modifier.height(6.dp))
-        // 誰打給誰：只有「對方打來」沒有「我打出去」的話，看起來會像從來沒主動找過人
-        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatPair("對方打來", "${calls.incoming} 通", "點看是誰", Modifier.weight(1f)) {
-                drill("打電話給我的人") { r ->
-                    isCallRec(r) && (r.callDirection == 1 || (r.callDirection == 0 && r.isMissedCall))
+        // 總數：點下去看全部通話對象
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                .clickable { drill("通話對象") { r -> isCallRec(r) } },
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Text("${calls.total}", fontSize = 28.sp, fontWeight = FontWeight.Black, color = AppColors.TextPrimary,
+                maxLines = 1, softWrap = false)
+            Text(" 通", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
+                modifier = Modifier.padding(bottom = 4.dp))
+            Spacer(modifier = Modifier.weight(1f))
+            Text("點看是誰 ›", fontSize = T.Micro, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                modifier = Modifier.padding(bottom = 6.dp))
+        }
+        // 比例條
+        if (calls.total > 0 && segs.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp).height(10.dp).clip(RoundedCornerShape(5.dp)),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                segs.forEach { sg ->
+                    Box(modifier = Modifier.weight(sg.n.toFloat()).fillMaxHeight().background(sg.color))
                 }
             }
-            StatPair("我打出去", "${calls.outgoing} 通",
-                if (calls.unknownDir > 0) "另有 ${calls.unknownDir} 通分不出方向" else "點看是誰", Modifier.weight(1f)) {
-                drill("我打電話給誰") { r -> isCallRec(r) && r.callDirection == 2 }
+        }
+        // 分類標籤：每個都點得進去看是誰
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            segs.forEach { sg ->
+                Row(
+                    modifier = Modifier.clip(RoundedCornerShape(50)).background(AppColors.Background)
+                        .clickable { drill(sg.title, sg.pred) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(sg.color))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        sg.label + " " + sg.n + (if (sg.label == "未接" && calls.total > 0) "（" + calls.missRate + "%）" else "") + " ›",
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                        maxLines = 1, softWrap = false
+                    )
+                }
             }
         }
-        Spacer(modifier = Modifier.height(6.dp))
-        Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatPair("未接", "${calls.missed} 通", "未接率 ${calls.missRate}%", Modifier.weight(1f)) {
-                drill("未接來電是誰打的") { r -> r.isMissedCall }
-            }
-            // ⚠️ 沒有秒數時**整格拿掉**，不要留一個「—　需匯入通話紀錄」的空欄位。
-            //    永遠是空的欄位只會佔位置又讓人以為壞了；
-            //    「為什麼沒有時長」的說明已經在標題旁的 ⓘ 裡了。
-            if (calls.hasDuration) {
-                StatPair("平均時長", formatDuration(calls.avgSeconds), "依 ${calls.timed} 通有秒數的通話", Modifier.weight(1f))
-            }
+        if (calls.unknownDir > 0) {
+            Text("「分不出方向」多半是 v3.31 以前的紀錄，或通話結束的通知沒寫是誰打的。",
+                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 8.dp))
         }
-
     }
 }
 
@@ -10966,7 +11008,7 @@ private val USER_GUIDE = listOf(
             "未接來電由通知取得。",
             "LINE、Messenger 等 App 的通話：從「通話中」通知出現到消失的時間會記成通話長度。部分 App 或機型不會掛這則通知，就無法取得秒數。",
             "手機原生電話：接通後系統會掛一則通話中的常駐通知，從它出現到消失的時間就是秒數。撥號等待的那段不算，但掛斷後通知晚幾秒才消失時會多算幾秒。",
-            "「通話統計」上的每個數字都可以點，會列出是跟誰通的：總通話、接通、對方打來、我打出去、未接各自一份名單。",
+            "「通話統計」上方是總通數，比例條分成對方打來、我打出去、未接、分不出方向；點總數或下面任一個標籤，都會列出是跟誰通的。",
             "「逐筆檢視紀錄」裡，通話那一列會寫「對方打來」或「我打出去」：對方打來時會先跳來電通知，我方撥出則不會，靠這個分辨。分辨不出來時只寫「通話」。"
         )
     ),
