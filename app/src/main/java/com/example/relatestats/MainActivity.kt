@@ -1116,6 +1116,7 @@ object DataRepository {
         loadData()
         loadCloudBackupState()
         loadGroupState()
+        loadPermDeclines()
         val appContext = context.applicationContext
         ioScope.launch {
             runOneTimeCleanupIfNeeded(appContext)
@@ -1392,6 +1393,25 @@ object DataRepository {
                 putStringSet("deleted_names", _deletedNames.value.map { it.key + "|=|" + it.value }.toSet())
             }.apply()
         }
+    }
+
+    // ── 權限拒絕次數 ──────────────────────────────────────
+    /**
+     * 各權限在說明畫面按了幾次「不同意」。
+     * ⚠️ 拒絕兩次以上的，提醒就收成一行灰字 —— 有些人就是不想開，
+     *    一直用紅字大卡追著跑只會讓人想刪 App。不開權限 App 一樣能用，只是少了那部分數據。
+     */
+    val permDeclines = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    fun notePermissionDeclined(kind: String) {
+        val n = (permDeclines.value[kind] ?: 0) + 1
+        permDeclines.update { it + (kind to n) }
+        prefs?.edit()?.putInt("perm_decline_$kind", n)?.apply()
+    }
+
+    private fun loadPermDeclines() {
+        val p = prefs ?: return
+        permDeclines.value = listOf("notif", "access", "usage").associateWith { p.getInt("perm_decline_$it", 0) }
     }
 
     // ── 群組判定 ──────────────────────────────────────────
@@ -2473,6 +2493,8 @@ object DataRepository {
     }
 
     private const val BACKUP_SECTION_SEP = "\u001D"
+    /** 上次還原時，保留下來的「這支手機上的新紀錄」筆數（給還原完成的提示用） */
+    @Volatile var lastRestoreKept = 0
 
     /**
      * 把備份字串切成 [版本, 紀錄, 別名, 標籤對照, 自訂標籤]。
@@ -2515,12 +2537,23 @@ object DataRepository {
             val newCategories = parsePairs(parts[3].split(";").filter { it.isNotBlank() }.toSet())
             val newCustomCats = parts[4].split(";").filter { it.isNotBlank() }.mapNotNull { ContactCategory.fromCsvString(it) }
             if (newRecords.isEmpty() && newAliases.isEmpty() && newCategories.isEmpty()) return false
-            // 還原會整份蓋掉現有紀錄：先放進最近刪除，選錯檔案還救得回來
-            if (_interactions.value.isNotEmpty()) moveToTrash("還原備份前的紀錄", _interactions.value)
-            _interactions.value = newRecords; _aliases.value = newAliases; _categories.value = newCategories; _availableCategories.value = ContactCategory.ensureEssential(
+            // ⚠️ 合併，不是整份取代：這支手機在備份之後又記到的新紀錄要留著。
+            //    同一筆可能兩邊都有（備份前就在這支手機上），用 id 加內容指紋去重。
+            fun fp(r: InteractionRecord) = r.rawSenderName + "|" + r.appName + "|" + r.timestamp + "|" +
+                r.wordCount + "|" + r.durationSeconds + "|" + r.isCall + "|" + r.isMissedCall
+            val ids = newRecords.mapTo(HashSet()) { it.id }
+            val fps = newRecords.mapTo(HashSet()) { fp(it) }
+            val kept = _interactions.value.filter { it.id !in ids && fp(it) !in fps }
+            lastRestoreKept = kept.size
+            val merged = (newRecords + kept).sortedBy { it.timestamp }
+            _interactions.value = if (merged.size > MAX_RECORDS) merged.takeLast(MAX_RECORDS) else merged
+            // 別名、標籤：兩邊都留，同一個名字以備份為準
+            _aliases.value = _aliases.value + newAliases
+            _categories.value = _categories.value + newCategories
+            val cats = _availableCategories.value.filter { c -> newCustomCats.none { it.id == c.id } } + newCustomCats
+            _availableCategories.value = ContactCategory.ensureEssential(
                 // 舊備份只含自訂標籤（沒有 OTHER），要補回種子清單
-                if (newCustomCats.none { it.id == ContactCategory.OTHER.id }) ContactCategory.seedCategories + newCustomCats
-                else newCustomCats
+                if (cats.none { it.id == ContactCategory.OTHER.id }) ContactCategory.seedCategories + cats else cats
             )
             saveData(immediate = true)
             return true
@@ -2872,7 +2905,15 @@ class RelateNotificationService : NotificationListenerService() {
         // ---- 通話類優先處理 ----
         val callInfo = detectCall(appName, baseTitle, fallbackContent)
         if (callInfo != null) {
-            val cleanName = stripCallSuffix(baseTitle)
+            // ⚠️ 撥號 App 的未接通知，標題常常只寫「未接來電」「2 通未接來電」，來電者寫在內文。
+            //    只看標題會記成空白或「未接來電」這種非真人名稱 —— 名單裡就看不到是誰打的。
+            val countPrefix = Regex("^\\d+\\s*通")
+            var cleanName = stripCallSuffix(baseTitle).replace(countPrefix, "").trim()
+            if (cleanName.isBlank() || isNonPersonContact(cleanName)) {
+                val fromBody = stripCallSuffix(fallbackContent.lineSequence().firstOrNull().orEmpty())
+                    .replace(countPrefix, "").trim().trim('-', '·', '•', ' ', ':', '：')
+                if (fromBody.isNotBlank() && fromBody.length <= 40 && !isNonPersonContact(fromBody)) cleanName = fromBody
+            }
             if (cleanName.isBlank()) return
             // 同一通電話剛剛已經用「通話中通知被移除」算過秒數了，不要再記一次
             if (!callInfo.first && appName != "電話") {
@@ -3764,6 +3805,16 @@ class RelateViewModel : ViewModel() {
             .filter { !isExcludedFromStats(it.unifiedName, catsMap) }
         return mergeDuplicateStats(raw)
             .sortedByDescending { it.totalDurationSeconds + (it.incomingCount * 60L) }
+    }
+
+    /** 通話對象名單：不排除非真人名稱，抓不到來電者的歸成「未顯示來電者」 */
+    fun getCallLeaderboard(rs: List<InteractionRecord>, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>): List<SenderStat> {
+        val renamed = rs.map { r ->
+            val u = currentAliases[r.rawSenderName] ?: r.rawSenderName
+            if (u.isBlank() || isNonPersonContact(u)) r.copy(rawSenderName = "未顯示來電者") else r
+        }
+        return mergeDuplicateStats(buildStats(renamed, catsMap, currentAliases, availableCats))
+            .sortedByDescending { it.callCount }
     }
 
     /** 名稱正規化後相同就視為同一人（「小明 」與「小明✨」） */
@@ -5715,6 +5766,8 @@ fun ServiceAlertBanner() {
     val context = LocalContext.current
     var accOn by remember { mutableStateOf(true) }
     var notifOn by remember { mutableStateOf(true) }
+    var usageOn by remember { mutableStateOf(true) }
+    val declines by DataRepository.permDeclines.collectAsState()
     val owner = LocalLifecycleOwner.current
 
     DisposableEffect(owner) {
@@ -5722,13 +5775,43 @@ fun ServiceAlertBanner() {
             if (e == Lifecycle.Event.ON_RESUME) {
                 accOn = isAccessibilityServiceEnabled(context, ChatTrackerService::class.java)
                 notifOn = isNotificationServiceEnabled(context)
+                usageOn = hasUsageStatsPermission(context)
             }
         }
         owner.lifecycle.addObserver(obs)
         onDispose { owner.lifecycle.removeObserver(obs) }
     }
 
-    if (accOn && notifOn) return
+    // (種類, 名稱, 少了什麼, 按鈕文字)
+    val missing = buildList {
+        if (!notifOn) add(listOf("notif", "通知存取", "訊息不會記錄", "開啟通知存取"))
+        if (!accOn) add(listOf("access", "無障礙服務", "聊天室停留時間不會記錄", "開啟無障礙"))
+        if (!usageOn) add(listOf("usage", "使用紀錄存取", "看不到聊天 App 佔手機用量多少", "開啟使用紀錄"))
+    }
+    if (missing.isEmpty()) return
+
+    var disclose by remember { mutableStateOf<String?>(null) }
+    disclose?.let { k ->
+        PermissionDisclosureDialog(k, onAgree = { disclose = null; openPermissionSettings(context, k) },
+            onDismiss = { disclose = null })
+    }
+
+    // ⚠️ 每一項都拒絕過兩次以上 → 使用者就是不想開，只留一行灰字，不要再用大卡片催
+    val quiet = missing.all { (declines[it[0]] ?: 0) >= 2 }
+    if (quiet) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                .clickable { disclose = missing.first()[0] }
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("未開啟：" + missing.joinToString("、") { it[1] } + "　不開也能用，只是少了這部分數據",
+                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp, modifier = Modifier.weight(1f))
+            Text("開啟 ›", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 8.dp))
+        }
+        return
+    }
 
     Column(
         modifier = Modifier.fillMaxWidth()
@@ -5739,43 +5822,27 @@ fun ServiceAlertBanner() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Rounded.Warning, contentDescription = null, tint = AppColors.WorkText, modifier = Modifier.size(15.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text("目前沒有在記錄新資料", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.WorkText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("有些數據目前沒有記錄", fontSize = T.Title, fontWeight = FontWeight.Bold, color = AppColors.WorkText,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(modifier = Modifier.height(5.dp))
-        var disclose by remember { mutableStateOf<String?>(null) }
-        disclose?.let { k ->
-            PermissionDisclosureDialog(k, onAgree = { disclose = null; openPermissionSettings(context, k) },
-                onDismiss = { disclose = null })
-        }
-        val lines = buildList {
-            if (!accOn) add("「無障礙服務」已關閉 → 停留時間不會被記錄")
-            if (!notifOn) add("「通知存取」已關閉 → 訊息不會被記錄")
-        }
-        lines.forEach {
-            Text(it, fontSize = T.Label, color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 17.sp)
+        missing.forEach {
+            Text("「" + it[1] + "」未開啟 → " + it[2], fontSize = T.Label,
+                color = AppColors.WorkText.copy(alpha = 0.9f), lineHeight = 17.sp)
         }
         Spacer(modifier = Modifier.height(4.dp))
-        Text("每次重新安裝 App，Android 都會自動關掉這些服務，需要手動重開。",
+        Text("不開也能用，只是少了這部分數據。重新安裝 App 時，Android 也會自動關掉這些權限。",
             fontSize = T.Micro, color = AppColors.WorkText.copy(alpha = 0.75f), lineHeight = 15.sp)
         Spacer(modifier = Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (!accOn) {
+            missing.forEach { m ->
                 Button(
-                    onClick = { disclose = "access" },
+                    onClick = { disclose = m[0] },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
                     shape = RoundedCornerShape(9.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) { Text("開啟無障礙服務", fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-            }
-            if (!notifOn) {
-                Button(
-                    onClick = { disclose = "notif" },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
-                    shape = RoundedCornerShape(9.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) { Text("開啟通知存取", fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                ) { Text(m[3], fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
         }
     }
@@ -6846,7 +6913,13 @@ fun InsightsView(viewModel: RelateViewModel) {
     /** 從目前篩選範圍內挑出符合條件的紀錄，算成排行後開對話框 */
     fun drillInto(title: String, predicate: (InteractionRecord) -> Boolean) {
         val rs = viewModel.getFilteredRecords(records, filter).filter(predicate)
-        drill = title to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats)
+        // ⚠️ 通話名單不能套「非真人」排除：未接來電的來電者常被記成「未接來電」或電話號碼，
+        //    一排除就看不到是誰打來的。
+        val allCalls = rs.isNotEmpty() && rs.all { it.isCall || it.isMissedCall || it.appName == "電話" }
+        drill = title to (
+            if (allCalls) viewModel.getCallLeaderboard(rs, categoriesMap, aliases, availableCats)
+            else viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats)
+        )
     }
 
     // 十幾項統計一次算完並丟到背景執行緒；同步做會直接凍住畫面
@@ -11007,6 +11080,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "未接來電由通知取得。",
             "LINE、Messenger 等 App 的通話：從「通話中」通知出現到消失的時間會記成通話長度。部分 App 或機型不會掛這則通知，就無法取得秒數。",
+            "未接來電會記下是誰打來的；通知上沒寫來電者時，名單裡會顯示「未顯示來電者」。",
             "手機原生電話：接通後系統會掛一則通話中的常駐通知，從它出現到消失的時間就是秒數。撥號等待的那段不算，但掛斷後通知晚幾秒才消失時會多算幾秒。",
             "「通話統計」上方是總通數，比例條分成對方打來、我打出去、未接、分不出方向；點總數或下面任一個標籤，都會列出是跟誰通的。",
             "「逐筆檢視紀錄」裡，通話那一列會寫「對方打來」或「我打出去」：對方打來時會先跳來電通知，我方撥出則不會，靠這個分辨。分辨不出來時只寫「通話」。"
@@ -11043,8 +11117,9 @@ private val USER_GUIDE = listOf(
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
             "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
             "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
-            "還原會整份取代目前的紀錄，原本的紀錄會先放進「最近刪除」保留 7 天，選錯檔案可以救回來。",
-            "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。"
+            "還原會跟目前的紀錄合併：備份裡的紀錄加回來，這支手機上備份之後才記到的新紀錄也會保留，重複的只算一次。",
+            "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。",
+            "不想開某個權限也沒關係，App 照樣能用，只是少了那部分數據。在說明畫面按兩次以上「不同意」，提醒就會收成一行小字。"
         )
     )
 )
@@ -11648,6 +11723,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showPalette by remember { mutableStateOf(false) }
     val recapEnabled by viewModel.recapEnabled.collectAsState()
     val shotMode by viewModel.screenshotMode.collectAsState()
+    val permDeclines by DataRepository.permDeclines.collectAsState()
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -11702,7 +11778,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 }
                 val ok = content != null && viewModel.importBackup(content, "")
                 Toast.makeText(context,
-                    if (ok) "已還原 ${DataRepository.interactions.value.size} 筆紀錄；還原前的紀錄放在「最近刪除」"
+                    if (ok) "還原完成，共 ${DataRepository.interactions.value.size} 筆紀錄（保留這支手機上的新紀錄 ${DataRepository.lastRestoreKept} 筆）"
                     else "檔案無效或格式錯誤",
                     Toast.LENGTH_LONG).show()
             }
@@ -11748,11 +11824,11 @@ fun SettingsView(viewModel: RelateViewModel) {
         item { SettingsSection("服務") }
         item {
             SettingsCard {
-                PermissionRow("通知存取", "計算訊息數與常用詞", hasNotif) { disclosureKind = "notif" }
+                PermissionRow("通知存取", "計算訊息數與常用詞", hasNotif, declined = (permDeclines["notif"] ?: 0) >= 2) { disclosureKind = "notif" }
                 SettingsDivider()
-                PermissionRow("無障礙服務", "計算聊天室停留時間", hasAccel) { disclosureKind = "access" }
+                PermissionRow("無障礙服務", "計算聊天室停留時間", hasAccel, declined = (permDeclines["access"] ?: 0) >= 2) { disclosureKind = "access" }
                 SettingsDivider()
-                PermissionRow("使用紀錄存取", "計算手機總用量佔比", hasUsageStats) { disclosureKind = "usage" }
+                PermissionRow("使用紀錄存取", "計算手機總用量佔比", hasUsageStats, declined = (permDeclines["usage"] ?: 0) >= 2) { disclosureKind = "usage" }
                 if (!hasUsageStats) {
                     Text(
                         "找不到本 App 的話，到系統「應用程式」裡點右上角「允許受限制的設定」",
@@ -12221,7 +12297,7 @@ fun SettingsView(viewModel: RelateViewModel) {
  * 有沒有開必須一眼掃完，不能逐行讀。
  */
 @Composable
-fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, onClick: () -> Unit) {
+fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, declined: Boolean = false, onClick: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 12.dp),
@@ -12239,10 +12315,12 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, onClick: 
             Text("已開啟", color = AppColors.TextTertiary, fontSize = T.Label,
                 maxLines = 1, softWrap = false)
         } else {
+            // 拒絕過兩次以上：使用者選擇不開，只留灰字，不再用橘色催
+            val c = if (declined) AppColors.TextTertiary else AppColors.WorkText
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("未開啟", color = AppColors.WorkText, fontWeight = FontWeight.Bold,
+                Text("未開啟", color = c, fontWeight = if (declined) FontWeight.Normal else FontWeight.Bold,
                     fontSize = T.Label, maxLines = 1, softWrap = false)
-                Text("›", fontSize = 17.sp, color = AppColors.WorkText,
+                Text("›", fontSize = 17.sp, color = c,
                     maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 4.dp))
             }
         }
@@ -12323,7 +12401,11 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
             Button(onClick = onAgree, colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
                 shape = RoundedCornerShape(10.dp)) { Text("同意並前往設定", maxLines = 1, softWrap = false) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("不同意", color = AppColors.TextSecondary) } }
+        dismissButton = {
+            TextButton(onClick = { DataRepository.notePermissionDeclined(kind); onDismiss() }) {
+                Text("不同意", color = AppColors.TextSecondary)
+            }
+        }
     )
 }
 
