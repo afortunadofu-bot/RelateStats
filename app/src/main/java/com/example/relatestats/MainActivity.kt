@@ -11342,6 +11342,7 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
+            "設定頁捲到最下面是開發與著作權、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
             "社交人格點進去可以看到全部類型與判定方式。"
         )
@@ -12481,7 +12482,16 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         item {
-            // 設定頁捲到底是使用者最常截圖分享的畫面之一，放完整的識別而不是只有版本號
+            /**
+             * 設定頁最下方的品牌與著作權區。
+             *
+             * ⚠️ 這裡是「品牌化」唯一該動的地方。
+             *    識別記號、配色、啟動畫面、通知圖示、首次啟動引導頁都**不在**範圍內 ——
+             *    要動那些一律先問過再動。
+             * ⚠️ 作者歸屬掛品牌名稱（不是個人姓名），信箱用 FEEDBACK_EMAIL 同一個常數，
+             *    跟商店的開發人員聯絡資訊保持一致；改信箱時記得 docs/play/SUBMISSION.md
+             *    與 docs/privacy-policy.html 也要一起改。
+             */
             Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 BrandMark(markSize = 40.dp)
                 Text("RelateStats", fontSize = 15.sp, fontWeight = FontWeight.Black,
@@ -12492,9 +12502,45 @@ fun SettingsView(viewModel: RelateViewModel) {
                 Text("v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
                     color = AppColors.TextTertiary, fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = 8.dp))
+
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(top = 14.dp, start = D.Gutter, end = D.Gutter)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(AppColors.SurfaceAlt)
+                        .padding(vertical = 12.dp, horizontal = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("開發與著作權", fontSize = T.Micro, fontWeight = FontWeight.Black,
+                        color = AppColors.TextTertiary)
+                    Text("RelateStats", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.TextPrimary, modifier = Modifier.padding(top = 2.dp))
+
+                    Text("聯絡信箱", fontSize = T.Micro, fontWeight = FontWeight.Black,
+                        color = AppColors.TextTertiary, modifier = Modifier.padding(top = 12.dp))
+                    // 點一下直接開郵件 App；沒有郵件 App 就把信箱複製起來，
+                    // 跟意見回饋同一套退路（App 沒有網路權限，不可能自己送出）
+                    Text(
+                        FEEDBACK_EMAIL, fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                        modifier = Modifier.padding(top = 2.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL))
+                                    .putExtra(Intent.EXTRA_SUBJECT, "RelateStats")
+                                if (runCatching { context.startActivity(mail) }.isFailure) {
+                                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+                                        ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 信箱", FEEDBACK_EMAIL))
+                                    Toast.makeText(context, "找不到郵件 App，信箱已複製", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+
                 Text("© ${Calendar.getInstance().get(Calendar.YEAR)} RelateStats",
                     fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(top = 2.dp))
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
             }
         }
     }
