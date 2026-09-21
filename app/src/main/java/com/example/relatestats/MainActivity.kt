@@ -33,6 +33,7 @@ import android.text.TextUtils
 import android.util.Base64
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.graphics.drawable.ColorDrawable
 import android.widget.Toast
 import android.app.AlarmManager
 import android.app.NotificationChannel
@@ -2754,7 +2755,9 @@ object DailyRecap {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val n = Notification.Builder(ctx, CHANNEL_RECAP)
-            .setSmallIcon(android.R.drawable.ic_menu_agenda)
+            // ⚠️ 用自己的記號，不要用 Android 內建圖示 ——
+            //    每晚的回顧通知是使用者最常看到 RelateStats 的地方。
+            .setSmallIcon(R.drawable.ic_stat_relate)
             .setContentTitle("今日互動報告")
             .setContentText("點開看今天聊了誰，跟昨天比起來如何")
             .setContentIntent(open)
@@ -2784,7 +2787,7 @@ object DailyRecap {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val n = Notification.Builder(ctx, CHANNEL_ALERT)
-            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setSmallIcon(R.drawable.ic_stat_relate)
             .setContentTitle("停留時間沒有在記錄")
             .setContentText("無障礙服務被關掉了，點這裡重新開啟")
             .setStyle(Notification.BigTextStyle().bigText(
@@ -4857,6 +4860,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // ⚠️ 要在 super.onCreate 之前換回一般主題。
+        //    Manifest 上掛的是 Theme.RelateStats.Launch（墨藍底 + 記號），
+        //    那是給冷啟動那幾百毫秒用的；不換回來的話整個 App 的視窗底色
+        //    都會是墨藍，Compose 還沒畫到的地方會透出深色。
+        setTheme(R.style.Theme_RelateStats)
         super.onCreate(savedInstanceState)
 
         // 每晚回顧與「服務被關掉」提醒。
@@ -4904,6 +4912,9 @@ class MainActivity : ComponentActivity() {
             SideEffect {
                 WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !dark
                 WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !dark
+                // ⚠️ 視窗底色也要跟著深淺模式。主題是固定的淺色，
+                //    深色模式下畫面還沒組好的瞬間（啟動、旋轉重建）會閃一片白。
+                window.setBackgroundDrawable(ColorDrawable(AppColors.Background.toArgb()))
             }
             MaterialTheme(colorScheme = appColorScheme()) {
                 Surface(color = AppColors.Background, modifier = Modifier.fillMaxSize()) {
@@ -5316,6 +5327,46 @@ fun DemoDashboardScreen(onClose: () -> Unit) {
     }
 }
 
+/**
+ * 品牌記號：三個大小遞增、彼此交疊的圓 ＝ 人，以及你跟他們重疊多少。
+ * 圓越大表示佔掉你越多注意力；最大的那顆用品牌藍點出重點。
+ *
+ * ⚠️ 固定色，不跟著配色走 —— 換配色是換「資料的顏色」，
+ *    識別記號跟著換就像換了一個 App。深色模式也只補一圈輪廓，顏色不動。
+ * ⚠️ 比例必須跟 ic_launcher_foreground.xml、ic_stat_relate.xml 一致
+ *    （108 畫布上的 30/48/70 與 9/13/18）。改這裡就要三個一起改，
+ *    否則桌面圖示、狀態列圖示、App 內的記號會長得不一樣。
+ * ⚠️ 藍色用 #3B82F6，跟圖示與 colors.xml 的 brand_blue 同一個值。
+ *    標題列原本寫的是 #2563EB，跟桌面圖示差一階 —— v3.44 統一掉。
+ */
+@Composable
+fun BrandMark(markSize: Dp) {
+    val dark = AppColors.darkState.value
+    Canvas(modifier = Modifier.size(markSize)) {
+        val corner = size.minDimension * 0.26f
+        drawRoundRect(color = Color(0xFF0F172A), cornerRadius = CornerRadius(corner, corner))
+        // ⚠️ 深色模式下墨藍底壓在深色卡片上幾乎沒有輪廓，記號會糊成一塊。
+        //    只補一圈細框，記號本身的顏色不動。
+        if (dark) drawRoundRect(
+            color = AppColors.BorderStrong,
+            cornerRadius = CornerRadius(corner, corner),
+            style = Stroke(width = size.minDimension * 0.05f)
+        )
+        val cy = size.height * 0.5f
+        listOf(
+            Triple(0.278f, 0.083f, 0.55f),
+            Triple(0.444f, 0.120f, 0.85f),
+            Triple(0.648f, 0.167f, -1f)
+        ).forEach { (cx, rr, alpha) ->
+            drawCircle(
+                color = if (alpha < 0f) Color(0xFF3B82F6) else Color.White.copy(alpha = alpha),
+                radius = size.minDimension * rr,
+                center = Offset(size.width * cx, cy)
+            )
+        }
+    }
+}
+
 @Composable
 fun OnboardingScreen(onFinish: () -> Unit) {
     val (step, setStep) = remember { mutableStateOf(0) }
@@ -5328,11 +5379,15 @@ fun OnboardingScreen(onFinish: () -> Unit) {
         return
     }
 
-    val titles = listOf("洞察社交能量", "隱私與權限設定", "四大分頁解析")
+    // %s 第一頁的標題就是品牌標語，跟商店簡短說明、分享文案同一句。
+    //    原本寫「洞察社交能量」，跟 App 其他地方、商店頁都對不起來。
+    // %s 第三頁原本寫「四大分頁」而且列的是「總覽」—— 實際上有五個分頁，
+    //    而且第一個叫「概況」。首次啟動就講錯名稱，使用者會找不到。
+    val titles = listOf(BRAND_TAGLINE, "資料只存在這支手機", "五個分頁在做什麼")
     val descs = listOf(
-        "透過精準的數據追蹤，了解你每天把時間和注意力花在哪些人、哪些 App 上。",
-        "需要「通知存取」與「無障礙服務」才能開始記錄。開啟前會先說明讀取哪些資料；所有資料只存在手機，App 沒有網路權限。",
-        "【總覽】查看個人性格與數位健康\n【排行】精準抓出時間黑洞與分析熱區\n【聯絡人】自訂群組、合併跨平台帳號\n【設定】自訂備份資料與設定"
+        "RelateStats 把 LINE、Messenger、Instagram、WhatsApp、Telegram、Threads 與電話的互動整理成圖表：跟誰聊最多、在哪個聊天室停留最久、什麼時段在聊。",
+        "需要「通知存取」與「無障礙服務」才能開始記錄，另外可以選擇開啟「使用紀錄存取」。開啟前都會先說明讀取哪些資料、怎麼開。App 沒有網路權限，資料無法離開這支手機，開發者也看不到。",
+        "【概況】今天與本週聊了多少、什麼時段在聊\n【排行】跟誰互動最多，可依標籤與平台篩選\n【分析】新出現的人、跟上期的變化、每日報告\n【聯絡人】合併跨平台帳號、設定標籤與暱稱\n【設定】備份還原、配色、深淺模式、權限"
     )
     val icons = listOf(Icons.Rounded.Face, Icons.Rounded.Lock, Icons.AutoMirrored.Rounded.List)
 
@@ -5345,7 +5400,10 @@ fun OnboardingScreen(onFinish: () -> Unit) {
             AnimatedContent(targetState = step, label = "onboarding") { currentStep ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(modifier = Modifier.size(120.dp).background(AppColors.BrandPrimary.copy(alpha=0.05f), CircleShape), contentAlignment = Alignment.Center) {
-                        Icon(icons[currentStep], contentDescription = null, modifier = Modifier.size(60.dp), tint = AppColors.BrandPrimary)
+                        // 第一頁放品牌記號本身：使用者第一次看到這個 App 的畫面，
+                        // 應該是它的識別，不是 Material 內建的人臉圖示。
+                        if (currentStep == 0) BrandMark(markSize = 64.dp)
+                        else Icon(icons[currentStep], contentDescription = null, modifier = Modifier.size(60.dp), tint = AppColors.BrandPrimary)
                     }
                     Spacer(modifier = Modifier.height(32.dp))
                     Text(titles[currentStep], fontSize = 24.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
@@ -5422,27 +5480,7 @@ fun MainAppContent(viewModel: RelateViewModel) {
         topBar = {
             Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface).statusBarsPadding().padding(top = 8.dp)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(horizontal = D.Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    // 跟 App icon 同一個記號：三個遞增、彼此交疊的圓
-                    Canvas(modifier = Modifier.size(26.dp)) {
-                        val corner = size.minDimension * 0.26f
-                        // ⚠️ logo 用固定色，不跟著配色走 —— 換配色是換「資料的顏色」，
-                        //    App 的識別記號換掉就像換了一個 App。
-                        drawRoundRect(color = Color(0xFF0F172A), cornerRadius = CornerRadius(corner, corner))
-                        val cy = size.height * 0.5f
-                        // 比例與 ic_launcher_foreground.xml 一致（108 畫布上的 30/48/70 與 9/13/18）
-                        val spec = listOf(
-                            Triple(0.278f, 0.083f, 0.55f),
-                            Triple(0.444f, 0.120f, 0.85f),
-                            Triple(0.648f, 0.167f, -1f)
-                        )
-                        spec.forEach { (cx, rr, alpha) ->
-                            drawCircle(
-                                color = if (alpha < 0f) Color(0xFF2563EB) else Color.White.copy(alpha = alpha),
-                                radius = size.minDimension * rr,
-                                center = Offset(size.width * cx, cy)
-                            )
-                        }
-                    }
+                    BrandMark(markSize = 26.dp)
                     Spacer(modifier = Modifier.width(10.dp))
                     // 隨時都能打開每日報告，不必等晚上的通知；打開後可以往前翻
                     Row(
@@ -12065,7 +12103,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsRow("意見回饋", "回報問題或提建議") { showFeedback = true }
                 SettingsDivider()
                 SettingsRow("分享給朋友", "把 RelateStats 傳給朋友") {
-                    val text = "RelateStats：看見你把時間花在誰身上。\n" +
+                    val text = "RelateStats：$BRAND_TAGLINE。\n" +
                         "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + PLAY_STORE_URL
                     runCatching {
                         context.startActivity(Intent.createChooser(
@@ -12443,9 +12481,17 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         item {
-            Column(modifier = Modifier.fillMaxWidth().padding(top = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
-                    color = AppColors.TextTertiary, fontWeight = FontWeight.Medium)
+            // 設定頁捲到底是使用者最常截圖分享的畫面之一，放完整的識別而不是只有版本號
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                BrandMark(markSize = 40.dp)
+                Text("RelateStats", fontSize = 15.sp, fontWeight = FontWeight.Black,
+                    color = AppColors.TextPrimary, letterSpacing = (-0.3).sp,
+                    modifier = Modifier.padding(top = 8.dp))
+                Text(BRAND_TAGLINE, fontSize = T.Micro, color = AppColors.TextSecondary,
+                    modifier = Modifier.padding(top = 2.dp))
+                Text("v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
+                    color = AppColors.TextTertiary, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 8.dp))
                 Text("© ${Calendar.getInstance().get(Calendar.YEAR)} RelateStats",
                     fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
                     modifier = Modifier.padding(top = 2.dp))
@@ -12592,6 +12638,15 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, declined:
  * ⚠️ Play Console 填的網址必須跟這裡一樣。
  */
 const val PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.relatestats.app"
+
+/**
+ * 品牌標語。
+ * ⚠️ 要跟商店「簡短說明」的第一句一字不差（docs/play/SUBMISSION.md），
+ *    也要跟社群宣傳圖上的那句一樣。品牌就是同一句話到處都一樣 ——
+ *    改一邊沒改另一邊，比沒寫還糟。
+ * ⚠️ 分享文案、設定頁頁尾、首次啟動引導頁都從這裡取，不要各寫一份。
+ */
+const val BRAND_TAGLINE = "看見你把時間花在誰身上"
 
 const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-privacy/"
 

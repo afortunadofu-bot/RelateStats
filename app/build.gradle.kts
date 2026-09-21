@@ -26,8 +26,8 @@ android {
         applicationId = "com.relatestats.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 67
-        versionName = "3.43"
+        versionCode = 68
+        versionName = "3.44"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

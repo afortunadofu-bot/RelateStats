@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12 以上的啟動畫面。
+
+  ⚠️ 12 開始系統一定會畫一張啟動畫面，不管 App 有沒有設定 ——
+     沒設定的話會用「預設視窗背景 + 啟動圖示」，等於一片白配我們的圖示。
+     這裡指定成品牌墨藍底 + 記號，跟 11 以下的 launch_background 一致。
+  ⚠️ windowSplashScreenAnimatedIcon 只放前景（記號本身）。
+     放整顆 ic_launcher 的話，系統會再套一次圓形遮罩，
+     變成「墨藍圓圈疊在墨藍底上」，看起來像圖示破了一個洞。
+-->
+<resources>
+    <style name="Theme.RelateStats.Launch" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowSplashScreenBackground">@color/brand_ink</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
+</resources>

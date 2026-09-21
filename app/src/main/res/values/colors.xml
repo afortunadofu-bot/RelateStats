@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  RelateStats 的品牌固定色。完整規範見 docs/BRAND.md。
+
+  ⚠️ 這幾色跟 App 內的「配色」是兩回事。
+     配色（AppColors.Chart）換的是「資料的顏色」，使用者可以自己挑；
+     這裡是「識別記號的顏色」，任何配色、任何深淺模式下都不變 ——
+     記號跟著配色變，等於每個人看到的是不同的 App。
+  ⚠️ 原本這個檔是 Android Studio 範本留下的 purple_500／teal_200，
+     全專案沒有任何一處引用。已換成實際在用的品牌色。
+-->
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- 墨藍：記號底色、啟動畫面底色 -->
+    <color name="brand_ink">#0F172A</color>
+    <!-- 品牌藍：記號裡最大的那顆圓 ＝ 佔掉你最多注意力的人 -->
+    <color name="brand_blue">#3B82F6</color>
+    <!-- 記號裡其餘的圓，用透明度分層 -->
+    <color name="brand_light">#F8FAFC</color>
 </resources>

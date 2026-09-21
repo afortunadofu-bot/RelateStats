@@ -7,6 +7,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **技術棧**：Kotlin + Jetpack Compose + ViewModel / StateFlow
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
+- **品牌規範（名稱、標語、記號、顏色、語氣）**：[docs/BRAND.md](docs/BRAND.md)
 - **完整修復與變更紀錄**：[docs/CHANGELOG.md](docs/CHANGELOG.md)
 - **上架 Google Play 規劃**：[docs/PLAY_STORE_PLAN.md](docs/PLAY_STORE_PLAN.md)
 - **Play Console 送審資料（可直接貼上）**：[docs/play/SUBMISSION.md](docs/play/SUBMISSION.md)
@@ -30,6 +31,8 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - 雲端備份位置只存「提供者＋檔名」（SAF 拿不到資料夾路徑），**在綁定當下算好存起來**，不要每次開設定頁去查雲端硬碟。
 - 雲端備份週期由每晚回顧鬧鐘檢查，比對時容許 3 小時誤差（鬧鐘有一小時的窗），否則每天備份會常常變成隔天。
 - **所有開權限的入口都要先經過 `PermissionDisclosureDialog`**，不能直接 `startActivity` 到系統設定頁（Play 明確揭露規定）。
+- **品牌識別一律照 [docs/BRAND.md](docs/BRAND.md)**。記號的比例同時存在四個檔案（`ic_launcher_foreground.xml`、`ic_stat_relate.xml`、`BrandMark()`、商店圖示），改一個要四個一起改；標語一律用 `BRAND_TAGLINE` 常數，不要各寫一份。
+- **記號的顏色不跟著配色走**。配色換的是「資料的顏色」，識別換掉就像換了一個 App。深色模式只補一圈輪廓，顏色不動。
 - **四份文字要一致**：`PermissionDisclosureDialog`、`strings.xml` 的 `accessibility_desc`、`docs/privacy-policy.html`、`docs/play/SUBMISSION.md`。改一份就四份一起改。
 - **`keystore.properties` 與 `.jks` 絕不能 commit**（已列入 `.gitignore`）。
 - 備份規則 xml 只 include 一個檔，**不要再加 exclude**，否則 release lint 會判致命錯誤。
@@ -614,6 +617,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.44 | 2026-09-21 | 品牌化：啟動畫面、自家通知圖示、共用記號、引導頁文案、品牌規範文件 |
 | v3.43 | 2026-09-21 | 深色模式強調色提亮、月曆左右滑動換月、開權限步驟引導、去掉多餘的清單重算 |
 | v3.42 | 2026-09-21 | 深色模式（跟隨系統／淺色／深色）；設定頁新增「分享給朋友」 |
 | v3.41 | 2026-09-21 | 月曆標示哪幾天有紀錄：有資料的日期加圓點，沒資料的變淡 |
@@ -702,8 +706,13 @@ app/src/main/
 └── AndroidManifest.xml
 docs/
 ├── BLUEPRINT.md    # 原始架構與邏輯藍圖
+├── BRAND.md        # 品牌規範：名稱、標語、記號、顏色、啟動畫面、語氣
 ├── CHANGELOG.md    # 完整修復與變更紀錄
-└── PLAY_STORE_PLAN.md  # 上架 Google Play 規劃
+├── PLAY_STORE_PLAN.md  # 上架 Google Play 規劃
+├── privacy-policy.html # 隱私權政策（線上版在 relatestats-privacy repo）
+└── play/
+    ├── SUBMISSION.md   # Play Console 送審資料（可直接貼上）
+    └── tools/          # 商店素材產生器
 ```
 
 ---

@@ -2,4 +2,16 @@
 <resources>
 
     <style name="Theme.RelateStats" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!--
+      冷啟動時先套這個主題，MainActivity.onCreate 第一件事就換回 Theme.RelateStats。
+
+      ⚠️ 不換回來的話，整個 App 的視窗背景都會是墨藍，
+         Compose 還沒畫到的地方（例如旋轉重建的瞬間）會透出深色。
+      ⚠️ Android 12 以上系統一律用自己的啟動畫面機制，
+         這個 windowBackground 不會生效 —— 那邊在 values-v31/themes.xml 設定。
+    -->
+    <style name="Theme.RelateStats.Launch" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
 </resources>

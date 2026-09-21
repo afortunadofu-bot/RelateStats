@@ -43,14 +43,14 @@
 
 依順序：
 
-1. [ ] **把現有資料搬到新版**（見第 3 節）
+1. [x] **把現有資料搬到新版**（見第 3 節）——匯出備份 → 安裝新版 → 還原（v3.38 起還原改成合併，不會洗掉手機上的新紀錄）
 2. [x] **註冊 Play Console 開發者帳號**（US$25，身分驗證要等幾天，越早送越好）
-3. [ ] **產生 upload key**（見第 4 節）
+3. [x] **產生 upload key**（見第 4 節）——`keystore.properties` 與 `upload-keystore.jks` 已就緒（不進版控）
 4. [x] **隱私權政策上線**：https://afortunadofu-bot.github.io/relatestats-privacy/（公開 repo `relatestats-privacy`，見第 6 節）
 5. [x] **隱私權政策與 SUBMISSION.md 填入聯絡信箱**：celine.fu.work@gmail.com
 6. [x] **截圖與主題圖片**：已產出在 Downloads\\play商店\\relatestat\\上架素材\\（商店截圖 7 張、主題圖片、圖示、社群貼文 5 張＋文案）。產生器在 docs/play/tools/
-7. [ ] **錄無障礙聲明影片**，上傳 YouTube 設為不公開（腳本見 SUBMISSION.md 第 3 節）
-8. [ ] **在 Console 建立 App、填所有表單**（照 SUBMISSION.md 貼上）
+7. [x] **錄無障礙聲明影片**，上傳 YouTube 設為不公開（腳本見 SUBMISSION.md 第 3 節）
+8. [x] **在 Console 建立 App、填所有表單**（照 SUBMISSION.md 貼上）——商店資訊已送審
 9. [ ] **內部測試**：自己從 Play 裝一次，完整跑過
 10. [ ] **封閉測試：至少 12 人連續 14 天**（招募文案見 SUBMISSION.md 第 5 節）
 11. [ ] **申請正式版存取權 → 送審 → 分階段發布**

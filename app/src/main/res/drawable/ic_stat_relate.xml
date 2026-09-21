@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  狀態列通知用的小圖示。
+
+  ⚠️ 系統只拿這張圖的 alpha 當遮罩，整個塗成白色（或機型指定的單色）——
+     顏色寫什麼都沒用，能表達層次的只有 fillAlpha。
+  ⚠️ 原本兩則通知都用 Android 內建圖示（ic_menu_agenda、stat_sys_warning），
+     狀態列上看起來就是「某個系統功能」，不是這個 App。
+     每晚的回顧通知是使用者最常看到 RelateStats 的地方，一定要是自己的記號。
+  ⚠️ 不要加細線或細環：狀態列實際只有 24x24，1px 以下的線會整條消失。
+     跟 App icon 一樣靠「三個大小遞增、彼此交疊的圓」表達。
+  形狀撐滿 24 畫布的 2.4..21.6，不留多餘邊界 —— 系統本來就會再縮一圈。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.55"
+        android:pathData="M5.4,12m-3,0a3,3 0,1 0,6 0a3,3 0,1 0,-6 0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.8"
+        android:pathData="M10.4,12m-4.3,0a4.3,4.3 0,1 0,8.6 0a4.3,4.3 0,1 0,-8.6 0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M15.6,12m-6,0a6,6 0,1 0,12 0a6,6 0,1 0,-12 0z" />
+</vector>

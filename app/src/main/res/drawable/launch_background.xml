@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  啟動畫面（Android 11 以下）。Android 12 以上由 values-v31/themes.xml 接手。
+
+  ⚠️ 沒有這個之前，Activity 的主題是 Theme.Material.Light.NoActionBar，
+     冷啟動時系統會先畫一整片白，Compose 畫完才換成內容 ——
+     深色模式下就是「啟動先閃一下白」。
+  ⚠️ 記號的 108 畫布上內容只佔中央 72，所以這裡給 128dp 而不是 72dp，
+     視覺大小才跟一般啟動畫面的圖示相當。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/brand_ink" />
+    <item
+        android:gravity="center"
+        android:width="128dp"
+        android:height="128dp"
+        android:drawable="@drawable/ic_launcher_foreground" />
+</layer-list>
