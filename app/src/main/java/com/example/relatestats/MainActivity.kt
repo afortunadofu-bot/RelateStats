@@ -133,6 +133,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -339,8 +341,44 @@ object AppColors {
     //    畫面就是散的。這是 v3.16 的判斷失誤，v3.21 修正。
     // ⚠️ 畫資料還是請用 AppColors.Chart，不要用 ActiveBlue。
     //    兩者在預設配色下同色，但換了配色就不一樣了。
-    val BrandPrimary: Color get() = Chart.brand
-    val ActiveBlue: Color get() = Chart.accent
+    /**
+     * 深色模式用的提亮。
+     * ⚠️ 色盤本身是莫蘭迪低彩度暗色（預設的 brand 是 #3E4A54），
+     *    直接壓在 #0B1020 的深底上幾乎跟背景融在一起 ——
+     *    v3.42 的「本週」按鈕與月曆選到的日期就是這樣看不見的。
+     *    這裡只在深色模式把明度拉到看得見的水準，色相不動，
+     *    才不會跟使用者挑的配色脫節（圖表用的 Chart.* 一律不經過這裡）。
+     */
+    private fun liftForDark(c: Color): Color {
+        val mx = maxOf(c.red, c.green, c.blue)
+        val mn = minOf(c.red, c.green, c.blue)
+        val l = (mx + mn) / 2f
+        val target = 0.66f
+        if (l >= target) return c
+        // 提亮同時把彩度拉開，不然低彩度的暗色提亮後會整個變成灰
+        val avg = (c.red + c.green + c.blue) / 3f
+        val k = (1f - target) / (1f - l).coerceAtLeast(0.01f)
+        fun ch(x: Float): Float {
+            val sat = (avg + (x - avg) * 1.6f).coerceIn(0f, 1f)
+            return 1f - (1f - sat) * k
+        }
+        return Color(ch(c.red), ch(c.green), ch(c.blue))
+    }
+
+    /** 文字壓在強調色上時該用黑還是白 —— 提亮後的底色配白字會糊成一片 */
+    private fun readableOn(bg: Color): Color =
+        if (bg.red * 0.299f + bg.green * 0.587f + bg.blue * 0.114f > 0.6f) Color(0xFF111827)
+        else Color(0xFFFFFFFF)
+
+    val BrandPrimary: Color get() = Chart.brand.let { if (dk) liftForDark(it) else it }
+    val ActiveBlue: Color get() = Chart.accent.let { if (dk) liftForDark(it) else it }
+
+    /**
+     * 壓在 BrandPrimary / ActiveBlue 上的文字、圖示色。
+     * ⚠️ 不要再寫死 Color.White：深色模式的底色會被提亮，白字就看不見了。
+     */
+    val OnBrand: Color get() = readableOn(BrandPrimary)
+    val OnAccent: Color get() = readableOn(ActiveBlue)
     /** ⚠️ 語意色：專門表示「上升／正向」。不要拿它來畫圖表。 */
     val Positive: Color get() = if (dk) Color(0xFF34D399) else Color(0xFF059669)
 
@@ -3552,7 +3590,13 @@ object ScreenshotMode {
         if (!enabled.value) real
         else mapping[real] ?: ("聯絡人 " + (Math.floorMod(real.hashCode(), 900) + 100))
 
-    data class Masked(
+    /**
+     * ⚠️ 故意不是 data class。
+     *    StateFlow 會用 equals 決定要不要送出新值，data class 的 equals
+     *    等於把十幾萬筆紀錄逐筆比一次 —— 每則通知進來都比一次，就是卡頓。
+     *    用預設的參考比對：內容有變一定是新物件，沒變一定是同一個物件。
+     */
+    class Masked(
         val records: List<InteractionRecord>,
         val aliases: Map<String, String>,
         val categories: Map<String, String>
@@ -3626,14 +3670,21 @@ class RelateViewModel : ViewModel() {
         viewModelScope, SharingStarted.Eagerly,
         ScreenshotMode.Masked(DataRepository.interactions.value, DataRepository.aliases.value, DataRepository.categories.value)
     )
+    /**
+     * ⚠️ 這三條以前是 combine(masked, ScreenshotMode.enabled)。
+     *    masked 本身已經把 enabled 併進去了，再 combine 一次只是讓
+     *    每次改暱稱、改標籤都多送一份「內容一樣的新清單」出去，
+     *    下游所有 produceState 會整批重算一次（十幾萬筆的排行榜）。
+     *    改成 map + 參考比對：真的換了物件才往下送。
+     */
     val interactions: StateFlow<List<InteractionRecord>> =
-        combine(masked, ScreenshotMode.enabled) { m, _ -> m.records }
+        masked.map { it.records }.distinctUntilChanged { a, b -> a === b }
             .stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.interactions.value)
     val categories: StateFlow<Map<String, String>> =
-        combine(masked, ScreenshotMode.enabled) { m, _ -> m.categories }
+        masked.map { it.categories }.distinctUntilChanged { a, b -> a === b }
             .stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.categories.value)
     val aliases: StateFlow<Map<String, String>> =
-        combine(masked, ScreenshotMode.enabled) { m, _ -> m.aliases }
+        masked.map { it.aliases }.distinctUntilChanged { a, b -> a === b }
             .stateIn(viewModelScope, SharingStarted.Eagerly, DataRepository.aliases.value)
     val availableCategories = DataRepository.availableCategories
     val weekStartDay = DataRepository.weekStartDay
@@ -5498,7 +5549,38 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
         out
     }
 
-    Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(16.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(16.dp)).padding(16.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            /**
+             * 左右滑動換月份。
+             * ⚠️ 只有兩顆小箭頭可以翻月份，要往回找三個月得點六下。
+             * ⚠️ 掛在月曆容器上，事件會先被這裡消費掉，
+             *    不會同時觸發頁面層的 dateSwipe（那個是換日／換週）——
+             *    子層先收到事件，消費了就不會往上冒泡。
+             * ⚠️ pointerInput 的 key 要放 currentMonthCal：
+             *    不然區塊只建立一次，onDragEnd 會一直拿到第一次的月份。
+             */
+            .pointerInput(currentMonthCal) {
+                var total = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { total = 0f },
+                    onDragEnd = {
+                        // 門檻跟 dateSwipe 一致取向：太小的話直向捲動歪一下就換月
+                        val step = if (total <= -70f) 1 else if (total >= 70f) -1 else 0
+                        if (step != 0) setCurrentMonthCal(
+                            Calendar.getInstance().apply {
+                                timeInMillis = currentMonthCal.timeInMillis
+                                add(Calendar.MONTH, step)
+                            }
+                        )
+                    }
+                ) { _, dragAmount -> total += dragAmount }
+            }
+            .background(AppColors.Surface, RoundedCornerShape(16.dp))
+            .border(1.dp, AppColors.BorderLight, RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { setCurrentMonthCal(Calendar.getInstance().apply { timeInMillis = currentMonthCal.timeInMillis; add(Calendar.MONTH, -1) }) }) {
                 Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, contentDescription = "上個月", tint = AppColors.TextPrimary)
@@ -5515,7 +5597,14 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
 
         val totalCells = firstDayOfWeek + daysInMonth
         val rows = Math.ceil(totalCells / 7.0).toInt()
-        // 圖例放在格子下面（見迴圈後）
+
+        // ⚠️ 選取日拆成三個 Int 先算好。
+        //    原本每一格都 Calendar.getInstance()，一次重組就配 42 個物件，
+        //    滑動換月時每一幀都在配置，會頓。
+        val selCal = remember(selectedTime) { Calendar.getInstance().apply { timeInMillis = selectedTime } }
+        val selYear = selCal.get(Calendar.YEAR)
+        val selMonth = selCal.get(Calendar.MONTH)
+        val selDay = selCal.get(Calendar.DAY_OF_MONTH)
 
         for (r in 0 until rows) {
             Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceAround) {
@@ -5525,8 +5614,7 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                     if (index < firstDayOfWeek || dayNumber > daysInMonth) {
                         Box(modifier = Modifier.weight(1f))
                     } else {
-                        val calCheck = Calendar.getInstance().apply { timeInMillis = selectedTime }
-                        val isSelected = calCheck.get(Calendar.YEAR) == year && calCheck.get(Calendar.MONTH) == month && calCheck.get(Calendar.DAY_OF_MONTH) == dayNumber
+                        val isSelected = selYear == year && selMonth == month && selDay == dayNumber
                         // 今天永遠要看得出來，不然翻到別的月份就失去方位感
                         val isToday = todayCal.get(Calendar.YEAR) == year &&
                             todayCal.get(Calendar.MONTH) == month &&
@@ -5559,7 +5647,7 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                                     text = dayNumber.toString(),
                                     // 沒紀錄的日子刻意變淡：點得進去，但一眼看得出是空的
                                     color = when {
-                                        isSelected -> Color.White
+                                        isSelected -> AppColors.OnAccent
                                         hasData -> AppColors.TextPrimary
                                         else -> AppColors.TextTertiary
                                     },
@@ -5571,7 +5659,7 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                                         .background(
                                             when {
                                                 !hasData -> Color.Transparent
-                                                isSelected -> Color.White
+                                                isSelected -> AppColors.OnAccent
                                                 else -> AppColors.ActiveBlue
                                             }
                                         )
@@ -5582,6 +5670,13 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                 }
             }
         }
+
+        // 只有箭頭的話沒人知道可以滑；寫一行比畫箭頭動畫便宜也清楚
+        Text(
+            "左右滑動可以換月份",
+            fontSize = 11.sp, color = AppColors.TextTertiary,
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp), textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -5724,7 +5819,7 @@ fun TimeFilterSelector(
                 if (!onCurrent) {
                     Text(
                         if (currentFilter.type == FilterType.SPECIFIC_DAY) "今天" else "本週",
-                        fontSize = T.Micro, fontWeight = FontWeight.Bold, color = Color.White,
+                        fontSize = T.Micro, fontWeight = FontWeight.Bold, color = AppColors.OnBrand,
                         maxLines = 1, softWrap = false,
                         modifier = Modifier.padding(end = 4.dp)
                             .clip(RoundedCornerShape(8.dp))
@@ -11151,7 +11246,10 @@ private val USER_GUIDE = listOf(
             "本 App 不讀取任何訊息內容，也不會連上伺服器。所有統計都由三項系統權限產生，缺一項就少一類資料。",
             "通知存取：對方傳訊息跳出通知時，在背景取得發話者與字數。這是訊息數與字數的唯一來源。",
             "無障礙服務：偵測你何時開啟、何時離開某個聊天室，據此計算停留時間。單次上限 30 分鐘，超過視為背景掛機不計入。",
-            "使用紀錄存取：取得手機總使用時間，用來換算「聊天佔手機用量的百分比」。"
+            "使用紀錄存取：取得手機總使用時間，用來換算「聊天佔手機用量的百分比」。",
+            "三項權限都在系統設定裡，路徑各家機型不太一樣。點「設定 → 服務」裡任何一項，App 會先列出該按哪些按鈕，再帶你過去；跳過去的同時也會用提示訊息再講一次要找哪一個項目。",
+            "無障礙服務最容易卡住：進到系統的無障礙頁之後，要先點「已下載的應用程式」（有些機型叫「已安裝的服務」）才看得到「RelateStats 停留時間監測」。",
+            "三項都不開 App 也能用，只是沒有新資料進來；已經記下來的統計、備份與還原都照常。"
         )
     ),
     GuideSection(
@@ -11166,6 +11264,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "頁面頂端的日期列決定統計範圍，可選單日、單週、自訂區間或全部。左右滑動畫面也能換到上一天／上一週。",
             "翻到別的日期後，日期列會出現「今天」或「本週」按鈕，一鍵回到現在；月曆上的今天會有外框。",
+            "點日期打開月曆後，在月曆上左右滑動可以換月份，不用一直點箭頭。有紀錄的日期會加粗並帶一顆小圓點，沒紀錄的變淡（仍然點得進去）。",
             "常用詞固定是全期間累計（不保留訊息原文，事後無法分期）；「哪幾天在聊」固定看最近數月。"
         )
     ),
@@ -11244,6 +11343,10 @@ private val USER_GUIDE = listOf(
  * 常見問題是「東西不對的時候怎麼辦」，兩者的查閱時機完全不同。
  */
 private val USER_FAQ = listOf(
+    "無障礙服務要怎麼開？進去找不到開關。" to
+        "系統的無障礙頁不會直接列出 App，要先往下點「已下載的應用程式」（有些機型叫「已安裝的服務」或「已下載的服務」），" +
+        "在裡面找到「RelateStats 停留時間監測」點進去，把最上面的開關打開，再按系統跳出來的「允許」。" +
+        "從「設定 → 服務」點進去時 App 會先把這幾步列出來，跳過去的時候也會再提示一次。",
     "停留時間都是 0，怎麼辦？" to
         "多半是無障礙服務被關掉了。Android 每次重新安裝 App 都會自動停用它，需要手動重開。" +
         "到「設定 → 服務」把「停留時間偵測」打開；服務被關掉時 App 也會發通知提醒。",
@@ -12499,7 +12602,18 @@ fun openPermissionSettings(context: Context, kind: String) {
         "access" -> Settings.ACTION_ACCESSIBILITY_SETTINGS
         else -> Settings.ACTION_USAGE_ACCESS_SETTINGS
     }
+    /**
+     * ⚠️ 系統設定頁一打開就蓋住 App，剛才在對話框看到的步驟就看不到了。
+     *    用 Toast 把「到了那頁要按哪一個」一起帶過去 ——
+     *    使用者卡住的幾乎都是這一步（尤其無障礙要先進「已下載的應用程式」）。
+     */
+    val hint = when (kind) {
+        "notif" -> "在清單裡找「RelateStats 通知監聽」，點進去把開關打開"
+        "access" -> "往下找「已下載的應用程式」→「RelateStats 停留時間監測」→ 打開開關"
+        else -> "在清單裡找「RelateStats」，打開「允許使用記錄存取權」"
+    }
     runCatching { context.startActivity(Intent(action)) }
+        .onSuccess { Toast.makeText(context, hint, Toast.LENGTH_LONG).show() }
 }
 
 /**
@@ -12531,6 +12645,38 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
             "用來" to "計算聊天 App 佔你手機總使用時間的比例。"
         )
     }
+
+    /**
+     * 到了系統設定要按哪些按鈕。
+     * ⚠️ 這三個權限都藏在系統設定的深處，尤其無障礙服務要先點進
+     *    「已下載的應用程式」才看得到 App 清單 —— 沒有步驟說明，
+     *    使用者進去看到一整頁陌生選項就直接退出來了。
+     * ⚠️ 機型的字樣會有差異，所以寫「或」把常見的講法都列出來，
+     *    不要只寫某一家的名稱。
+     */
+    val steps = when (kind) {
+        "notif" -> listOf(
+            "按下面的「同意並前往設定」，會跳到系統的「通知存取權」清單。",
+            "在清單裡找到「RelateStats 通知監聽」。",
+            "點它，把開關打開。",
+            "系統跳出確認視窗時按「允許」。",
+            "按返回鍵回到 RelateStats 就完成了。"
+        )
+        "access" -> listOf(
+            "按下面的「同意並前往設定」，會跳到系統的「無障礙」頁。",
+            "往下滑，點「已下載的應用程式」（有些機型叫「已安裝的服務」或「已下載的服務」）。",
+            "在清單裡找到「RelateStats 停留時間監測」，點進去。",
+            "把最上面那個開關打開。",
+            "系統會跳出一個警告視窗，按「允許」或「確定」。",
+            "按返回鍵回到 RelateStats，「設定 → 服務」那一列會變成已開啟。"
+        )
+        else -> listOf(
+            "按下面的「同意並前往設定」，會跳到系統的「使用資訊存取權」清單。",
+            "在清單裡找到「RelateStats」，點進去。",
+            "把「允許使用記錄存取權」打開。",
+            "按返回鍵回到 RelateStats 就完成了。"
+        )
+    }
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
@@ -12542,6 +12688,23 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
                         Text(k, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
                             modifier = Modifier.width(64.dp))
                         Text(v, fontSize = T.Body, color = AppColors.TextPrimary, lineHeight = 20.sp, modifier = Modifier.weight(1f))
+                    }
+                }
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp).clip(RoundedCornerShape(10.dp))
+                        .background(AppColors.SurfaceAlt).padding(10.dp)
+                ) {
+                    Text("開啟步驟", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextPrimary)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    steps.forEachIndexed { i, step ->
+                        Row(modifier = Modifier.padding(top = if (i == 0) 0.dp else 4.dp)) {
+                            Text(
+                                "${i + 1}.", fontSize = T.Micro, fontWeight = FontWeight.Black,
+                                color = AppColors.ActiveBlue, modifier = Modifier.width(18.dp)
+                            )
+                            Text(step, fontSize = T.Micro, color = AppColors.TextSecondary,
+                                lineHeight = 17.sp, modifier = Modifier.weight(1f))
+                        }
                     }
                 }
                 Column(
