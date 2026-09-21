@@ -1070,6 +1070,38 @@ object DataRepository {
      */
     val recapHour = MutableStateFlow(21)
     val recapMinute = MutableStateFlow(0)
+
+    /**
+     * 本機許願清單：自己許過什麼願、什麼時候許的（時間, 內容）。
+     * ⚠️ 只存在這支手機。App 沒有網路權限，不可能把願望傳出去 ——
+     *    要讓別人看到只能靠使用者自己按「寄出」或開外部許願板。
+     * ⚠️ 存一整串字串而不是 StringSet：StringSet 沒有順序，
+     *    許願清單要照時間由新到舊排。欄位用 \u001E、筆數用 \u001D 分隔，
+     *    使用者打得出來的字元不會撞到。
+     */
+    val wishes = MutableStateFlow<List<Pair<Long, String>>>(emptyList())
+    private const val WISH_SEP = "\u001D"
+    private const val WISH_FIELD = "\u001E"
+
+    private fun saveWishes() {
+        prefs?.edit()?.putString(
+            "wishes",
+            wishes.value.joinToString(WISH_SEP) { it.first.toString() + WISH_FIELD + it.second }
+        )?.apply()
+    }
+
+    fun addWish(text: String) {
+        val t = text.trim()
+        if (t.isBlank()) return
+        // 留最近 50 筆就夠了，不讓它無限長大
+        wishes.value = (listOf(System.currentTimeMillis() to t) + wishes.value).take(50)
+        saveWishes()
+    }
+
+    fun removeWish(ts: Long) {
+        wishes.value = wishes.value.filterNot { it.first == ts }
+        saveWishes()
+    }
     /** 從回顧通知點進來時設成 true，主畫面看到就開概要彈窗 */
     val pendingRecap = MutableStateFlow(false)
 
@@ -1211,6 +1243,11 @@ object DataRepository {
         weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
         applyChartPalette(p.getString("chart_palette", null) ?: CHART_PALETTES[0].id)
         recapEnabled.value = p.getBoolean("recap_enabled", true)
+        wishes.value = (p.getString("wishes", "") ?: "").split(WISH_SEP).mapNotNull { line ->
+            val i = line.indexOf(WISH_FIELD)
+            if (i <= 0) null
+            else line.substring(0, i).toLongOrNull()?.let { ts -> ts to line.substring(i + 1) }
+        }
         recapHour.value = p.getInt("recap_hour", 21).coerceIn(0, 23)
         recapMinute.value = p.getInt("recap_minute", 0).coerceIn(0, 59)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
@@ -3721,6 +3758,9 @@ class RelateViewModel : ViewModel() {
     val recapEnabled = DataRepository.recapEnabled
     val recapHour = DataRepository.recapHour
     val recapMinute = DataRepository.recapMinute
+    val wishes = DataRepository.wishes
+    fun addWish(text: String) = DataRepository.addWish(text)
+    fun removeWish(ts: Long) = DataRepository.removeWish(ts)
     fun setRecapTime(h: Int, m: Int) = DataRepository.setRecapTime(h, m)
     val themeMode = DataRepository.themeMode
     fun setThemeMode(m: String) = DataRepository.setThemeMode(m)
@@ -11385,6 +11425,7 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
+            "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是開發與著作權、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
@@ -11433,6 +11474,9 @@ private val USER_FAQ = listOf(
     "無障礙清單裡有兩個「RelateStats 停留時間監測」，要開哪一個？" to
         "帶「（開發版）」的那個是開發測試用的版本，正式版沒有括號 —— 要開的是沒有括號的那個。" +
         "兩個都裝著的時候如果開錯，正式版就不會記錄任何停留時間。不需要開發版的話把它解除安裝就不會再看到。",
+    "許願區的願望會自動傳出去嗎？" to
+        "不會。App 沒有網路權限，不可能自己把任何東西傳出去。按「寄出」是開你自己的郵件 App、內容也看得到，" +
+        "要不要真的寄出去由你決定。願望清單只存在這支手機。",
     "可以在 App 裡按一下就同意權限嗎？" to
         "不行。通知存取與無障礙服務是 Android 的特殊權限，規定只能在系統設定裡由你親手打開，" +
         "沒有任何方式可以讓 App 自己要到。App 能做的是把你送到正確的那一頁，並把要按的步驟列出來。",
@@ -11956,6 +12000,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     }
     var showFeedback by remember { mutableStateOf(false) }
     if (showFeedback) FeedbackDialog { showFeedback = false }
+    var showWishlist by remember { mutableStateOf(false) }
+    if (showWishlist) WishlistDialog(viewModel) { showWishlist = false }
     val cloudUri by viewModel.cloudBackupUri.collectAsState()
     val cloudLast by viewModel.cloudBackupLast.collectAsState()
     val cloudInterval by viewModel.cloudBackupInterval.collectAsState()
@@ -12154,7 +12200,9 @@ fun SettingsView(viewModel: RelateViewModel) {
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }
                 }
                 SettingsDivider()
-                SettingsRow("意見回饋", "回報問題或提建議") { showFeedback = true }
+                SettingsRow("意見回饋", "回報問題或數字不對") { showFeedback = true }
+                SettingsDivider()
+                SettingsRow("功能許願區", "想要什麼功能就寫下來") { showWishlist = true }
                 SettingsDivider()
                 SettingsRow("分享給朋友", "把 RelateStats 傳給朋友") {
                     val text = "RelateStats：$BRAND_TAGLINE。\n" +
@@ -13026,6 +13074,20 @@ fun RecapTimeDialog(hour: Int, minute: Int, onPick: (Int, Int) -> Unit, onDismis
     )
 }
 
+/**
+ * 功能許願板（外部網頁，用瀏覽器開）。
+ *
+ * ⚠️ App 沒有 INTERNET 權限，也不會為了許願區去加。
+ *    「App 沒有網路權限、資料無法離開這支手機」是隱私權政策、資料安全性申報、
+ *    無障礙聲明與商店文案共同的基礎，加了就全部要重寫重報。
+ *    許願板是外部網頁，App 只是丟一個 ACTION_VIEW 給瀏覽器，本身不連線。
+ * ⚠️ 兩個網址空著的時候，許願區只會顯示「用 Email 寄出」那條路，
+ *    不會出現點了沒反應的按鈕。建好表單把網址填進來就會自動出現。
+ *    建立步驟見 docs/WISHLIST.md。
+ */
+const val WISHLIST_FORM_URL = ""
+const val WISHLIST_BOARD_URL = ""
+
 const val FEEDBACK_EMAIL = "celine.fu.work@gmail.com"
 
 /**
@@ -13036,6 +13098,150 @@ const val FEEDBACK_EMAIL = "celine.fu.work@gmail.com"
  *    沒有郵件 App 時退而求其次複製到剪貼簿。
  *    不要為了做表單去加 INTERNET，那會毀掉整個隱私說法與資料安全性申報。
  */
+/**
+ * 功能許願區。
+ *
+ * ⚠️ 跟「意見回饋」分開：回饋是「壞掉了」，許願是「我想要」，
+ *    兩者的心情與處理方式完全不同，混在一起兩邊都會被稀釋。
+ * ⚠️ 許過的願存在本機，使用者看得到自己許過什麼 ——
+ *    不然寄出去就石沉大海，隔兩週會重許一次一樣的。
+ * ⚠️ 寄出的內容只有使用者自己打的字 ＋ 機型與版本，
+ *    絕對不要把任何聯絡人、統計數字夾帶進去。
+ */
+@Composable
+fun WishlistDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val wishes by viewModel.wishes.collectAsState()
+    var text by remember { mutableStateOf("") }
+    val dateFmt = remember { SimpleDateFormat("M/d", Locale.US) }
+    val deviceInfo = remember {
+        "裝置：" + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL +
+            "\nAndroid：" + android.os.Build.VERSION.RELEASE +
+            "\nApp：v" + BuildConfig.VERSION_NAME
+    }
+
+    fun openUrl(url: String) {
+        if (url.isBlank()) return
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            .onFailure { Toast.makeText(context, "找不到瀏覽器", Toast.LENGTH_SHORT).show() }
+    }
+
+    fun send() {
+        val t = text.trim()
+        if (t.isBlank()) return
+        viewModel.addWish(t)
+        val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL)).apply {
+            putExtra(Intent.EXTRA_SUBJECT, "RelateStats 許願")
+            putExtra(Intent.EXTRA_TEXT, t + "\n\n———\n" + deviceInfo)
+        }
+        if (runCatching { context.startActivity(mail) }.isFailure) {
+            (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+                ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 許願", t))
+            Toast.makeText(context, "找不到郵件 App，願望已存在下方清單並複製起來，請貼給 $FEEDBACK_EMAIL", Toast.LENGTH_LONG).show()
+        }
+        text = ""
+    }
+
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = { Text("功能許願區", fontWeight = FontWeight.Black, fontSize = 18.sp, color = AppColors.TextPrimary) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "想到什麼功能都可以寫，愈具體愈好（在哪一頁、想看到什麼）。",
+                    fontSize = T.Micro, color = AppColors.TextSecondary, lineHeight = 16.sp
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it },
+                    placeholder = { Text("例：排行可以只看某個標籤的人", fontSize = 14.sp) },
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 90.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
+                )
+                Text(
+                    "寄出的內容只有你打的這段字，加上機型與 App 版本。不會夾帶任何聯絡人或統計資料。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+
+                // 許願板：網址還沒填好就整塊不出現，不要放點了沒反應的按鈕
+                if (WISHLIST_BOARD_URL.isNotBlank() || WISHLIST_FORM_URL.isNotBlank()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(top = 14.dp)
+                            .clip(RoundedCornerShape(12.dp)).background(AppColors.SurfaceAlt).padding(12.dp)
+                    ) {
+                        Text("看看大家想要什麼", fontSize = T.Label, fontWeight = FontWeight.Black,
+                            color = AppColors.TextPrimary)
+                        Text(
+                            "許願板是一個網頁，會用瀏覽器打開。在那裡可以看到別人許的願、投票給你也想要的功能。",
+                            fontSize = T.Micro, color = AppColors.TextSecondary, lineHeight = 16.sp,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                        Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (WISHLIST_BOARD_URL.isNotBlank()) {
+                                Text(
+                                    "看大家的願望", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = AppColors.OnAccent, maxLines = 1, softWrap = false,
+                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                        .background(AppColors.ActiveBlue)
+                                        .clickable { openUrl(WISHLIST_BOARD_URL) }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                            if (WISHLIST_FORM_URL.isNotBlank()) {
+                                Text(
+                                    "到許願板許願", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                        .border(1.dp, AppColors.ActiveBlue, RoundedCornerShape(8.dp))
+                                        .clickable { openUrl(WISHLIST_FORM_URL) }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (wishes.isNotEmpty()) {
+                    Text("我許過的願（${wishes.size}）", fontSize = T.Label, fontWeight = FontWeight.Black,
+                        color = AppColors.TextPrimary, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+                    wishes.forEach { (ts, w) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                                .clip(RoundedCornerShape(10.dp)).background(AppColors.Background).padding(10.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Text(dateFmt.format(Date(ts)), fontSize = T.Micro, fontWeight = FontWeight.Black,
+                                color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
+                                modifier = Modifier.padding(end = 8.dp))
+                            Text(w, fontSize = T.Label, color = AppColors.TextPrimary, lineHeight = 18.sp,
+                                modifier = Modifier.weight(1f))
+                            Text("刪除", fontSize = T.Micro, color = AppColors.WorkText,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.padding(start = 8.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { viewModel.removeWish(ts) }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { send() }, enabled = text.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("寄出", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) }
+        }
+    )
+}
+
 @Composable
 fun FeedbackDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current

@@ -8,6 +8,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **資料儲存**：全本地 SharedPreferences（`RelateStatsData`），不上傳任何伺服器
 - **原始規劃**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
 - **品牌規範（名稱、標語、記號、顏色、語氣）**：[docs/BRAND.md](docs/BRAND.md)
+- **功能許願板建立步驟**：[docs/WISHLIST.md](docs/WISHLIST.md)
 - **完整修復與變更紀錄**：[docs/CHANGELOG.md](docs/CHANGELOG.md)
 - **上架 Google Play 規劃**：[docs/PLAY_STORE_PLAN.md](docs/PLAY_STORE_PLAN.md)
 - **Play Console 送審資料（可直接貼上）**：[docs/play/SUBMISSION.md](docs/play/SUBMISSION.md)
@@ -30,6 +31,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
   **在紀錄格式加欄位時，一定要實際跑一次「存成檔案 → 從檔案還原」確認筆數一致。**
 - 雲端備份位置只存「提供者＋檔名」（SAF 拿不到資料夾路徑），**在綁定當下算好存起來**，不要每次開設定頁去查雲端硬碟。
 - 雲端備份週期由每晚回顧鬧鐘檢查，比對時容許 3 小時誤差（鬧鐘有一小時的窗），否則每天備份會常常變成隔天。
+- **不要為了任何功能加 `INTERNET` 權限**。功能許願區要讓使用者互相看到並投票，做法是用瀏覽器開外部網頁（`WISHLIST_FORM_URL` / `WISHLIST_BOARD_URL`），App 本身不連線。加了 `INTERNET` 就要重寫隱私權政策、重填資料安全性申報、重報無障礙聲明、改商店文案，而且把願望搬進 App 內顯示會觸發 Play 的使用者自建內容政策（檢舉、封鎖、審核）。
 - **下鑽（點卡片看「是誰」）一律用 `getDrillLeaderboard()`**，不要直接呼叫 `getDynamicLeaderboard()`。全是通話的集合必須走 `getCallLeaderboard()`，否則未接來電的來電者（電話號碼、「未接來電」）會被「非真人」規則整筆濾掉，名單人數跟統計數字對不起來。概況頁與分析頁各寫一份就是這樣漏過兩次。
 - **開發版與正式版的系統服務名稱必須分得開**（`manifestPlaceholders["labelSuffix"]`）。兩版都裝時，系統的無障礙清單會出現兩個同名項目，開錯的那個不會讓正式版記到任何資料。
 - **通知存取與無障礙服務沒有辦法用 App 內彈窗授權**，Android 規定只能在系統設定裡由使用者親手開啟。能做的只有深層跳轉（`:settings:fragment_args_key`、API 30+ 的 `ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS`）＋步驟說明。不要再找繞過去的方法。
@@ -622,6 +624,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.47 | 2026-09-21 | 功能許願區：寫下想要的功能、寄給開發者、本機留存許過的願；外部許願板入口（網址待填） |
 | v3.46 | 2026-09-21 | 修好概況頁「點看是誰」漏掉未顯示來電者；權限引導改成實機字樣＋直接跳到那一列；開發版服務改名；每晚回顧時間可自訂 |
 | v3.45 | 2026-09-21 | 設定頁最下方加開發與著作權、聯絡信箱（可點開郵件 App） |
 | v3.44 | 2026-09-21 | 品牌化：啟動畫面、自家通知圖示、共用記號、引導頁文案、品牌規範文件 |
@@ -714,6 +717,7 @@ app/src/main/
 docs/
 ├── BLUEPRINT.md    # 原始架構與邏輯藍圖
 ├── BRAND.md        # 品牌規範：名稱、標語、記號、顏色、啟動畫面、語氣
+├── WISHLIST.md     # 功能許願板（Google 表單＋公開結果頁）建立步驟
 ├── CHANGELOG.md    # 完整修復與變更紀錄
 ├── PLAY_STORE_PLAN.md  # 上架 Google Play 規劃
 ├── privacy-policy.html # 隱私權政策（線上版在 relatestats-privacy repo）
