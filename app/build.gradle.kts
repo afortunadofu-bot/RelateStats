@@ -26,8 +26,8 @@ android {
         applicationId = "com.relatestats.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 69
-        versionName = "3.45"
+        versionCode = 70
+        versionName = "3.46"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -49,8 +49,14 @@ android {
             //    手機上裝著開發版就無法從 Play 安裝測試版（Play 只會顯示「伺服器端發生錯誤」）。
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-dev"
+            // ⚠️ 服務名稱也要跟正式版分得開。兩版都裝著的時候，
+            //    系統的無障礙清單裡會出現兩個一模一樣的
+            //    「RelateStats 停留時間監測」，使用者根本看不出該開哪一個，
+            //    開錯的那個不會讓正式版記到任何資料。
+            manifestPlaceholders["labelSuffix"] = "（開發版）"
         }
         release {
+            manifestPlaceholders["labelSuffix"] = ""
             if (keystoreProps.containsKey("storeFile")) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true

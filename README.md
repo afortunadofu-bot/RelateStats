@@ -30,6 +30,9 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
   **在紀錄格式加欄位時，一定要實際跑一次「存成檔案 → 從檔案還原」確認筆數一致。**
 - 雲端備份位置只存「提供者＋檔名」（SAF 拿不到資料夾路徑），**在綁定當下算好存起來**，不要每次開設定頁去查雲端硬碟。
 - 雲端備份週期由每晚回顧鬧鐘檢查，比對時容許 3 小時誤差（鬧鐘有一小時的窗），否則每天備份會常常變成隔天。
+- **下鑽（點卡片看「是誰」）一律用 `getDrillLeaderboard()`**，不要直接呼叫 `getDynamicLeaderboard()`。全是通話的集合必須走 `getCallLeaderboard()`，否則未接來電的來電者（電話號碼、「未接來電」）會被「非真人」規則整筆濾掉，名單人數跟統計數字對不起來。概況頁與分析頁各寫一份就是這樣漏過兩次。
+- **開發版與正式版的系統服務名稱必須分得開**（`manifestPlaceholders["labelSuffix"]`）。兩版都裝時，系統的無障礙清單會出現兩個同名項目，開錯的那個不會讓正式版記到任何資料。
+- **通知存取與無障礙服務沒有辦法用 App 內彈窗授權**，Android 規定只能在系統設定裡由使用者親手開啟。能做的只有深層跳轉（`:settings:fragment_args_key`、API 30+ 的 `ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS`）＋步驟說明。不要再找繞過去的方法。
 - **所有開權限的入口都要先經過 `PermissionDisclosureDialog`**，不能直接 `startActivity` 到系統設定頁（Play 明確揭露規定）。
 - **品牌識別一律照 [docs/BRAND.md](docs/BRAND.md)**。記號的比例同時存在四個檔案（`ic_launcher_foreground.xml`、`ic_stat_relate.xml`、`BrandMark()`、商店圖示），改一個要四個一起改；標語一律用 `BRAND_TAGLINE` 常數，不要各寫一份。
 - **記號的顏色不跟著配色走**。配色換的是「資料的顏色」，識別換掉就像換了一個 App。深色模式只補一圈輪廓，顏色不動。
@@ -399,7 +402,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   少了 `onNewIntent` 就只是把 App 叫到前景，彈窗不會出現。
 
 - 用 `AlarmManager.setWindow`，不是 WorkManager、也不是精確鬧鐘：
-  「晚上九點左右」不需要分秒不差，而精確鬧鐘在 Android 12+ 要另外的權限。
+  回顧通知不需要分秒不差，而精確鬧鐘在 Android 12+ 要另外的權限。
+  時間由使用者設定（`recap_hour` / `recap_minute`，預設 21:00），改時間會立刻重排；
+  `BootReceiver` 也必須先 `DataRepository.init()` 再排程，否則重開機後會退回預設時間。
 - ⚠️ **`setWindow` 是一次性的，觸發後要自己排下一次**（`RecapReceiver` 結尾）。
 - ⚠️ **每次 App 啟動都要重排一次。** 鬧鐘會被「強制停止」清掉，只靠 `BOOT_COMPLETED` 補不回來。
   重複排同一個 `PendingIntent` 不會累加。
@@ -617,6 +622,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v3.46 | 2026-09-21 | 修好概況頁「點看是誰」漏掉未顯示來電者；權限引導改成實機字樣＋直接跳到那一列；開發版服務改名；每晚回顧時間可自訂 |
 | v3.45 | 2026-09-21 | 設定頁最下方加開發與著作權、聯絡信箱（可點開郵件 App） |
 | v3.44 | 2026-09-21 | 品牌化：啟動畫面、自家通知圖示、共用記號、引導頁文案、品牌規範文件 |
 | v3.43 | 2026-09-21 | 深色模式強調色提亮、月曆左右滑動換月、開權限步驟引導、去掉多餘的清單重算 |

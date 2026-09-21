@@ -1061,6 +1061,15 @@ object DataRepository {
     }
 
     val recapEnabled = MutableStateFlow(true)
+    /**
+     * 每晚回顧的時間。
+     * %s 預設 21:00，但這是個人作息的東西 —— 有人九點還在外面，
+     *    有人十一點才有空看。寫死就等於叫使用者遷就 App。
+     * %s 改時間之後一定要重排鬧鐘（setRecapTime 會做），
+     *    只存偏好設定的話要等下一次開 App 才生效。
+     */
+    val recapHour = MutableStateFlow(21)
+    val recapMinute = MutableStateFlow(0)
     /** 從回顧通知點進來時設成 true，主畫面看到就開概要彈窗 */
     val pendingRecap = MutableStateFlow(false)
 
@@ -1202,6 +1211,8 @@ object DataRepository {
         weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
         applyChartPalette(p.getString("chart_palette", null) ?: CHART_PALETTES[0].id)
         recapEnabled.value = p.getBoolean("recap_enabled", true)
+        recapHour.value = p.getInt("recap_hour", 21).coerceIn(0, 23)
+        recapMinute.value = p.getInt("recap_minute", 0).coerceIn(0, 59)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
         autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
         lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
@@ -1361,6 +1372,14 @@ object DataRepository {
     fun setRecapEnabled(on: Boolean) {
         recapEnabled.value = on
         prefs?.edit()?.putBoolean("recap_enabled", on)?.apply()
+    }
+
+    fun setRecapTime(hour: Int, minute: Int) {
+        recapHour.value = hour.coerceIn(0, 23)
+        recapMinute.value = minute.coerceIn(0, 59)
+        prefs?.edit()?.putInt("recap_hour", recapHour.value)?.putInt("recap_minute", recapMinute.value)?.apply()
+        // ⚠️ 一定要重排：鬧鐘是一次性的 setWindow，不重排就還是舊時間
+        appContext?.let { DailyRecap.schedule(it) }
     }
 
     fun setChartPalette(id: String) {
@@ -2639,15 +2658,15 @@ object DataRepository {
  * ⚠️ 用 AlarmManager 而不是 WorkManager：這個 App 沒有其他背景工作，
  *    為了一天一次的鬧鐘多拉一個函式庫不划算。
  * ⚠️ 必須用 setExactAndAllowWhileIdle 之外的方式（setWindow），
- *    因為精確鬧鐘在 Android 12+ 要另外的權限，而「晚上九點左右」本來就不需要精確。
+ *    因為精確鬧鐘在 Android 12+ 要另外的權限，而回顧通知本來就不需要分秒不差。
+ * ⚠️ 時間由使用者在「設定 → 偏好 → 每晚回顧通知」決定（預設 21:00），
+ *    改時間會立刻重排鬧鐘。
  * ⚠️ 每次觸發後要自己排下一次 —— setWindow 是一次性的。
  */
 object DailyRecap {
     const val CHANNEL_RECAP = "relate_recap"
     const val CHANNEL_ALERT = "relate_alert"
     private const val REQ = 8801
-    /** 晚上 9 點 */
-    private const val HOUR = 21
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
@@ -2670,7 +2689,8 @@ object DailyRecap {
     fun schedule(ctx: Context) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         val c = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, HOUR); set(Calendar.MINUTE, 0)
+            set(Calendar.HOUR_OF_DAY, DataRepository.recapHour.value)
+            set(Calendar.MINUTE, DataRepository.recapMinute.value)
             set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
             if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DATE, 1)
         }
@@ -2804,7 +2824,12 @@ object DailyRecap {
 /** 重開機後重新排程 —— AlarmManager 的錳鐘不會跨重啟保留 */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) DailyRecap.schedule(context)
+        // ⚠️ 一定要先 init：schedule() 會讀使用者設定的回顧時間，
+        //    沒讀偏好設定就排程，重開機後會退回預設的 21:00。
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+            runCatching { DataRepository.init(context.applicationContext) }
+            DailyRecap.schedule(context)
+        }
     }
 }
 
@@ -3694,6 +3719,9 @@ class RelateViewModel : ViewModel() {
     val chartPaletteId = DataRepository.chartPaletteId
     fun setChartPalette(id: String) = DataRepository.setChartPalette(id)
     val recapEnabled = DataRepository.recapEnabled
+    val recapHour = DataRepository.recapHour
+    val recapMinute = DataRepository.recapMinute
+    fun setRecapTime(h: Int, m: Int) = DataRepository.setRecapTime(h, m)
     val themeMode = DataRepository.themeMode
     fun setThemeMode(m: String) = DataRepository.setThemeMode(m)
     val pendingRecap = DataRepository.pendingRecap
@@ -3891,6 +3919,26 @@ class RelateViewModel : ViewModel() {
             .filter { !isExcludedFromStats(it.unifiedName, catsMap) }
         return mergeDuplicateStats(raw)
             .sortedByDescending { it.totalDurationSeconds + (it.incomingCount * 60L) }
+    }
+
+    /**
+     * 下鑽（點卡片看「是誰」）用的排行。
+     *
+     * ⚠️ 挑出來的紀錄如果全是通話，一定要走 getCallLeaderboard。
+     *    未接來電的來電者常被記成電話號碼、或系統只給「未接來電」四個字，
+     *    套一般排行的「非真人」排除規則會整筆消失 ——
+     *    概況頁在 v3.45 以前就是這樣：通話統計寫 2 通，
+     *    點「點看是誰」卻只列得出 1 個人，另一通憑空不見。
+     * ⚠️ 兩頁（概況、分析）都要走這裡。以前只有分析頁修好，
+     *    概況頁自己寫一份 getDynamicLeaderboard，於是又漏了一次。
+     */
+    fun getDrillLeaderboard(
+        rs: List<InteractionRecord>, catsMap: Map<String, String>,
+        currentAliases: Map<String, String>, availableCats: List<ContactCategory>
+    ): List<SenderStat> {
+        val allCalls = rs.isNotEmpty() && rs.all { it.isCall || it.isMissedCall || it.appName == "電話" }
+        return if (allCalls) getCallLeaderboard(rs, catsMap, currentAliases, availableCats)
+        else getDynamicLeaderboard(rs, catsMap, currentAliases, availableCats)
     }
 
     /** 通話對象名單：不排除非真人名稱，抓不到來電者的歸成「未顯示來電者」 */
@@ -7159,13 +7207,7 @@ fun InsightsView(viewModel: RelateViewModel) {
     /** 從目前篩選範圍內挑出符合條件的紀錄，算成排行後開對話框 */
     fun drillInto(title: String, predicate: (InteractionRecord) -> Boolean) {
         val rs = viewModel.getFilteredRecords(records, filter).filter(predicate)
-        // ⚠️ 通話名單不能套「非真人」排除：未接來電的來電者常被記成「未接來電」或電話號碼，
-        //    一排除就看不到是誰打來的。
-        val allCalls = rs.isNotEmpty() && rs.all { it.isCall || it.isMissedCall || it.appName == "電話" }
-        drill = title to (
-            if (allCalls) viewModel.getCallLeaderboard(rs, categoriesMap, aliases, availableCats)
-            else viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats)
-        )
+        drill = title to viewModel.getDrillLeaderboard(rs, categoriesMap, aliases, availableCats)
     }
 
     // 十幾項統計一次算完並丟到背景執行緒；同步做會直接凍住畫面
@@ -7659,7 +7701,7 @@ fun OverviewView(viewModel: RelateViewModel) {
     // 構成卡片共用的下鑽：挑出符合條件的紀錄，算成排行後開對話框
     val overviewDrill: (String, (InteractionRecord) -> Boolean) -> Unit = { title, pred ->
         val rs = filteredRecords.filter(pred)
-        setActiveDetailDialog(title to viewModel.getDynamicLeaderboard(rs, categoriesMap, aliases, availableCats))
+        setActiveDetailDialog(title to viewModel.getDrillLeaderboard(rs, categoriesMap, aliases, availableCats))
     }
     val (showDemoUI, setShowDemoUI) = remember { mutableStateOf(false) }
     var quickTagTarget by remember { mutableStateOf<String?>(null) }
@@ -11286,7 +11328,8 @@ private val USER_GUIDE = listOf(
             "無障礙服務：偵測你何時開啟、何時離開某個聊天室，據此計算停留時間。單次上限 30 分鐘，超過視為背景掛機不計入。",
             "使用紀錄存取：取得手機總使用時間，用來換算「聊天佔手機用量的百分比」。",
             "三項權限都在系統設定裡，路徑各家機型不太一樣。點「設定 → 服務」裡任何一項，App 會先列出該按哪些按鈕，再帶你過去；跳過去的同時也會用提示訊息再講一次要找哪一個項目。",
-            "無障礙服務最容易卡住：進到系統的無障礙頁之後，要先點「已下載的應用程式」（有些機型叫「已安裝的服務」）才看得到「RelateStats 停留時間監測」。",
+            "無障礙服務最容易卡住：進到系統的無障礙頁（三星叫「協助工具」）之後，要先點「已安裝的應用程式」（有些機型叫「已下載的應用程式」或「已安裝的服務」）才看得到「RelateStats 停留時間監測」。",
+            "通知存取與無障礙服務是 Android 的特殊權限，規定只能在系統設定裡親手打開，App 沒辦法用彈窗代替。App 能做的是把你送到正確那一頁並說明要按什麼。",
             "三項都不開 App 也能用，只是沒有新資料進來；已經記下來的統計、備份與還原都照常。"
         )
     ),
@@ -11343,6 +11386,7 @@ private val USER_GUIDE = listOf(
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
             "設定頁捲到最下面是開發與著作權、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
+            "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
             "社交人格點進去可以看到全部類型與判定方式。"
         )
@@ -11357,7 +11401,7 @@ private val USER_GUIDE = listOf(
     GuideSection(
         "9", "每晚回顧",
         listOf(
-            "每天晚上九點左右會發一則通知。點開後先看概要：一句今天跟昨天比的總結、訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）、今天幾點聊最多的節奏圖、聊天對象的標籤分布，以及聊最多的三個人。",
+            "每天到你設定的時間（預設 21:00，可在「設定 → 偏好 → 每晚回顧通知 → 通知時間」改）會發一則通知。點開後先看概要：一句今天跟昨天比的總結、訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）、今天幾點聊最多的節奏圖、聊天對象的標籤分布，以及聊最多的三個人。",
             "關掉概要（✕ 或「看完整報告」）會直接帶你到分析頁的那一天。今天沒有互動就不會發通知；可以在「設定 → 偏好」關掉。",
             "不必等通知：畫面上方的「每日報告」隨時打開今天的報告，用日期旁的 ‹ › 翻看過去每一天，「回今天」一鍵回來。",
             "如果停留時間偵測（無障礙服務）被系統關掉，也會另外發通知提醒你重新開啟。"
@@ -11383,9 +11427,15 @@ private val USER_GUIDE = listOf(
  */
 private val USER_FAQ = listOf(
     "無障礙服務要怎麼開？進去找不到開關。" to
-        "系統的無障礙頁不會直接列出 App，要先往下點「已下載的應用程式」（有些機型叫「已安裝的服務」或「已下載的服務」），" +
+        "系統的無障礙頁（三星叫「協助工具」）不會直接列出 App，要先往下點「已安裝的應用程式」（有些機型叫「已下載的應用程式」或「已安裝的服務」），" +
         "在裡面找到「RelateStats 停留時間監測」點進去，把最上面的開關打開，再按系統跳出來的「允許」。" +
         "從「設定 → 服務」點進去時 App 會先把這幾步列出來，跳過去的時候也會再提示一次。",
+    "無障礙清單裡有兩個「RelateStats 停留時間監測」，要開哪一個？" to
+        "帶「（開發版）」的那個是開發測試用的版本，正式版沒有括號 —— 要開的是沒有括號的那個。" +
+        "兩個都裝著的時候如果開錯，正式版就不會記錄任何停留時間。不需要開發版的話把它解除安裝就不會再看到。",
+    "可以在 App 裡按一下就同意權限嗎？" to
+        "不行。通知存取與無障礙服務是 Android 的特殊權限，規定只能在系統設定裡由你親手打開，" +
+        "沒有任何方式可以讓 App 自己要到。App 能做的是把你送到正確的那一頁，並把要按的步驟列出來。",
     "停留時間都是 0，怎麼辦？" to
         "多半是無障礙服務被關掉了。Android 每次重新安裝 App 都會自動停用它，需要手動重開。" +
         "到「設定 → 服務」把「停留時間偵測」打開；服務被關掉時 App 也會發通知提醒。",
@@ -11979,6 +12029,9 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showKept by remember { mutableStateOf(false) }
     var showPalette by remember { mutableStateOf(false) }
     val recapEnabled by viewModel.recapEnabled.collectAsState()
+    val recapHour by viewModel.recapHour.collectAsState()
+    val recapMinute by viewModel.recapMinute.collectAsState()
+    var showRecapTime by remember { mutableStateOf(false) }
     val shotMode by viewModel.screenshotMode.collectAsState()
     val permDeclines by DataRepository.permDeclines.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
@@ -12150,10 +12203,29 @@ fun SettingsView(viewModel: RelateViewModel) {
                 ) {
                     Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                         Text("每晚回顧通知", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                        Text("晚上九點左右整理今天的互動；今天沒互動就不發",
+                        Text("整理今天的互動；今天沒互動就不發",
                             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                     }
                     Switch(checked = recapEnabled, onCheckedChange = { viewModel.setRecapEnabled(it) })
+                }
+                // ⚠️ 關著的時候不顯示時間列：關了還讓人挑時間只會讓人以為沒生效
+                if (recapEnabled) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { showRecapTime = true }
+                            .padding(start = 14.dp, end = 14.dp, top = 2.dp, bottom = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("通知時間", fontSize = T.Label, color = AppColors.TextSecondary,
+                            modifier = Modifier.weight(1f))
+                        Text(
+                            String.format(Locale.US, "%02d:%02d", recapHour, recapMinute),
+                            fontSize = T.Body, fontWeight = FontWeight.Black, color = AppColors.ActiveBlue,
+                            maxLines = 1, softWrap = false
+                        )
+                        Text("›", fontSize = 17.sp, color = AppColors.TextTertiary,
+                            maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 6.dp))
+                    }
                 }
                 SettingsDivider()
                 // 外觀：跟隨系統／淺色／深色
@@ -12559,6 +12631,12 @@ fun SettingsView(viewModel: RelateViewModel) {
         TrashDialog(viewModel) { showTrash = false }
     }
 
+    if (showRecapTime) {
+        RecapTimeDialog(recapHour, recapMinute,
+            onPick = { h, m -> viewModel.setRecapTime(h, m) },
+            onDismiss = { showRecapTime = false })
+    }
+
     if (showPalette) {
         PaletteDialog(
             currentId = chartPaletteId,
@@ -12698,23 +12776,49 @@ const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-p
 
 /** 開系統權限頁。⚠️ 一律先經過 PermissionDisclosureDialog，不要直接呼叫。 */
 fun openPermissionSettings(context: Context, kind: String) {
+    val svc = when (kind) {
+        "notif" -> ComponentName(context, RelateNotificationService::class.java)
+        "access" -> ComponentName(context, ChatTrackerService::class.java)
+        else -> null
+    }
     val action = when (kind) {
         "notif" -> Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
         "access" -> Settings.ACTION_ACCESSIBILITY_SETTINGS
         else -> Settings.ACTION_USAGE_ACCESS_SETTINGS
     }
     /**
+     * ⚠️ 使用者最常卡在「跳過去之後在一整頁陌生選項裡找不到我們」。
+     *    這裡盡量把他直接送到那一列：
+     *    - 通知存取：Android 11 起有「單一 App 的通知存取」頁，一按就是開關。
+     *    - 其餘：帶 :settings:fragment_args_key，多數機型（含三星）會自動捲到
+     *      並標示我們那一列；不認得的機型會忽略，退回一般清單，不會出錯。
+     * ⚠️ 深層頁面在少數機型上會直接丟例外，所以一定要留一條退路回一般清單。
+     */
+    val direct = if (kind == "notif" && Build.VERSION.SDK_INT >= 30 && svc != null) {
+        Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+            .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, svc.flattenToString())
+    } else null
+
+    val listIntent = Intent(action).apply {
+        svc?.let { c ->
+            val key = c.flattenToString()
+            putExtra(":settings:fragment_args_key", key)
+            putExtra(":settings:show_fragment_args", Bundle().apply { putString(":settings:fragment_args_key", key) })
+        }
+    }
+    /**
      * ⚠️ 系統設定頁一打開就蓋住 App，剛才在對話框看到的步驟就看不到了。
      *    用 Toast 把「到了那頁要按哪一個」一起帶過去 ——
-     *    使用者卡住的幾乎都是這一步（尤其無障礙要先進「已下載的應用程式」）。
+     *    使用者卡住的幾乎都是這一步（尤其無障礙要先進「已安裝的應用程式」）。
      */
     val hint = when (kind) {
-        "notif" -> "在清單裡找「RelateStats 通知監聽」，點進去把開關打開"
-        "access" -> "往下找「已下載的應用程式」→「RelateStats 停留時間監測」→ 打開開關"
+        "notif" -> "找到「RelateStats 通知監聽」，把開關打開"
+        "access" -> "往下找「已安裝的應用程式」→「RelateStats 停留時間監測」→ 打開開關"
         else -> "在清單裡找「RelateStats」，打開「允許使用記錄存取權」"
     }
-    runCatching { context.startActivity(Intent(action)) }
-        .onSuccess { Toast.makeText(context, hint, Toast.LENGTH_LONG).show() }
+    val ok = (direct != null && runCatching { context.startActivity(direct) }.isSuccess) ||
+        runCatching { context.startActivity(listIntent) }.isSuccess
+    if (ok) Toast.makeText(context, hint, Toast.LENGTH_LONG).show()
 }
 
 /**
@@ -12757,16 +12861,15 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
      */
     val steps = when (kind) {
         "notif" -> listOf(
-            "按下面的「同意並前往設定」，會跳到系統的「通知存取權」清單。",
-            "在清單裡找到「RelateStats 通知監聽」。",
-            "點它，把開關打開。",
+            "按下面的「同意並前往設定」。Android 11 以上會直接開到 RelateStats 這一頁；舊一點的系統會開一份清單，在裡面找「RelateStats 通知監聽」。",
+            "把開關打開。",
             "系統跳出確認視窗時按「允許」。",
             "按返回鍵回到 RelateStats 就完成了。"
         )
         "access" -> listOf(
-            "按下面的「同意並前往設定」，會跳到系統的「無障礙」頁。",
-            "往下滑，點「已下載的應用程式」（有些機型叫「已安裝的服務」或「已下載的服務」）。",
-            "在清單裡找到「RelateStats 停留時間監測」，點進去。",
+            "按下面的「同意並前往設定」，會跳到系統的「無障礙」頁（三星機型叫「協助工具」）。",
+            "往下滑，點「已安裝的應用程式」（有些機型叫「已下載的應用程式」或「已安裝的服務」）。",
+            "在清單裡找到「RelateStats 停留時間監測」，點進去。若清單裡出現兩個，要開的是名稱後面「沒有」（開發版）三個字的那一個。",
             "把最上面那個開關打開。",
             "系統會跳出一個警告視窗，按「允許」或「確定」。",
             "按返回鍵回到 RelateStats，「設定 → 服務」那一列會變成已開啟。"
@@ -12778,6 +12881,16 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
             "按返回鍵回到 RelateStats 就完成了。"
         )
     }
+
+    /**
+     * ⚠️ 為什麼不做成 App 內按一下就同意的彈窗：
+     *    通知存取與無障礙服務是 Android 的特殊權限，**規定**只能在系統設定裡由
+     *    使用者親手打開，沒有任何 API 可以讓 App 自己要到、也沒有執行階段的授權彈窗。
+     *    能做的只有「把人送到正確的那一頁」＋「講清楚要按什麼」。
+     *    使用紀錄存取同理。不要再花時間找繞過去的方法。
+     */
+    val stepNote = if (kind == "usage") null
+    else "這項權限 Android 規定只能在系統設定裡開，App 沒辦法用彈窗代替。下面照著按就好。"
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
@@ -12796,7 +12909,11 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
                         .background(AppColors.SurfaceAlt).padding(10.dp)
                 ) {
                     Text("開啟步驟", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextPrimary)
-                    Spacer(modifier = Modifier.height(4.dp))
+                    stepNote?.let {
+                        Text(it, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp,
+                            modifier = Modifier.padding(top = 2.dp))
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
                     steps.forEachIndexed { i, step ->
                         Row(modifier = Modifier.padding(top = if (i == 0) 0.dp else 4.dp)) {
                             Text(
@@ -12826,6 +12943,85 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
             TextButton(onClick = { DataRepository.notePermissionDeclined(kind); onDismiss() }) {
                 Text("不同意", color = AppColors.TextSecondary)
             }
+        }
+    )
+}
+
+/**
+ * 挑每晚回顧的時間。
+ * ⚠️ 不用系統的 TimePickerDialog：那張是平台主題，App 是固定淺色主題，
+ *    深色模式下會跳出一張白底的系統對話框，跟整個 App 對不起來。
+ * ⚠️ 分鐘只給 00/15/30/45 四個選項 —— 回顧通知本來就有一小時的窗
+ *    （setWindow，見 DailyRecap），給到分秒只是假精確。
+ */
+@Composable
+fun RecapTimeDialog(hour: Int, minute: Int, onPick: (Int, Int) -> Unit, onDismiss: () -> Unit) {
+    var h by remember { mutableStateOf(hour) }
+    var m by remember { mutableStateOf(minute.let { mi -> listOf(0, 15, 30, 45).minByOrNull { Math.abs(it - mi) } ?: 0 }) }
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = { Text("每晚回顧時間", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary) },
+        text = {
+            Column {
+                Text(
+                    String.format(Locale.US, "%02d:%02d", h, m),
+                    fontSize = 32.sp, fontWeight = FontWeight.Black, color = AppColors.ActiveBlue,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), textAlign = TextAlign.Center
+                )
+                Text("小時", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextTertiary)
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(24) { v ->
+                        val on = v == h
+                        Text(
+                            String.format(Locale.US, "%02d", v),
+                            fontSize = T.Body, fontWeight = if (on) FontWeight.Black else FontWeight.Medium,
+                            color = if (on) AppColors.OnAccent else AppColors.TextPrimary,
+                            maxLines = 1, softWrap = false,
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                .background(if (on) AppColors.ActiveBlue else AppColors.SurfaceAlt)
+                                .clickable { h = v }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+                Text("分鐘", fontSize = T.Micro, fontWeight = FontWeight.Black, color = AppColors.TextTertiary,
+                    modifier = Modifier.padding(top = 14.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(0, 15, 30, 45).forEach { v ->
+                        val on = v == m
+                        Text(
+                            String.format(Locale.US, "%02d", v),
+                            fontSize = T.Body, fontWeight = if (on) FontWeight.Black else FontWeight.Medium,
+                            color = if (on) AppColors.OnAccent else AppColors.TextPrimary,
+                            textAlign = TextAlign.Center, maxLines = 1, softWrap = false,
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                                .background(if (on) AppColors.ActiveBlue else AppColors.SurfaceAlt)
+                                .clickable { m = v }
+                                .padding(vertical = 8.dp)
+                        )
+                    }
+                }
+                Text(
+                    "實際發送會落在這個時間之後的一小時內 —— 系統會挑省電的時機發，不會分秒不差。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 14.dp)
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onPick(h, m); onDismiss() },
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)) { Text("設定", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) }
         }
     )
 }
