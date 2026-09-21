@@ -99,7 +99,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.foundation.verticalScroll
@@ -307,17 +311,27 @@ object AppColors {
     val chartPaletteState = mutableStateOf(CHART_PALETTES[0])
     val Chart: ChartPalette get() = chartPaletteState.value
 
+    /**
+     * 深色模式。
+     * ⚠️ 跟 chartPaletteState 一樣必須是 MutableState，而且每個顏色都要寫成 get()，
+     *    否則切換模式時畫面不會重組。
+     * ⚠️ 只有「中性色」（底、卡片、框線、文字）跟著深淺走；
+     *    圖表與標籤配色仍然由使用者選的色盤決定。
+     */
+    val darkState = mutableStateOf(false)
+    private val dk: Boolean get() = darkState.value
+
     // ── 底層 ──
-    val Background = Color(0xFFF4F6F8)
-    val Surface = Color(0xFFFFFFFF)
-    val SurfaceAlt = Color(0xFFF7F9FB)   // 表格斑馬紋、次級區塊
-    val BorderLight = Color(0xFFE4E8ED)
-    val BorderStrong = Color(0xFFCBD5E1)
+    val Background: Color get() = if (dk) Color(0xFF0B1020) else Color(0xFFF4F6F8)
+    val Surface: Color get() = if (dk) Color(0xFF151B2B) else Color(0xFFFFFFFF)
+    val SurfaceAlt: Color get() = if (dk) Color(0xFF1B2233) else Color(0xFFF7F9FB)
+    val BorderLight: Color get() = if (dk) Color(0xFF2A3348) else Color(0xFFE4E8ED)
+    val BorderStrong: Color get() = if (dk) Color(0xFF3C4962) else Color(0xFFCBD5E1)
 
     // ── 文字階層 ──
-    val TextPrimary = Color(0xFF0F172A)
-    val TextSecondary = Color(0xFF64748B)
-    val TextTertiary = Color(0xFF94A3B8)
+    val TextPrimary: Color get() = if (dk) Color(0xFFE9EDF6) else Color(0xFF0F172A)
+    val TextSecondary: Color get() = if (dk) Color(0xFFA9B4C6) else Color(0xFF64748B)
+    val TextTertiary: Color get() = if (dk) Color(0xFF7C8799) else Color(0xFF94A3B8)
 
     // ── 強調（跟著配色走）──
     // ⚠️ 中性色（Background / Surface / Text / Border）**不跟著變**，那是骨架。
@@ -328,14 +342,21 @@ object AppColors {
     val BrandPrimary: Color get() = Chart.brand
     val ActiveBlue: Color get() = Chart.accent
     /** ⚠️ 語意色：專門表示「上升／正向」。不要拿它來畫圖表。 */
-    val Positive = Color(0xFF059669)
+    val Positive: Color get() = if (dk) Color(0xFF34D399) else Color(0xFF059669)
 
-    val WorkBg = Color(0xFFFEE2E2); val WorkText = Color(0xFFB91C1C)
-    val FamilyBg = Color(0xFFDBEAFE); val FamilyText = Color(0xFF1D4ED8)
-    val FriendBg = Color(0xFFD1FAE5); val FriendText = Color(0xFF047857)
-    val OtherBg = Color(0xFFF3F4F6); val OtherText = Color(0xFF4B5563)
-    val GroupBg = Color(0xFFFEF3C7); val GroupText = Color(0xFFB45309)
-    val PartnerBg = Color(0xFFFCE7F3); val PartnerText = Color(0xFFBE185D)
+    // 語意色：深色模式下底色壓暗、文字提亮，才不會在深底上發光刺眼
+    val WorkBg: Color get() = if (dk) Color(0xFF3A1D1D) else Color(0xFFFEE2E2)
+    val WorkText: Color get() = if (dk) Color(0xFFFCA5A5) else Color(0xFFB91C1C)
+    val FamilyBg: Color get() = if (dk) Color(0xFF1B2B4D) else Color(0xFFDBEAFE)
+    val FamilyText: Color get() = if (dk) Color(0xFF93C5FD) else Color(0xFF1D4ED8)
+    val FriendBg: Color get() = if (dk) Color(0xFF13322A) else Color(0xFFD1FAE5)
+    val FriendText: Color get() = if (dk) Color(0xFF6EE7B7) else Color(0xFF047857)
+    val OtherBg: Color get() = if (dk) Color(0xFF232A38) else Color(0xFFF3F4F6)
+    val OtherText: Color get() = if (dk) Color(0xFFCBD5E1) else Color(0xFF4B5563)
+    val GroupBg: Color get() = if (dk) Color(0xFF3A2C12) else Color(0xFFFEF3C7)
+    val GroupText: Color get() = if (dk) Color(0xFFFCD34D) else Color(0xFFB45309)
+    val PartnerBg: Color get() = if (dk) Color(0xFF3A1B2C) else Color(0xFFFCE7F3)
+    val PartnerText: Color get() = if (dk) Color(0xFFF9A8D4) else Color(0xFFBE185D)
 
     val AppBrands = mapOf(
         "LINE" to Color(0xFF06C755), "Instagram" to Color(0xFFE1306C),
@@ -992,6 +1013,14 @@ object DataRepository {
     var isFirstLaunch = MutableStateFlow(true)
     var weekStartDay = MutableStateFlow(Calendar.MONDAY)
     val chartPaletteId = MutableStateFlow(CHART_PALETTES[0].id)
+    /** 外觀：system／light／dark */
+    val themeMode = MutableStateFlow("system")
+
+    fun setThemeMode(mode: String) {
+        themeMode.value = mode
+        prefs?.edit()?.putString("theme_mode", mode)?.apply()
+    }
+
     val recapEnabled = MutableStateFlow(true)
     /** 從回顧通知點進來時設成 true，主畫面看到就開概要彈窗 */
     val pendingRecap = MutableStateFlow(false)
@@ -1117,6 +1146,7 @@ object DataRepository {
         loadCloudBackupState()
         loadGroupState()
         loadPermDeclines()
+        prefs?.getString("theme_mode", "system")?.let { themeMode.value = it }
         val appContext = context.applicationContext
         ioScope.launch {
             runOneTimeCleanupIfNeeded(appContext)
@@ -3610,6 +3640,8 @@ class RelateViewModel : ViewModel() {
     val chartPaletteId = DataRepository.chartPaletteId
     fun setChartPalette(id: String) = DataRepository.setChartPalette(id)
     val recapEnabled = DataRepository.recapEnabled
+    val themeMode = DataRepository.themeMode
+    fun setThemeMode(m: String) = DataRepository.setThemeMode(m)
     val pendingRecap = DataRepository.pendingRecap
     fun setRecapEnabled(on: Boolean) = DataRepository.setRecapEnabled(on)
 
@@ -4807,6 +4839,21 @@ class MainActivity : ComponentActivity() {
             // ⚠️ 以前是空的 MaterialTheme{}，等於整包吃 Material3 預設的紫色配色 ——
             //    導覽列選中的膠囊、Checkbox、TextButton 文字、輸入框游標全都是紫的，
             //    跟 App 自己的藍完全對不起來。這就是「色調不統一」最大的來源。
+            // 外觀：跟隨系統／淺色／深色。⚠️ 要在組合裡讀，切換時才會重畫。
+            val mode by DataRepository.themeMode.collectAsState()
+            val sysDark = isSystemInDarkTheme()
+            val dark = when (mode) {
+                "dark" -> true
+                "light" -> false
+                else -> sysDark
+            }
+            AppColors.darkState.value = dark
+            // 深色底配深色系統列圖示會看不見
+            val view = LocalView.current
+            SideEffect {
+                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !dark
+                WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !dark
+            }
             MaterialTheme(colorScheme = appColorScheme()) {
                 Surface(color = AppColors.Background, modifier = Modifier.fillMaxSize()) {
                     RelateStatsApp()
@@ -4821,19 +4868,34 @@ class MainActivity : ComponentActivity() {
 fun appColorScheme(): ColorScheme {
     val accent = AppColors.ActiveBlue
     val brand = AppColors.BrandPrimary
-    return lightColorScheme(
-        primary = accent, onPrimary = Color.White,
-        primaryContainer = accent.copy(alpha = 0.14f), onPrimaryContainer = accent,
-        secondary = brand, onSecondary = Color.White,
-        // secondaryContainer 就是導覽列選中膠囊的底色
-        secondaryContainer = accent.copy(alpha = 0.14f), onSecondaryContainer = accent,
-        tertiary = accent, onTertiary = Color.White,
-        background = AppColors.Background, onBackground = AppColors.TextPrimary,
-        surface = AppColors.Surface, onSurface = AppColors.TextPrimary,
-        surfaceVariant = AppColors.SurfaceAlt, onSurfaceVariant = AppColors.TextSecondary,
-        outline = AppColors.BorderStrong, outlineVariant = AppColors.BorderLight,
-        error = AppColors.WorkText, onError = Color.White
-    )
+    // secondaryContainer 就是導覽列選中膠囊的底色
+    return if (AppColors.darkState.value) {
+        darkColorScheme(
+            primary = accent, onPrimary = Color.White,
+            primaryContainer = accent.copy(alpha = 0.22f), onPrimaryContainer = accent,
+            secondary = brand, onSecondary = Color.White,
+            secondaryContainer = accent.copy(alpha = 0.22f), onSecondaryContainer = accent,
+            tertiary = accent, onTertiary = Color.White,
+            background = AppColors.Background, onBackground = AppColors.TextPrimary,
+            surface = AppColors.Surface, onSurface = AppColors.TextPrimary,
+            surfaceVariant = AppColors.SurfaceAlt, onSurfaceVariant = AppColors.TextSecondary,
+            outline = AppColors.BorderStrong, outlineVariant = AppColors.BorderLight,
+            error = AppColors.WorkText, onError = Color.White
+        )
+    } else {
+        lightColorScheme(
+            primary = accent, onPrimary = Color.White,
+            primaryContainer = accent.copy(alpha = 0.14f), onPrimaryContainer = accent,
+            secondary = brand, onSecondary = Color.White,
+            secondaryContainer = accent.copy(alpha = 0.14f), onSecondaryContainer = accent,
+            tertiary = accent, onTertiary = Color.White,
+            background = AppColors.Background, onBackground = AppColors.TextPrimary,
+            surface = AppColors.Surface, onSurface = AppColors.TextPrimary,
+            surfaceVariant = AppColors.SurfaceAlt, onSurfaceVariant = AppColors.TextSecondary,
+            outline = AppColors.BorderStrong, outlineVariant = AppColors.BorderLight,
+            error = AppColors.WorkText, onError = Color.White
+        )
+    }
 }
 
 /** 這天 vs 前一天的差：(文字, 方向) 方向 1 多、-1 少、0 一樣或前一天沒有 */
@@ -5392,6 +5454,7 @@ fun MainAppContent(viewModel: RelateViewModel) {
 @Composable
 fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStartDay: Int = Calendar.MONDAY) {
     val (currentMonthCal, setCurrentMonthCal) = remember(selectedTime) { mutableStateOf(Calendar.getInstance().apply { timeInMillis = selectedTime }) }
+    val records by DataRepository.interactions.collectAsState()
 
     val year = currentMonthCal.get(Calendar.YEAR)
     val month = currentMonthCal.get(Calendar.MONTH)
@@ -5408,6 +5471,32 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
 
     val allWeekdays = listOf("日", "一", "二", "三", "四", "五", "六")
     val weekdays = List(7) { allWeekdays[(safeStart - 1 + it) % 7] }
+
+    /**
+     * 這個月哪幾天有紀錄。
+     * ⚠️ 沒有標示的話，使用者只能一天一天點進去才知道是空的 ——
+     *    尤其是剛裝 App、或中間關掉服務的那段期間。
+     * 只算真人互動（跟其他統計同一套排除規則），不然系統通知會讓每天看起來都有資料。
+     */
+    val daysWithData = remember(year, month, records) {
+        val cats = DataRepository.categories.value
+        val aliases = DataRepository.aliases.value
+        val start = Calendar.getInstance().apply {
+            set(year, month, 1, 0, 0, 0); set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val end = Calendar.getInstance().apply { timeInMillis = start; add(Calendar.MONTH, 1) }.timeInMillis
+        val out = HashSet<Int>()
+        val c = Calendar.getInstance()
+        DataRepository.interactions.value.forEach { r ->
+            if (r.timestamp in start until end &&
+                !isExcludedFromStats(aliases[r.rawSenderName] ?: r.rawSenderName, cats)
+            ) {
+                c.timeInMillis = r.timestamp
+                out.add(c.get(Calendar.DAY_OF_MONTH))
+            }
+        }
+        out
+    }
 
     Column(modifier = Modifier.fillMaxWidth().background(AppColors.Surface, RoundedCornerShape(16.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(16.dp)).padding(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -5426,6 +5515,7 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
 
         val totalCells = firstDayOfWeek + daysInMonth
         val rows = Math.ceil(totalCells / 7.0).toInt()
+        // 圖例放在格子下面（見迴圈後）
 
         for (r in 0 until rows) {
             Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceAround) {
@@ -5463,7 +5553,30 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(text = dayNumber.toString(), color = if (isSelected) Color.White else AppColors.TextPrimary, fontSize = 14.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
+                            val hasData = dayNumber in daysWithData
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = dayNumber.toString(),
+                                    // 沒紀錄的日子刻意變淡：點得進去，但一眼看得出是空的
+                                    color = when {
+                                        isSelected -> Color.White
+                                        hasData -> AppColors.TextPrimary
+                                        else -> AppColors.TextTertiary
+                                    },
+                                    fontSize = 14.sp,
+                                    fontWeight = if (isSelected || hasData) FontWeight.Bold else FontWeight.Normal
+                                )
+                                Box(
+                                    modifier = Modifier.padding(top = 2.dp).size(4.dp).clip(CircleShape)
+                                        .background(
+                                            when {
+                                                !hasData -> Color.Transparent
+                                                isSelected -> Color.White
+                                                else -> AppColors.ActiveBlue
+                                            }
+                                        )
+                                )
+                            }
                         }
                     }
                 }
@@ -11090,6 +11203,8 @@ private val USER_GUIDE = listOf(
         "7", "圖表與配色",
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
+            "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
+            "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
             "社交人格點進去可以看到全部類型與判定方式。"
         )
@@ -11724,6 +11839,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     val recapEnabled by viewModel.recapEnabled.collectAsState()
     val shotMode by viewModel.screenshotMode.collectAsState()
     val permDeclines by DataRepository.permDeclines.collectAsState()
+    val themeMode by viewModel.themeMode.collectAsState()
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -11844,6 +11960,19 @@ fun SettingsView(viewModel: RelateViewModel) {
                 }
                 SettingsDivider()
                 SettingsRow("意見回饋", "回報問題或提建議") { showFeedback = true }
+                SettingsDivider()
+                SettingsRow("分享給朋友", "把 RelateStats 傳給朋友") {
+                    val text = "RelateStats：看見你把時間花在誰身上。\n" +
+                        "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + PLAY_STORE_URL
+                    runCatching {
+                        context.startActivity(Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "RelateStats")
+                                putExtra(Intent.EXTRA_TEXT, text)
+                            }, "分享給朋友"))
+                    }
+                }
             }
         }
 
@@ -11883,6 +12012,32 @@ fun SettingsView(viewModel: RelateViewModel) {
                             fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
                     }
                     Switch(checked = recapEnabled, onCheckedChange = { viewModel.setRecapEnabled(it) })
+                }
+                SettingsDivider()
+                // 外觀：跟隨系統／淺色／深色
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("外觀", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("底色與文字；圖表配色不受影響", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
+                    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
+                        listOf("system" to "系統", "light" to "淺色", "dark" to "深色").forEach { (id, label) ->
+                            val on = themeMode == id
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                    .clickable { viewModel.setThemeMode(id) }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
+                                    color = if (on) Color.White else AppColors.TextSecondary,
+                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
+                            }
+                        }
+                    }
                 }
                 SettingsDivider()
                 Row(
@@ -12333,6 +12488,8 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, declined:
  *    原始檔仍在本專案 docs/privacy-policy.html，改完要複製到那個 repo 的 index.html。
  * ⚠️ Play Console 填的網址必須跟這裡一樣。
  */
+const val PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.relatestats.app"
+
 const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-privacy/"
 
 /** 開系統權限頁。⚠️ 一律先經過 PermissionDisclosureDialog，不要直接呼叫。 */
