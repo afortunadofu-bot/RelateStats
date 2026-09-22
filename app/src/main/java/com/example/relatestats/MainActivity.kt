@@ -12773,7 +12773,10 @@ fun SettingsView(viewModel: RelateViewModel) {
                     modifier = Modifier.padding(top = 8.dp))
                 Text(BRAND_TAGLINE, fontSize = T.Micro, color = AppColors.TextSecondary,
                     modifier = Modifier.padding(top = 2.dp))
-                Text("v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
+                // ⚠️ 版本號一定要跟品牌名稱寫在一起。
+                //    使用者回報問題時截的就是這一行，只有 "v1.0.0" 的話
+                //    看不出是哪個 App 的版本。
+                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
                     color = AppColors.TextTertiary, fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = 8.dp))
 

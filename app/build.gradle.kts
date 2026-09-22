@@ -26,8 +26,16 @@ android {
         applicationId = "com.relatestats.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 72
-        versionName = "3.48"
+        /**
+         * ⚠️ versionCode 只能往上加，而且是跨所有軌道（內部／封閉／正式）
+         *    共用同一個池子 —— 上傳過的數字永遠不能重複或回頭。
+         *    改 versionName 的編碼方式不影響它，它就是一路 +1。
+         * ⚠️ versionName 是純顯示字串，Play 不檢查。
+         *    1.0.0 起為公開發行版；在那之前的 3.x 是上架前的開發版本，
+         *    歷史保留在 docs/CHANGELOG.md，沒有刪掉。
+         */
+        versionCode = 73
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

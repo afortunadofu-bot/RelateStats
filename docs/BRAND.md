@@ -108,10 +108,15 @@ App 內的**配色**（設定 → 偏好 → 配色，`AppColors.Chart`）換的
 App 內顯示在**設定頁最下方**（`SettingsScreen` 的頁尾）：
 
 ```
+RelateStats v<版本>
+
 開發與著作權　RelateStats
 聯絡信箱　　　celine.fu.work@gmail.com
 © <年> RelateStats
 ```
+
+⚠️ **版本號旁邊一定要寫品牌名稱**（`RelateStats v1.0.0`，不是只寫 `v1.0.0`）。
+使用者回報問題時截的就是這一行，沒有名稱就看不出是哪個 App。
 
 ⚠️ 作者歸屬掛**品牌名稱**，不是個人姓名。
 ⚠️ 信箱在程式裡是 `FEEDBACK_EMAIL` 常數，同時用於意見回饋。
