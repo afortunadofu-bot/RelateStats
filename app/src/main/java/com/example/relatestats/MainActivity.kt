@@ -5570,7 +5570,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
     //    原本寫「洞察社交能量」，跟 App 其他地方、商店頁都對不起來。
     // %s 第三頁原本寫「四大分頁」而且列的是「總覽」—— 實際上有五個分頁，
     //    而且第一個叫「概況」。首次啟動就講錯名稱，使用者會找不到。
-    val titles = listOf(BRAND_TAGLINE, "資料只存在這支手機", "五個分頁在做什麼")
+    val titles = listOf(PRODUCT_TAGLINE, "資料只存在這支手機", "五個分頁在做什麼")
     val descs = listOf(
         "RelateStats 把 LINE、Messenger、Instagram、WhatsApp、Telegram、Threads 與電話的互動整理成圖表：跟誰聊最多、在哪個聊天室停留最久、什麼時段在聊。",
         "需要「通知存取」與「無障礙服務」才能開始記錄，另外可以選擇開啟「使用紀錄存取」。開啟前都會先說明讀取哪些資料、怎麼開。App 沒有網路權限，資料無法離開這支手機，開發者也看不到。",
@@ -11526,7 +11526,7 @@ private val USER_GUIDE = listOf(
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
             "設定頁最上面可以挑一張照片當頭貼。用的是 Android 的相片挑選器，不需要任何權限；挑完圖片會複製一份到 App 自己的空間，只存在這支手機，不會上傳，也不會進備份檔。截圖模式開著時頭貼會換成剪影。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
-            "設定頁捲到最下面是開發與著作權、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
+            "設定頁捲到最下面是開發與著作權（小數據所）、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
             "社交人格點進去可以看到全部類型與判定方式。"
@@ -12359,7 +12359,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsRow("功能許願區", "想要什麼功能就寫下來") { showWishlist = true }
                 SettingsDivider()
                 SettingsRow("分享給朋友", "把 RelateStats 傳給朋友") {
-                    val text = "RelateStats：$BRAND_TAGLINE。\n" +
+                    val text = "RelateStats：$PRODUCT_TAGLINE。\n" +
                         "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + PLAY_STORE_URL
                     runCatching {
                         context.startActivity(Intent.createChooser(
@@ -12762,16 +12762,18 @@ fun SettingsView(viewModel: RelateViewModel) {
              * ⚠️ 這裡是「品牌化」唯一該動的地方。
              *    識別記號、配色、啟動畫面、通知圖示、首次啟動引導頁都**不在**範圍內 ——
              *    要動那些一律先問過再動。
-             * ⚠️ 作者歸屬掛品牌名稱（不是個人姓名），信箱用 FEEDBACK_EMAIL 同一個常數，
-             *    跟商店的開發人員聯絡資訊保持一致；改信箱時記得 docs/play/SUBMISSION.md
-             *    與 docs/privacy-policy.html 也要一起改。
+             * ⚠️ 作者歸屬掛的是**品牌**「小數據所」，不是 App 名稱。
+             *    RelateStats 是產品，小數據所才是做這個產品的人／單位。
+             * ⚠️ 信箱用 FEEDBACK_EMAIL 同一個常數，跟商店的開發人員聯絡資訊保持一致；
+             *    改信箱時記得 docs/play/SUBMISSION.md 與 docs/privacy-policy.html
+             *    也要一起改。
              */
             Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 BrandMark(markSize = 40.dp)
                 Text("RelateStats", fontSize = 15.sp, fontWeight = FontWeight.Black,
                     color = AppColors.TextPrimary, letterSpacing = (-0.3).sp,
                     modifier = Modifier.padding(top = 8.dp))
-                Text(BRAND_TAGLINE, fontSize = T.Micro, color = AppColors.TextSecondary,
+                Text(PRODUCT_TAGLINE, fontSize = T.Micro, color = AppColors.TextSecondary,
                     modifier = Modifier.padding(top = 2.dp))
                 // ⚠️ 版本號一定要跟品牌名稱寫在一起。
                 //    使用者回報問題時截的就是這一行，只有 "v1.0.0" 的話
@@ -12790,7 +12792,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 ) {
                     Text("開發與著作權", fontSize = T.Micro, fontWeight = FontWeight.Black,
                         color = AppColors.TextTertiary)
-                    Text("RelateStats", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                    Text(BRAND_AUTHOR, fontSize = T.Label, fontWeight = FontWeight.Bold,
                         color = AppColors.TextPrimary, modifier = Modifier.padding(top = 2.dp))
 
                     Text("聯絡信箱", fontSize = T.Micro, fontWeight = FontWeight.Black,
@@ -12815,9 +12817,12 @@ fun SettingsView(viewModel: RelateViewModel) {
                     )
                 }
 
-                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} RelateStats",
+                // 標準署名。品牌規範：品牌只出現在署名層，這裡就是署名層。
+                Text(BRAND_SIGNATURE, fontSize = T.Micro, fontWeight = FontWeight.Medium,
+                    color = AppColors.TextSecondary, modifier = Modifier.padding(top = 12.dp))
+                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_HOUSE",
                     fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                    modifier = Modifier.padding(top = 2.dp, bottom = 4.dp))
             }
         }
     }
@@ -12975,7 +12980,28 @@ const val PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.re
  *    改一邊沒改另一邊，比沒寫還糟。
  * ⚠️ 分享文案、設定頁頁尾、首次啟動引導頁都從這裡取，不要各寫一份。
  */
-const val BRAND_TAGLINE = "看見你把時間花在誰身上"
+/**
+ * 品牌層的字串。
+ *
+ * ⚠️ 品牌是「小數據所」，不是 RelateStats。RelateStats 只是它底下的三個產品之一
+ *    （另外兩個是壽星日、Bandary）。完整規範是三個專案共用的那份 BRAND.md，
+ *    見本專案 docs/BRAND.md 指到的位置。
+ * ⚠️ 「日子有數」是**品牌** tagline；「看見你把時間花在誰身上」是 **RelateStats
+ *    這個產品**的一句話。規範明文寫「兩個不同的東西，不要混用」——
+ *    不要互換、不要合併成一句。
+ * ⚠️ 品牌只出現在三個地方：署名層（頁尾、about）、開發者層（Play 開發者名稱）、
+ *    對外帳號層（Threads、GitHub）。**不要把品牌名稱或品牌色（amber #F2A73B）
+ *    放進 App 介面**，也不要為了品牌去動 App 自己的 icon 與商店主題圖片。
+ */
+const val BRAND_HOUSE = "小數據所"
+const val BRAND_HOUSE_TAGLINE = "日子有數"
+/** 標準署名，用在頁尾 */
+const val BRAND_SIGNATURE = "小數據所 · 日子有數"
+/** 個人署名，用在作者歸屬 */
+const val BRAND_AUTHOR = "小數據所｜Celine Fu"
+
+/** ⚠️ RelateStats **這個產品**的一句話，不是品牌 tagline（見 BRAND_HOUSE_TAGLINE）。 */
+const val PRODUCT_TAGLINE = "看見你把時間花在誰身上"
 
 const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-privacy/"
 
