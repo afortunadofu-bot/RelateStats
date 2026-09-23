@@ -1246,7 +1246,7 @@ object DataRepository {
                 err.printStackTrace(java.io.PrintWriter(sw))
                 val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
                 File(ctx.filesDir, CRASH_FILE).writeText(
-                    "時間：$stamp\n版本：${BuildConfig.VERSION_NAME}\n執行緒：${thread.name}\n\n$sw"
+                    "時間：$stamp\n版本：$APP_VERSION\n執行緒：${thread.name}\n\n$sw"
                 )
             }
             prev?.uncaughtException(thread, err)
@@ -1267,7 +1267,7 @@ object DataRepository {
             err.printStackTrace(java.io.PrintWriter(sw))
             val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
             File(ctx.filesDir, CRASH_FILE).writeText(
-                "時間：$stamp\n版本：${BuildConfig.VERSION_NAME}\n位置：$tag（已接住，未閃退）\n\n$sw"
+                "時間：$stamp\n版本：$APP_VERSION\n位置：$tag（已接住，未閃退）\n\n$sw"
             )
         }
         lastErrorTag.value = tag
@@ -11841,7 +11841,7 @@ fun UserGuideScreen(onBack: () -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("使用說明", fontWeight = FontWeight.Black, fontSize = 18.sp,
                     letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
-                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = T.Micro, color = AppColors.TextTertiary)
+                Text("RelateStats v$APP_VERSION", fontSize = T.Micro, color = AppColors.TextTertiary)
             }
         }
         HorizontalDivider(color = AppColors.BorderLight)
@@ -11899,7 +11899,7 @@ fun UserGuideDialog(onDismiss: () -> Unit) {
             Column {
                 Text("使用說明", fontWeight = FontWeight.Black, fontSize = 18.sp,
                     letterSpacing = (-0.3).sp, color = AppColors.TextPrimary)
-                Text("RelateStats v${BuildConfig.VERSION_NAME}",
+                Text("RelateStats v$APP_VERSION",
                     fontSize = T.Micro, color = AppColors.TextTertiary)
             }
         },
@@ -12954,7 +12954,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 // ⚠️ 版本號一定要跟品牌名稱寫在一起。
                 //    使用者回報問題時截的就是這一行，只有 "v1.0.0" 的話
                 //    看不出是哪個 App 的版本。
-                Text("RelateStats v${BuildConfig.VERSION_NAME}", fontSize = T.Micro,
+                Text("RelateStats v$APP_VERSION", fontSize = T.Micro,
                     color = AppColors.TextTertiary, fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = 8.dp))
 
@@ -13169,6 +13169,17 @@ const val PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.re
  *    對外帳號層（Threads、GitHub）。**不要把品牌名稱或品牌色（amber #F2A73B）
  *    放進 App 介面**，也不要為了品牌去動 App 自己的 icon 與商店主題圖片。
  */
+/**
+ * 顯示用的版本字串，例：`1.0.1 (78)`。
+ *
+ * ⚠️ 一定要把 build 號（versionCode）一起寫出來。
+ *    versionName 在上架前的迭代不會每次都動，build 73 到 77 全都顯示「v1.0.0」，
+ *    使用者回報問題時根本分不出手機上裝的是哪一版，
+ *    連「你更新了沒」都沒辦法判斷。
+ * ⚠️ 崩潰報告、意見回饋、許願都要帶這個字串，不要只帶 versionName。
+ */
+val APP_VERSION: String get() = BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")"
+
 const val BRAND_HOUSE = "小數據所"
 const val BRAND_HOUSE_TAGLINE = "日子有數"
 /** 標準署名，用在頁尾 */
@@ -13476,7 +13487,7 @@ fun WishlistDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
     val deviceInfo = remember {
         "裝置：" + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL +
             "\nAndroid：" + android.os.Build.VERSION.RELEASE +
-            "\nApp：v" + BuildConfig.VERSION_NAME
+            "\nApp：v" + APP_VERSION
     }
 
     fun openUrl(url: String) {
@@ -13610,7 +13621,7 @@ fun FeedbackDialog(onDismiss: () -> Unit) {
     val deviceInfo = remember {
         "裝置：" + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL +
             "\nAndroid：" + android.os.Build.VERSION.RELEASE + "（API " + android.os.Build.VERSION.SDK_INT + "）" +
-            "\nApp：v" + BuildConfig.VERSION_NAME
+            "\nApp：v" + APP_VERSION
     }
     fun send() {
         val body = text.trim() + "\n\n———\n" + deviceInfo
