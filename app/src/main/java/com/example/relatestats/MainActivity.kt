@@ -4147,8 +4147,17 @@ class RelateViewModel : ViewModel() {
         currentAliases: Map<String, String>, availableCats: List<ContactCategory>
     ): List<SenderStat> {
         val allCalls = rs.isNotEmpty() && rs.all { it.isCall || it.isMissedCall || it.appName == "電話" }
-        return if (allCalls) getCallLeaderboard(rs, catsMap, currentAliases, availableCats)
+        val out = if (allCalls) getCallLeaderboard(rs, catsMap, currentAliases, availableCats)
         else getDynamicLeaderboard(rs, catsMap, currentAliases, availableCats)
+        /**
+         * ⚠️ 有紀錄卻算不出任何對象，代表全部被「非真人」規則濾掉了。
+         *    對使用者來說就是「卡片寫 6 筆，點下去說沒有資料」——
+         *    比誠實列出「未顯示來電者」還糟。
+         *    這種時候一律退回不做排除的版本，寧可列出看不懂的名字，
+         *    也不要讓數字跟名單對不起來。
+         */
+        return if (out.isEmpty() && rs.isNotEmpty())
+            getCallLeaderboard(rs, catsMap, currentAliases, availableCats) else out
     }
 
     /** 通話對象名單：不排除非真人名稱，抓不到來電者的歸成「未顯示來電者」 */
@@ -4457,26 +4466,14 @@ class RelateViewModel : ViewModel() {
         return out
     }
 
-    fun getCallSummary(records: List<InteractionRecord>, filter: DateFilter): CallSummary {
-        val calls = getFilteredRecords(records, filter).filter { it.isCall || it.isMissedCall || it.appName == "電話" }
-        val missed = calls.count { it.isMissedCall }
-        val answeredCalls = calls.filter { !it.isMissedCall }
-        // 只有真的帶秒數的才能拿來算平均
-        val timedCalls = answeredCalls.filter { it.durationSeconds > 0 }
-        // 未接一定是對方打來；舊資料沒有方向欄位，算進「分不出方向」而不是硬塞給某一邊
-        val incoming = calls.count { it.callDirection == 1 || (it.callDirection == 0 && it.isMissedCall) }
-        val outgoing = calls.count { it.callDirection == 2 }
-        return CallSummary(
-            total = calls.size,
-            answered = answeredCalls.size,
-            missed = missed,
-            totalSeconds = timedCalls.sumOf { it.durationSeconds.toLong() },
-            timed = timedCalls.size,
-            incoming = incoming,
-            outgoing = outgoing,
-            unknownDir = calls.size - incoming - outgoing
-        )
-    }
+    /**
+     * 通話統計（依日期篩選）。
+     * ⚠️ 實作一律放 callSummaryOf()，這裡只負責先切日期範圍。
+     *    以前這裡有一份完整實作、callSummaryOf 有一份殘缺實作，
+     *    而畫面上實際跑的是殘缺的那份 —— 見 callSummaryOf 的註解。
+     */
+    fun getCallSummary(records: List<InteractionRecord>, filter: DateFilter): CallSummary =
+        callSummaryOf(getFilteredRecords(records, filter))
 
     /** 收到訊息的字數分佈 */
     fun getLengthBuckets(records: List<InteractionRecord>, filter: DateFilter): List<Triple<String, Int, Float>> {
@@ -4893,10 +4890,38 @@ class RelateViewModel : ViewModel() {
         return (night * 100) / scoped.size
     }
 
+    /**
+     * 通話統計。**這是唯一的實作**，getCallSummary 也走這裡。
+     *
+     * ⚠️ 以前這個函式只算了總數／接通／未接／總秒數，
+     *    incoming、outgoing、unknownDir、timed 四個欄位全部吃預設值 0。
+     *    概況頁的通話卡用的就是它，於是：
+     *      「對方打來」= incoming - missed = 0 - 6 = **負數** → 被 n>0 濾掉
+     *      「我打出去」「分不出方向」= 0 → 也被濾掉
+     *    結果比例條永遠 100% 紅、永遠只剩「未接」一個標籤，
+     *    平均通話時長也永遠不顯示（timed = 0）。
+     *    分析頁另有一份完整實作，兩邊算出來的東西不一樣。
+     * ⚠️ 不要再開第二份實作。要改條件就改這裡。
+     */
     private fun callSummaryOf(scoped: List<InteractionRecord>): CallSummary {
         val calls = scoped.filter { it.isCall || it.isMissedCall || it.appName == "電話" }
         val missed = calls.count { it.isMissedCall }
-        return CallSummary(calls.size, calls.size - missed, missed, calls.sumOf { it.durationSeconds.toLong() })
+        val answered = calls.filter { !it.isMissedCall }
+        // 只有真的帶秒數的才能拿來算平均
+        val timed = answered.filter { it.durationSeconds > 0 }
+        // 未接一定是對方打來；舊資料沒有方向欄位，算進「分不出方向」而不是硬塞給某一邊
+        val incoming = calls.count { it.callDirection == 1 || (it.callDirection == 0 && it.isMissedCall) }
+        val outgoing = calls.count { it.callDirection == 2 }
+        return CallSummary(
+            total = calls.size,
+            answered = answered.size,
+            missed = missed,
+            totalSeconds = timed.sumOf { it.durationSeconds.toLong() },
+            timed = timed.size,
+            incoming = incoming,
+            outgoing = outgoing,
+            unknownDir = calls.size - incoming - outgoing
+        )
     }
 
     private fun lengthBucketsOf(scoped: List<InteractionRecord>): List<Triple<String, Int, Float>> {
@@ -11256,7 +11281,9 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
      */
     data class Seg(val label: String, val n: Int, val color: Color, val title: String, val pred: (InteractionRecord) -> Boolean)
     val segs = listOf(
-        Seg("對方打來", calls.incoming - calls.missed, pal.at(0), "打電話給我的人") { r ->
+        // ⚠️ coerceAtLeast(0)：incoming 已經含未接，相減理論上不會是負的，
+        //    但只要有一筆未接被標成「我打出去」就會變負數，四段加總就對不上比例條。
+        Seg("對方打來", (calls.incoming - calls.missed).coerceAtLeast(0), pal.at(0), "打電話給我的人") { r ->
             isCallRec(r) && !r.isMissedCall && r.callDirection == 1
         },
         Seg("我打出去", calls.outgoing, pal.at(1), "我打電話給誰") { r -> isCallRec(r) && r.callDirection == 2 },
