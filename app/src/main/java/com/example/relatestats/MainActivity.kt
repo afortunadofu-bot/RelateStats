@@ -1079,6 +1079,57 @@ object DataRepository {
     val recapMinute = MutableStateFlow(0)
 
     /**
+     * 「還沒分類的人太多了」提醒。
+     *
+     * ⚠️ 分類不是為了整齊，是為了「關係分布」那張圖有意義 ——
+     *    全部都掛在未分類的話，那張圖只會告訴你「你的時間都花在未分類身上」。
+     * ⚠️ 但這種提醒最容易變成騷擾。三道閘門：
+     *    人數要夠多（UNCLASSIFIED_MIN）、距離上次提醒要夠久（UNCLASSIFIED_COOLDOWN_DAYS）、
+     *    使用者可以直接關掉。不要為了「提高分類率」把任何一道拿掉。
+     */
+    val unclassifiedAlertEnabled = MutableStateFlow(true)
+    /** 從提醒通知點進來時設成 true，概況頁看到就直接開分類流程 */
+    val pendingClassify = MutableStateFlow(false)
+
+    const val UNCLASSIFIED_MIN = 8
+    const val UNCLASSIFIED_COOLDOWN_DAYS = 7
+
+    fun setUnclassifiedAlert(on: Boolean) {
+        unclassifiedAlertEnabled.value = on
+        prefs?.edit()?.putBoolean("unclassified_alert", on)?.apply()
+    }
+
+    /**
+     * 有幾個人「還沒分類、而且互動多到值得分類」。
+     * ⚠️ 條件要跟概況頁那張提示卡一致（未分類 + 至少 minMsgs 則訊息），
+     *    不然通知說 12 位、點進去只剩 3 位，使用者會覺得數字在亂跳。
+     */
+    fun countUnclassified(minMsgs: Int = 3): Int {
+        val cats = _categories.value
+        val al = _aliases.value
+        val counts = HashMap<String, Int>()
+        _interactions.value.forEach { r ->
+            if (!r.isIncoming || r.isCall || r.isMissedCall) return@forEach
+            val u = al[r.rawSenderName] ?: r.rawSenderName
+            if (isExcludedFromStats(u, cats)) return@forEach
+            if ((cats[u] ?: ContactCategory.OTHER.id) != ContactCategory.OTHER.id) return@forEach
+            counts[u] = (counts[u] ?: 0) + 1
+        }
+        return counts.count { it.value >= minMsgs }
+    }
+
+    /** 距離上次提醒夠久了嗎。真的要發才會把時間記下去（見 markUnclassifiedNotified） */
+    fun unclassifiedAlertDue(): Boolean {
+        val p = prefs ?: return false
+        val last = p.getLong("unclassified_notified", 0L)
+        return System.currentTimeMillis() - last >= UNCLASSIFIED_COOLDOWN_DAYS * 86_400_000L
+    }
+
+    fun markUnclassifiedNotified() {
+        prefs?.edit()?.putLong("unclassified_notified", System.currentTimeMillis())?.apply()
+    }
+
+    /**
      * 本機許願清單：自己許過什麼願、什麼時候許的（時間, 內容）。
      * ⚠️ 只存在這支手機。App 沒有網路權限，不可能把願望傳出去 ——
      *    要讓別人看到只能靠使用者自己按「寄出」或開外部許願板。
@@ -1305,6 +1356,7 @@ object DataRepository {
             if (i <= 0) null
             else line.substring(0, i).toLongOrNull()?.let { ts -> ts to line.substring(i + 1) }
         }
+        unclassifiedAlertEnabled.value = p.getBoolean("unclassified_alert", true)
         recapHour.value = p.getInt("recap_hour", 21).coerceIn(0, 23)
         recapMinute.value = p.getInt("recap_minute", 0).coerceIn(0, 59)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
@@ -2760,6 +2812,7 @@ object DataRepository {
 object DailyRecap {
     const val CHANNEL_RECAP = "relate_recap"
     const val CHANNEL_ALERT = "relate_alert"
+    const val CHANNEL_TIDY = "relate_tidy"
     private const val REQ = 8801
 
     fun ensureChannels(ctx: Context) {
@@ -2771,6 +2824,12 @@ object DailyRecap {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ALERT, "服務提醒", NotificationManager.IMPORTANCE_HIGH)
                 .apply { description = "偵測服務被系統關掉時通知你" }
+        )
+        // ⚠️ 用 LOW：這是「有空再處理」的事，不該有聲音、不該蓋在別人的通知上面。
+        //    獨立頻道也讓使用者可以只關掉這一種，不必連每日回顧一起關。
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_TIDY, "整理提醒", NotificationManager.IMPORTANCE_LOW)
+                .apply { description = "還沒分類的聯絡人太多時提醒你整理" }
         )
     }
 
@@ -2881,6 +2940,46 @@ object DailyRecap {
     }
 
     const val EXTRA_OPEN_RECAP = "open_recap"
+    const val EXTRA_OPEN_CLASSIFY = "open_classify"
+
+    /**
+     * 「還沒分類的人太多了」的提醒。
+     *
+     * ⚠️ 通知本身就要把「為什麼要分類」講完 ——
+     *    只寫「有 12 位未分類」的話，使用者只會覺得 App 在給他派工作。
+     * ⚠️ 三道閘門都要過：開關開著、人數夠多、距離上次夠久。
+     *    真的發出去才記時間，沒發不要記（否則冷卻期會被沒發生的提醒吃掉）。
+     */
+    fun notifyUnclassified(ctx: Context) {
+        if (!DataRepository.unclassifiedAlertEnabled.value) return
+        if (!DataRepository.unclassifiedAlertDue()) return
+        val n = DataRepository.countUnclassified()
+        if (n < DataRepository.UNCLASSIFIED_MIN) return
+
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        ensureChannels(ctx)
+        val open = PendingIntent.getActivity(
+            ctx, 2,
+            Intent(ctx, MainActivity::class.java)
+                .putExtra(EXTRA_OPEN_CLASSIFY, true)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val note = Notification.Builder(ctx, CHANNEL_TIDY)
+            .setSmallIcon(R.drawable.ic_stat_relate)
+            .setContentTitle("有 $n 位聯絡人還沒分類")
+            .setContentText("分好之後才看得出時間花在哪種關係上")
+            .setStyle(Notification.BigTextStyle().bigText(
+                "目前有 $n 位常聊的人還掛在「未分類」。\n\n" +
+                    "分類之後，概況頁的「關係分布」才看得出你的時間是給了伴侶、家人、朋友還是工作 —— " +
+                    "全部掛在未分類的話，那張圖只會告訴你「都花在未分類身上」。\n\n" +
+                    "點這裡會一位一位問，每位只要點一下標籤，分到一半關掉也沒關係。"
+            ))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        if (runCatching { nm.notify(9003, note) }.isSuccess) DataRepository.markUnclassifiedNotified()
+    }
 
     /**
      * 無障礙服務被關掉時提醒。
@@ -2933,6 +3032,8 @@ class RecapReceiver : BroadcastReceiver() {
             DataRepository.init(context.applicationContext)
             if (DataRepository.recapEnabled.value) DailyRecap.notifyRecap(context)
             DailyRecap.notifyServiceOff(context)
+            // 借用同一個鬧鐘檢查，不另外排程 —— 自己有冷卻期，不會天天發
+            DailyRecap.notifyUnclassified(context)
         }
         // 每晚順便更新雲端備份。備份檔可能有好幾 MB，不能在主執行緒寫。
         if (DataRepository.cloudBackupUri.value != null) {
@@ -3823,6 +3924,9 @@ class RelateViewModel : ViewModel() {
     val themeMode = DataRepository.themeMode
     fun setThemeMode(m: String) = DataRepository.setThemeMode(m)
     val pendingRecap = DataRepository.pendingRecap
+    val pendingClassify = DataRepository.pendingClassify
+    val unclassifiedAlertEnabled = DataRepository.unclassifiedAlertEnabled
+    fun setUnclassifiedAlert(on: Boolean) = DataRepository.setUnclassifiedAlert(on)
     fun setRecapEnabled(on: Boolean) = DataRepository.setRecapEnabled(on)
 
     // 預設看「單週」。預設單日的話，只要今天還沒互動就整片空白，
@@ -5003,6 +5107,9 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra(DailyRecap.EXTRA_OPEN_RECAP, false)) {
             DataRepository.pendingRecap.value = true
         }
+        if (intent.getBooleanExtra(DailyRecap.EXTRA_OPEN_CLASSIFY, false)) {
+            DataRepository.pendingClassify.value = true
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -5039,6 +5146,9 @@ class MainActivity : ComponentActivity() {
         DataRepository.init(applicationContext)
         if (intent?.getBooleanExtra(DailyRecap.EXTRA_OPEN_RECAP, false) == true) {
             DataRepository.pendingRecap.value = true
+        }
+        if (intent?.getBooleanExtra(DailyRecap.EXTRA_OPEN_CLASSIFY, false) == true) {
+            DataRepository.pendingClassify.value = true
         }
         setContent {
             // ⚠️ 以前是空的 MaterialTheme{}，等於整包吃 Material3 預設的紫色配色 ——
@@ -5647,6 +5757,9 @@ fun MainAppContent(viewModel: RelateViewModel) {
 
     // 每日報告：通知點進來、或上方「每日報告」按鈕 → 概要彈窗（可翻前後天）→ 關掉就看那天的完整分析
     val pendingRecap by viewModel.pendingRecap.collectAsState()
+    // 分類流程住在概況頁；從通知進來時先把分頁切過去，否則旗標沒人接
+    val pendingClassify by viewModel.pendingClassify.collectAsState()
+    LaunchedEffect(pendingClassify) { if (pendingClassify) setActiveTab("overview") }
     var recapDay by rememberSaveable { mutableStateOf<Long?>(null) }
     LaunchedEffect(pendingRecap) {
         if (pendingRecap) {
@@ -7847,6 +7960,15 @@ fun OverviewView(viewModel: RelateViewModel) {
     var overviewDetailTarget by remember { mutableStateOf<SenderStat?>(null) }
     var showQuickClassify by remember { mutableStateOf(false) }
     var classifyDismissed by remember { mutableStateOf(false) }
+    // 從「還沒分類」的通知點進來：直接開分類流程，不要只是把 App 叫到前景
+    val pendingClassify by viewModel.pendingClassify.collectAsState()
+    LaunchedEffect(pendingClassify) {
+        if (pendingClassify) {
+            classifyDismissed = false
+            showQuickClassify = true
+            viewModel.pendingClassify.value = false
+        }
+    }
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
 
     if (showDemoUI) {
@@ -11527,6 +11649,7 @@ private val USER_GUIDE = listOf(
             "設定頁最上面可以挑一張照片當頭貼。用的是 Android 的相片挑選器，不需要任何權限；挑完圖片會複製一份到 App 自己的空間，只存在這支手機，不會上傳，也不會進備份檔。截圖模式開著時頭貼會換成剪影。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是開發與著作權（小數據所）、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
+            "常聊的人累積到 8 位還沒分類時，App 會發一則提醒帶你去分（最多 7 天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
             "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
             "社交人格點進去可以看到全部類型與判定方式。"
@@ -11574,6 +11697,9 @@ private val USER_FAQ = listOf(
     "無障礙清單裡有兩個「RelateStats 停留時間監測」，要開哪一個？" to
         "帶「（開發版）」的那個是開發測試用的版本，正式版沒有括號 —— 要開的是沒有括號的那個。" +
         "兩個都裝著的時候如果開錯，正式版就不會記錄任何停留時間。不需要開發版的話把它解除安裝就不會再看到。",
+    "一直跳「還沒分類」的提醒，很煩。" to
+        "到「設定 → 偏好 → 未分類提醒」關掉就不會再出現。它本來就有節制：要累積到 8 位常聊的人沒分類才會發，" +
+        "而且最多 7 天一次。分類只影響「關係分布」那類依標籤拆開的統計，不分也不會少記任何資料。",
     "頭貼可以直接抓 Gmail 的照片嗎？" to
         "沒辦法。Gmail 頭貼存在 Google 的伺服器上，要抓就得讓 App 連網（或是要求讀取你的聯絡人），" +
         "而「App 沒有網路權限、資料無法離開這支手機」是這個 App 最基本的承諾，不會為了頭貼推翻它。" +
@@ -12181,6 +12307,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showKept by remember { mutableStateOf(false) }
     var showPalette by remember { mutableStateOf(false) }
     val recapEnabled by viewModel.recapEnabled.collectAsState()
+    val unclassifiedAlert by viewModel.unclassifiedAlertEnabled.collectAsState()
     val recapHour by viewModel.recapHour.collectAsState()
     val recapMinute by viewModel.recapMinute.collectAsState()
     var showRecapTime by remember { mutableStateOf(false) }
@@ -12428,6 +12555,20 @@ fun SettingsView(viewModel: RelateViewModel) {
                         Text("›", fontSize = 17.sp, color = AppColors.TextTertiary,
                             maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 6.dp))
                     }
+                }
+                SettingsDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { viewModel.setUnclassifiedAlert(!unclassifiedAlert) }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("未分類提醒", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("常聊的人累積到 ${DataRepository.UNCLASSIFIED_MIN} 位還沒分類時提醒你，最多 ${DataRepository.UNCLASSIFIED_COOLDOWN_DAYS} 天一次",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
+                    Switch(checked = unclassifiedAlert, onCheckedChange = { viewModel.setUnclassifiedAlert(it) })
                 }
                 SettingsDivider()
                 // 外觀：跟隨系統／淺色／深色
