@@ -43,7 +43,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -53,13 +52,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -1145,54 +1138,6 @@ object DataRepository {
      *    許願清單要照時間由新到舊排。欄位用 \u001E、筆數用 \u001D 分隔，
      *    使用者打得出來的字元不會撞到。
      */
-    /**
-     * 個人頭貼。
-     *
-     * ⚠️ 圖片本體**一定要當場複製**到 App 私有目錄。
-     *    相片挑選器給的 URI 只有這一次的臨時授權，存起來下次讀一定失敗。
-     * ⚠️ 存在 filesDir，不進備份字串（備份是純文字 CSV，塞圖片會整個爆掉）。
-     *    換手機還原後要重新挑一次，這點寫在常見問題裡。
-     * ⚠️ 沒有做「自動抓 Gmail 頭貼」：Gmail 頭貼在 Google 伺服器上，
-     *    要拿就得加 INTERNET（推翻整套隱私說法）或 READ_CONTACTS
-     *    （一個主打不讀聯絡人的 App 去要聯絡人權限）。改成使用者自己挑一張，
-     *    Android 的相片挑選器不需要任何權限。不要再回頭找自動抓的方法。
-     */
-    val avatarVersion = MutableStateFlow(0)
-    val hasAvatar = MutableStateFlow(false)
-
-    fun avatarFile(ctx: Context): File = File(ctx.filesDir, "avatar.jpg")
-
-    /** 回傳是否成功。⚠️ 會讀寫檔案，不要在主執行緒呼叫。 */
-    fun saveAvatar(ctx: Context, uri: Uri): Boolean {
-        val r = runCatching {
-            // 先只讀尺寸，大圖直接解碼會 OOM（相機原圖動輒四千萬畫素）
-            val probe = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, probe) }
-            var sample = 1
-            while (probe.outWidth / sample > 1024 || probe.outHeight / sample > 1024) sample *= 2
-            val src = ctx.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
-            } ?: return false
-            // 先裁成正方形再縮到 512：頭貼一律圓形顯示，先裁好就不必每次畫面再算
-            val side = minOf(src.width, src.height)
-            val square = Bitmap.createBitmap(src, (src.width - side) / 2, (src.height - side) / 2, side, side)
-            val scaled = Bitmap.createScaledBitmap(square, 512, 512, true)
-            avatarFile(ctx).outputStream().use { scaled.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-            true
-        }.getOrDefault(false)
-        if (r) {
-            hasAvatar.value = true
-            avatarVersion.value += 1
-        }
-        return r
-    }
-
-    fun clearAvatar(ctx: Context) {
-        runCatching { avatarFile(ctx).delete() }
-        hasAvatar.value = false
-        avatarVersion.value += 1
-    }
-
     val wishes = MutableStateFlow<List<Pair<Long, String>>>(emptyList())
     private const val WISH_SEP = "\u001D"
     private const val WISH_FIELD = "\u001E"
@@ -1357,8 +1302,10 @@ object DataRepository {
         weekStartDay.value = p.getInt("week_start_day", Calendar.MONDAY)
         applyChartPalette(p.getString("chart_palette", null) ?: CHART_PALETTES[0].id)
         recapEnabled.value = p.getBoolean("recap_enabled", true)
-        // loadData() 沒有 context 參數，用 init() 存下來的 appContext
-        hasAvatar.value = appContext?.let { c -> runCatching { avatarFile(c).exists() }.getOrDefault(false) } ?: false
+        // ⚠️ 「我的頭貼」功能已移除。舊版挑過照片的人，App 私有目錄裡會留下一張
+        //    再也沒有任何地方讀得到、使用者也刪不掉的 avatar.jpg，順手清掉。
+        //    相簿裡的原圖不受影響（當初只複製了一份進來）。
+        appContext?.let { c -> runCatching { File(c.filesDir, "avatar.jpg").delete() } }
         wishes.value = (p.getString("wishes", "") ?: "").split(WISH_SEP).mapNotNull { line ->
             val i = line.indexOf(WISH_FIELD)
             if (i <= 0) null
@@ -3924,7 +3871,6 @@ class RelateViewModel : ViewModel() {
     val recapEnabled = DataRepository.recapEnabled
     val recapHour = DataRepository.recapHour
     val recapMinute = DataRepository.recapMinute
-    val hasAvatar = DataRepository.hasAvatar
     val wishes = DataRepository.wishes
     fun addWish(text: String) = DataRepository.addWish(text)
     fun removeWish(ts: Long) = DataRepository.removeWish(ts)
@@ -5628,47 +5574,6 @@ fun DemoDashboardScreen(onClose: () -> Unit) {
  * ⚠️ 藍色用 #3B82F6，跟圖示與 colors.xml 的 brand_blue 同一個值。
  *    標題列原本寫的是 #2563EB，跟桌面圖示差一階 —— v3.44 統一掉。
  */
-/**
- * 個人頭貼（圓形）。沒挑過照片時顯示一個人形剪影。
- *
- * ⚠️ 截圖模式開著時一律顯示剪影。宣傳素材規定不能出現真實個資，
- *    名字都換成假名了，本人的照片當然更不能留在畫面上。
- * ⚠️ 讀檔在 IO 執行緒；avatarVersion 變動才重讀，不是每次重組都讀。
- */
-@Composable
-fun UserAvatar(markSize: Dp, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val version by DataRepository.avatarVersion.collectAsState()
-    val shot by ScreenshotMode.enabled.collectAsState()
-    val bmp by produceState<ImageBitmap?>(null, version, shot) {
-        value = if (shot) null else withContext(Dispatchers.IO) {
-            runCatching {
-                val f = DataRepository.avatarFile(context)
-                if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
-            }.getOrNull()
-        }
-    }
-    Box(
-        modifier = modifier.size(markSize).clip(CircleShape)
-            .background(AppColors.SurfaceAlt)
-            .border(1.dp, AppColors.BorderLight, CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
-        val b = bmp
-        if (b != null) {
-            Image(
-                bitmap = b, contentDescription = "我的頭貼",
-                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Icon(
-                Icons.Rounded.Person, contentDescription = "還沒有設定頭貼",
-                tint = AppColors.TextTertiary, modifier = Modifier.size(markSize * 0.55f)
-            )
-        }
-    }
-}
-
 @Composable
 fun BrandMark(markSize: Dp) {
     val dark = AppColors.darkState.value
@@ -11681,7 +11586,6 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
-            "設定頁最上面可以挑一張照片當頭貼。用的是 Android 的相片挑選器，不需要任何權限；挑完圖片會複製一份到 App 自己的空間，只存在這支手機，不會上傳，也不會進備份檔。截圖模式開著時頭貼會換成剪影。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是開發與著作權（小數據所）、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "常聊的人累積到 20 位還沒分類時，App 會發一則提醒帶你去分（最多一天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
@@ -11735,12 +11639,6 @@ private val USER_FAQ = listOf(
     "一直跳「還沒分類」的提醒，很煩。" to
         "到「設定 → 偏好 → 未分類提醒」關掉就不會再出現。它本來就有節制：要累積到 20 位常聊的人沒分類才會發，" +
         "而且最多一天一次；分掉幾個人讓數量低於 20，它自己就不會再來。分類只影響「關係分布」那類依標籤拆開的統計，不分也不會少記任何資料。",
-    "頭貼可以直接抓 Gmail 的照片嗎？" to
-        "沒辦法。Gmail 頭貼存在 Google 的伺服器上，要抓就得讓 App 連網（或是要求讀取你的聯絡人），" +
-        "而「App 沒有網路權限、資料無法離開這支手機」是這個 App 最基本的承諾，不會為了頭貼推翻它。" +
-        "想用 Gmail 頭貼的話，把那張圖存到相簿再從設定頁挑一次就好。",
-    "換手機還原備份後，頭貼不見了？" to
-        "正常。備份檔是純文字，只存互動紀錄與設定，不含圖片。在新手機的設定頁重新挑一張即可。",
     "許願區的願望會自動傳出去嗎？" to
         "不會。App 沒有網路權限，不可能自己把任何東西傳出去。按「寄出」是開你自己的郵件 App、內容也看得到，" +
         "要不要真的寄出去由你決定。願望清單只存在這支手機。",
@@ -12349,7 +12247,6 @@ fun SettingsView(viewModel: RelateViewModel) {
     val shotMode by viewModel.screenshotMode.collectAsState()
     val permDeclines by DataRepository.permDeclines.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
-    val hasAvatar by viewModel.hasAvatar.collectAsState()
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -12411,22 +12308,6 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
     }
 
-    /**
-     * 挑頭貼。
-     * ⚠️ 用相片挑選器（PickVisualMedia），**不需要任何權限** ——
-     *    不要為了頭貼去要 READ_MEDIA_IMAGES 或 READ_EXTERNAL_STORAGE。
-     * ⚠️ 挑完要馬上把圖片複製進 App 私有目錄（saveAvatar 會做），
-     *    這個 URI 的授權只有這一次。
-     */
-    val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            ioScope.launch {
-                val ok = withContext(Dispatchers.IO) { DataRepository.saveAvatar(context, uri) }
-                if (!ok) Toast.makeText(context, "讀不到這張圖片，換一張試試", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
     // 綁定雲端備份：在選擇器的儲存位置挑「雲端硬碟」建立檔案
     val cloudBindLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) {
@@ -12460,37 +12341,6 @@ fun SettingsView(viewModel: RelateViewModel) {
             //    標題自己不再帶下留白，小標的上留白也收到 8。
             Text("設定", fontWeight = FontWeight.Black, fontSize = 24.sp, letterSpacing = (-0.6).sp,
                 color = AppColors.TextPrimary, modifier = Modifier.padding(top = 4.dp))
-        }
-
-        // ── 個人頭貼 ──
-        item {
-            SettingsCard {
-                Row(
-                    modifier = Modifier.fillMaxWidth()
-                        .clickable { pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    UserAvatar(markSize = 52.dp)
-                    Column(modifier = Modifier.weight(1f).padding(start = 12.dp, end = 8.dp)) {
-                        Text("我的頭貼", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                        Text(
-                            if (hasAvatar) "點一下換一張。圖片只存在這支手機。"
-                            else "點一下從相簿挑一張。圖片只存在這支手機，不會上傳。",
-                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp
-                        )
-                    }
-                    if (hasAvatar) {
-                        Text("移除", fontSize = T.Micro, color = AppColors.WorkText,
-                            maxLines = 1, softWrap = false,
-                            modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                .clickable { DataRepository.clearAvatar(context) }
-                                .padding(horizontal = 6.dp, vertical = 4.dp))
-                    } else {
-                        Text("›", fontSize = 17.sp, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
         }
 
         // ── 服務狀態：這是全 App 最重要的一張卡，關掉就什麼都不會記錄 ──
@@ -12944,61 +12794,38 @@ fun SettingsView(viewModel: RelateViewModel) {
              *    改信箱時記得 docs/play/SUBMISSION.md 與 docs/privacy-policy.html
              *    也要一起改。
              */
-            Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                BrandMark(markSize = 40.dp)
-                Text("RelateStats", fontSize = 15.sp, fontWeight = FontWeight.Black,
-                    color = AppColors.TextPrimary, letterSpacing = (-0.3).sp,
-                    modifier = Modifier.padding(top = 8.dp))
-                Text(PRODUCT_TAGLINE, fontSize = T.Micro, color = AppColors.TextSecondary,
-                    modifier = Modifier.padding(top = 2.dp))
-                // ⚠️ 版本號一定要跟品牌名稱寫在一起。
-                //    使用者回報問題時截的就是這一行，只有 "v1.0.0" 的話
-                //    看不出是哪個 App 的版本。
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                BrandMark(markSize = 32.dp)
+                // ⚠️ 版本號一定要跟 App 名稱寫在一起，而且要帶 build 號 ——
+                //    使用者回報問題時截的就是這一行。
                 Text("RelateStats v$APP_VERSION", fontSize = T.Micro,
-                    color = AppColors.TextTertiary, fontWeight = FontWeight.Medium,
+                    color = AppColors.TextSecondary, fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = 8.dp))
-
-                Column(
-                    modifier = Modifier.fillMaxWidth()
-                        .padding(top = 14.dp, start = D.Gutter, end = D.Gutter)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(AppColors.SurfaceAlt)
-                        .padding(vertical = 12.dp, horizontal = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("開發與著作權", fontSize = T.Micro, fontWeight = FontWeight.Black,
-                        color = AppColors.TextTertiary)
-                    Text(BRAND_AUTHOR, fontSize = T.Label, fontWeight = FontWeight.Bold,
-                        color = AppColors.TextPrimary, modifier = Modifier.padding(top = 2.dp))
-
-                    Text("聯絡信箱", fontSize = T.Micro, fontWeight = FontWeight.Black,
-                        color = AppColors.TextTertiary, modifier = Modifier.padding(top = 12.dp))
-                    // 點一下直接開郵件 App；沒有郵件 App 就把信箱複製起來，
-                    // 跟意見回饋同一套退路（App 沒有網路權限，不可能自己送出）
-                    Text(
-                        FEEDBACK_EMAIL, fontSize = T.Label, fontWeight = FontWeight.Bold,
-                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
-                        modifier = Modifier.padding(top = 2.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL))
-                                    .putExtra(Intent.EXTRA_SUBJECT, "RelateStats")
-                                if (runCatching { context.startActivity(mail) }.isFailure) {
-                                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
-                                        ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 信箱", FEEDBACK_EMAIL))
-                                    Toast.makeText(context, "找不到郵件 App，信箱已複製", Toast.LENGTH_SHORT).show()
-                                }
+                // 作者歸屬掛品牌名稱（小數據所），不是 App 名稱
+                Text(BRAND_AUTHOR, fontSize = T.Micro, color = AppColors.TextTertiary,
+                    modifier = Modifier.padding(top = 4.dp))
+                // 點一下直接開郵件 App；沒有郵件 App 就把信箱複製起來，
+                // 跟意見回饋同一套退路（App 沒有網路權限，不可能自己送出）
+                Text(
+                    FEEDBACK_EMAIL, fontSize = T.Micro, fontWeight = FontWeight.Medium,
+                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                    modifier = Modifier.padding(top = 2.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable {
+                            val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL))
+                                .putExtra(Intent.EXTRA_SUBJECT, "RelateStats")
+                            if (runCatching { context.startActivity(mail) }.isFailure) {
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+                                    ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 信箱", FEEDBACK_EMAIL))
+                                Toast.makeText(context, "找不到郵件 App，信箱已複製", Toast.LENGTH_SHORT).show()
                             }
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-
-                // 標準署名。品牌規範：品牌只出現在署名層，這裡就是署名層。
-                Text(BRAND_SIGNATURE, fontSize = T.Micro, fontWeight = FontWeight.Medium,
-                    color = AppColors.TextSecondary, modifier = Modifier.padding(top = 12.dp))
-                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_HOUSE",
+                        }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                // 版權與標準署名併成一行，省掉一個列高
+                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_SIGNATURE",
                     fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(top = 2.dp, bottom = 4.dp))
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
             }
         }
     }
