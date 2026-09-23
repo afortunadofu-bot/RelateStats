@@ -1091,8 +1091,8 @@ object DataRepository {
     /** 從提醒通知點進來時設成 true，概況頁看到就直接開分類流程 */
     val pendingClassify = MutableStateFlow(false)
 
-    const val UNCLASSIFIED_MIN = 8
-    const val UNCLASSIFIED_COOLDOWN_DAYS = 7
+    const val UNCLASSIFIED_MIN = 20
+    const val UNCLASSIFIED_COOLDOWN_DAYS = 1
 
     fun setUnclassifiedAlert(on: Boolean) {
         unclassifiedAlertEnabled.value = on
@@ -1118,11 +1118,19 @@ object DataRepository {
         return counts.count { it.value >= minMsgs }
     }
 
-    /** 距離上次提醒夠久了嗎。真的要發才會把時間記下去（見 markUnclassifiedNotified） */
+    /**
+     * 距離上次提醒夠久了嗎。真的要發才會把時間記下去（見 markUnclassifiedNotified）。
+     *
+     * ⚠️ 要扣 3 小時的容差，跟雲端備份同一個道理：
+     *    鬧鐘是 setWindow（一小時的窗），兩次觸發之間可能只隔 23 小時多一點。
+     *    嚴格比對「滿 N 天」的話會差那幾十分鐘而跳過，
+     *    設定 1 天實際會變成兩天發一次。
+     */
     fun unclassifiedAlertDue(): Boolean {
         val p = prefs ?: return false
         val last = p.getLong("unclassified_notified", 0L)
-        return System.currentTimeMillis() - last >= UNCLASSIFIED_COOLDOWN_DAYS * 86_400_000L
+        return System.currentTimeMillis() - last >=
+            UNCLASSIFIED_COOLDOWN_DAYS * 86_400_000L - 3 * 3_600_000L
     }
 
     fun markUnclassifiedNotified() {
@@ -11649,7 +11657,7 @@ private val USER_GUIDE = listOf(
             "設定頁最上面可以挑一張照片當頭貼。用的是 Android 的相片挑選器，不需要任何權限；挑完圖片會複製一份到 App 自己的空間，只存在這支手機，不會上傳，也不會進備份檔。截圖模式開著時頭貼會換成剪影。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是開發與著作權（小數據所）、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
-            "常聊的人累積到 8 位還沒分類時，App 會發一則提醒帶你去分（最多 7 天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
+            "常聊的人累積到 20 位還沒分類時，App 會發一則提醒帶你去分（最多一天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
             "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
             "社交人格點進去可以看到全部類型與判定方式。"
@@ -11698,8 +11706,8 @@ private val USER_FAQ = listOf(
         "帶「（開發版）」的那個是開發測試用的版本，正式版沒有括號 —— 要開的是沒有括號的那個。" +
         "兩個都裝著的時候如果開錯，正式版就不會記錄任何停留時間。不需要開發版的話把它解除安裝就不會再看到。",
     "一直跳「還沒分類」的提醒，很煩。" to
-        "到「設定 → 偏好 → 未分類提醒」關掉就不會再出現。它本來就有節制：要累積到 8 位常聊的人沒分類才會發，" +
-        "而且最多 7 天一次。分類只影響「關係分布」那類依標籤拆開的統計，不分也不會少記任何資料。",
+        "到「設定 → 偏好 → 未分類提醒」關掉就不會再出現。它本來就有節制：要累積到 20 位常聊的人沒分類才會發，" +
+        "而且最多一天一次；分掉幾個人讓數量低於 20，它自己就不會再來。分類只影響「關係分布」那類依標籤拆開的統計，不分也不會少記任何資料。",
     "頭貼可以直接抓 Gmail 的照片嗎？" to
         "沒辦法。Gmail 頭貼存在 Google 的伺服器上，要抓就得讓 App 連網（或是要求讀取你的聯絡人），" +
         "而「App 沒有網路權限、資料無法離開這支手機」是這個 App 最基本的承諾，不會為了頭貼推翻它。" +
