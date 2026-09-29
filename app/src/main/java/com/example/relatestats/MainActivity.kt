@@ -522,7 +522,22 @@ fun normalizeContactName(raw: String): String {
 private val NON_PERSON_PATTERNS = listOf(
     Regex("^\\d+\\+?\\s*(位|個|則)?\\s*新?(的)?(讚|追蹤者|粉絲|留言|通知|互動|訊息邀請)"),
     Regex("(的串文|的貼文|的限時動態|的近況|開始追蹤你|追蹤了你|正在直播|開始直播|標註了你|提到了你|對你的貼文|新增了|優惠|折扣|限時搶|活動通知|官方帳號)"),
-    Regex("^(LINE TODAY|LINE 貼文串|Instagram|Threads|Facebook|Messenger)$", RegexOption.IGNORE_CASE)
+    Regex("^(LINE TODAY|LINE 貼文串|Instagram|Threads|Facebook|Messenger)$", RegexOption.IGNORE_CASE),
+    // ⚠️ 以下是社群「動態牆推播」的固定句型。它們會被當成聯絡人名稱收進來，
+    //    一週就累積上百個，使用者得手動一個個勾起來刪。
+    //    這些規則只把它們歸到「系統通知」標籤，不刪資料，判錯了隨時改得回來。
+    // 「ee_days 於 50 分鐘前發佈了 1 則貼文」「mollycute 發佈了貼文」
+    Regex("(發[佈布]了|發文了)"),
+    // 「xxx 的 Reel。點按兩下可以說讚」
+    Regex("(的\\s*Reels?\\b|點按兩下|輕觸兩下)", RegexOption.IGNORE_CASE),
+    // 「來自 Threads」這種來源標籤
+    Regex("^來自\\s"),
+    // 只有日期的標題：「8月27日」「12/25」
+    Regex("^\\d{1,2}[月/]\\d{1,2}日?$"),
+    // 「主功能表, 1 則未讀聊天訊息」這種介面摘要
+    Regex("(未讀聊天訊息|主功能表)"),
+    // 「分享 611」這種介面字加數字
+    Regex("^分享\\s*\\d+$")
 )
 
 /**
@@ -543,6 +558,8 @@ private val UI_LABEL_NAMES = setOf(
     // ⚠️ 只放「不可能有人叫這個名字」的字。像「回覆」「社群」這種兩字詞很安全，
     //    但不要放「小明」「阿姨」這類可能是暱稱的字。
     "回覆", "社群", "返回首頁", "關閉瀏覽器", "功能表", "相片預覽", "洞察報告",
+    // IG／Threads 動態牆的介面字，實際被收成「聯絡人」過
+    "追蹤對象和粉絲", "自訂動態消息", "動態消息", "主功能表", "來自 threads", "來自 instagram",
     "更多選項", "上一頁", "下一頁", "開啟", "展開", "收合", "選取", "全選",
     "播放", "暫停", "靜音", "新增", "草稿", "已讀", "輸入中", "表情符號",
     "相簿", "檔案", "位置資訊", "搜尋訊息", "封鎖", "檢舉", "說明", "隱私權", "服務條款"
@@ -653,7 +670,10 @@ private val JUNK_WORD_MARKERS = listOf(
     //    「標註」「註您」「您的」「訊息」「內容」…… 沒有一個含有上面舊的標記字串，
     //    所以清理完全清不到。清理用的標記必須跟得上過濾規則。
     "標註", "傳達", "按了", "回覆", "回應", "提及", "動態", "訊息", "內容", "留言",
-    "貼上", "撤銷", "已傳", "新增了", "查看全部", "訊息要求"
+    "貼上", "撤銷", "已傳", "新增了", "查看全部", "訊息要求",
+    // ⚠️ 社群動態牆的推播留下的碎片。以前這些推播的「發話者」沒被判成非真人，
+    //    所以整段推播文都被切成 n-gram 存進常用詞。
+    "發佈", "發布", "點按", "兩下", "粉絲", "追蹤對象", "動態消息", "功能表", "未讀"
 )
 private val JUNK_WORD_EXACT: Set<String> by lazy {
     // 這份語料要涵蓋 SYSTEM_PHRASE / SYSTEM_HINT 擋得住的每一種句型，
@@ -666,7 +686,10 @@ private val JUNK_WORD_EXACT: Set<String> by lazy {
         "標註您的訊息內容", "標註你的訊息內容", "已傳送貼圖", "對你的訊息按了讚",
         "對您的訊息按了", "傳達了", "已傳達了", "已回覆了你的限時動態",
         "回覆了你的限時動態", "回應了你的限時動態", "提及了你", "在留言中提到你",
-        "拍了拍你", "邀請你加入", "開始追蹤你", "查看全部訊息", "訊息要求"
+        "拍了拍你", "邀請你加入", "開始追蹤你", "查看全部訊息", "訊息要求",
+        // 動態牆推播的固定句型
+        "於 3 小時前發佈了", "分鐘前發佈了", "發佈了貼文", "發佈了 1 則貼文",
+        "點按兩下可以說讚", "追蹤對象和粉絲", "自訂動態消息", "則未讀聊天訊息"
     )
     val out = HashSet<String>()
     corpus.forEach { c -> for (n in 2..4) for (i in 0..c.length - n) out.add(c.substring(i, i + n)) }
@@ -3232,9 +3255,18 @@ class RelateNotificationService : NotificationListenerService() {
                 if (msg.time > newest) newest = msg.time
                 if (isNoise(msg.text)) return@forEach
                 val speaker = msg.sender?.trim()?.takeIf { it.isNotBlank() }
-                val grp = isGroupFlag || lineGroup(convName, speaker)
+                /**
+                 * ⚠️ LINE 社群（OpenChat）與部分群組的通知**不帶** android.conversationTitle，
+                 *    這時社群名稱就在通知標題裡。以前只看 convName，convName 是 null 就
+                 *    退回用發話者當歸戶對象 —— 於是整個社群被拆成一個個「聯絡人」，
+                 *    而不是一個社群。
+                 * ⚠️ 標題跟發話者相同時代表一對一（LINE 私訊的標題就是對方名字），
+                 *    這種情況 lineGroup() 會回 false，不受影響。
+                 */
+                val roomName = convName ?: baseTitle.trim().takeIf { it.isNotBlank() }
+                val grp = isGroupFlag || lineGroup(roomName, speaker)
                 // 群組才用對話名當歸戶對象；一對一一律用實際發話者
-                val senderName = if (grp && convName != null) convName else (speaker ?: convName ?: baseTitle)
+                val senderName = if (grp && roomName != null) roomName else (speaker ?: roomName ?: baseTitle)
                 val subSender = if (grp) speaker else null
                 addMessage(appName, senderName, subSender, msg.text, grp, msg.time)
                 handled++
@@ -4105,6 +4137,22 @@ class RelateViewModel : ViewModel() {
         return if (out.isEmpty() && rs.isNotEmpty())
             getCallLeaderboard(rs, catsMap, currentAliases, availableCats) else out
     }
+
+    /**
+     * 下鑽對話框用：把挑出來的通話依「歸戶後的名字」分組，好列出每一通的時長。
+     *
+     * ⚠️ 歸戶規則必須跟 getCallLeaderboard 一模一樣（含把抓不到來電者的
+     *    改成「未顯示來電者」），否則 key 對不上 SenderStat.unifiedName，
+     *    明細就會整段不見。
+     */
+    fun groupCallsByPerson(
+        rs: List<InteractionRecord>, currentAliases: Map<String, String>
+    ): Map<String, List<InteractionRecord>> =
+        rs.filter { it.isCall || it.isMissedCall || it.appName == "電話" }
+            .groupBy {
+                val u = currentAliases[it.rawSenderName] ?: it.rawSenderName
+                if (u.isBlank() || isNonPersonContact(u)) "未顯示來電者" else u
+            }
 
     /** 通話對象名單：不排除非真人名稱，抓不到來電者的歸成「未顯示來電者」 */
     fun getCallLeaderboard(rs: List<InteractionRecord>, catsMap: Map<String, String>, currentAliases: Map<String, String>, availableCats: List<ContactCategory>): List<SenderStat> {
@@ -6131,7 +6179,17 @@ fun TimeFilterSelector(
 }
 
 @Composable
-fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -> Unit) {
+fun OverviewDetailDialog(
+    title: String,
+    stats: List<SenderStat>,
+    /**
+     * 這批下鑽結果裡，每個人各自的通話紀錄（key = SenderStat.unifiedName）。
+     * ⚠️ 空的時候整個「每一通」區塊不出現 —— 訊息類的下鑽本來就沒有通話可列。
+     */
+    callsByPerson: Map<String, List<InteractionRecord>> = emptyMap(),
+    onDismiss: () -> Unit
+) {
+    val callFmt = remember { SimpleDateFormat("M/d HH:mm", Locale.US) }
     AlertDialog(
         containerColor = AppColors.Surface, onDismissRequest = onDismiss,
         title = { Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -6145,12 +6203,83 @@ fun OverviewDetailDialog(title: String, stats: List<SenderStat>, onDismiss: () -
                             Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                 Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                     Text(stat.unifiedName, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    val mins = stat.totalDurationSeconds / 60
-                                    val secs = stat.totalDurationSeconds % 60
-                                    Text("💬 ${stat.msgCount} 則 · 📞 ${stat.callCount} 通 · ⏳ $mins 分 $secs 秒", fontSize = T.Label, color = AppColors.TextSecondary, modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    /**
+                                     * ⚠️ 以前這一行的「⏳」寫的是 totalDurationSeconds ——
+                                     *    那是**聊天室停留時間＋通話時間**的總和。
+                                     *    在「通話對象」的名單裡看到一個比通話還大的數字，
+                                     *    使用者只會以為通話時長算錯了。
+                                     *    拆成「通話」與「停留」兩個數字，各自講清楚。
+                                     */
+                                    val stayed = (stat.totalDurationSeconds - stat.callDurationSeconds).coerceAtLeast(0L)
+                                    val parts = buildList {
+                                        if (stat.msgCount > 0) add("💬 ${stat.msgCount} 則")
+                                        if (stat.callCount > 0) add("📞 ${stat.callCount} 通 " + formatDuration(stat.callDurationSeconds))
+                                        if (stayed > 0) add("⏳ 停留 " + formatDuration(stayed))
+                                    }
+                                    Text(parts.joinToString(" · ").ifBlank { "沒有互動" },
+                                        fontSize = T.Label, color = AppColors.TextSecondary,
+                                        modifier = Modifier.padding(top = 2.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
                                 Box(modifier = Modifier.tagChip(stat.category, 4.dp).padding(horizontal = 6.dp, vertical = 2.dp)) {
                                     Text(stat.category.label, color = stat.category.color, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+
+                            /**
+                             * 每一通的時長。預設收起，點一下展開。
+                             * ⚠️ 只列最近 30 通：通話多的人一展開就是幾百列，
+                             *    對話框會卡住，而且看不完。
+                             */
+                            val myCalls = callsByPerson[stat.unifiedName].orEmpty()
+                            if (myCalls.isNotEmpty()) {
+                                var callsOpen by remember(stat.unifiedName) { mutableStateOf(false) }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = AppColors.BorderLight)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { callsOpen = !callsOpen },
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("每一通的時長（${myCalls.size}）", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                        color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f))
+                                    Icon(
+                                        if (callsOpen) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                                        contentDescription = if (callsOpen) "收合" else "展開",
+                                        tint = AppColors.ActiveBlue, modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                if (callsOpen) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    myCalls.sortedByDescending { it.timestamp }.take(30).forEach { c ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                callFmt.format(Date(c.timestamp)) + " · " +
+                                                    (if (c.isMissedCall) "未接" else callDirectionLabel(c)),
+                                                fontSize = T.Micro, color = AppColors.TextSecondary,
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f).padding(end = 8.dp)
+                                            )
+                                            // 未接沒有秒數；接通但抓不到秒數的寫「沒抓到秒數」，不要顯示 0s 讓人以為是零秒
+                                            Text(
+                                                when {
+                                                    c.isMissedCall -> "—"
+                                                    c.durationSeconds > 0 -> formatDuration(c.durationSeconds)
+                                                    else -> "沒抓到秒數"
+                                                },
+                                                fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                                color = if (c.durationSeconds > 0) AppColors.ActiveBlue else AppColors.TextTertiary,
+                                                maxLines = 1, softWrap = false
+                                            )
+                                        }
+                                    }
+                                    if (myCalls.size > 30) {
+                                        Text("只列最近 30 通", fontSize = T.Micro, color = AppColors.TextTertiary,
+                                            modifier = Modifier.padding(top = 4.dp))
+                                    }
                                 }
                             }
 
@@ -7381,6 +7510,8 @@ fun InsightsView(viewModel: RelateViewModel) {
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     // 圖表點下去要看得到「是哪些人」，不能只給一個總數
     var drill by remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
+    // 下鑽結果裡每個人的通話紀錄，給對話框列出「每一通多久」
+    var drillCalls by remember { mutableStateOf<Map<String, List<InteractionRecord>>>(emptyMap()) }
     val wordFreq by viewModel.wordFreq.collectAsState()
     val wordSenders by viewModel.wordSenders.collectAsState()
     val secOrder by viewModel.sectionOrder.collectAsState()
@@ -7397,6 +7528,7 @@ fun InsightsView(viewModel: RelateViewModel) {
     /** 從目前篩選範圍內挑出符合條件的紀錄，算成排行後開對話框 */
     fun drillInto(title: String, predicate: (InteractionRecord) -> Boolean) {
         val rs = viewModel.getFilteredRecords(records, filter).filter(predicate)
+        drillCalls = viewModel.groupCallsByPerson(rs, aliases)
         drill = title to viewModel.getDrillLeaderboard(rs, categoriesMap, aliases, availableCats)
     }
 
@@ -7420,7 +7552,7 @@ fun InsightsView(viewModel: RelateViewModel) {
     }
 
     drill?.let { (title, stats) ->
-        OverviewDetailDialog(title = title, stats = stats) { drill = null }
+        OverviewDetailDialog(title = title, stats = stats, callsByPerson = drillCalls) { drill = null }
     }
 
     if (showSectionEditor) {
@@ -7887,10 +8019,13 @@ fun OverviewView(viewModel: RelateViewModel) {
 
     val (showPersonaInfo, setShowPersonaInfo) = remember { mutableStateOf(false) }
     val (activeDetailDialog, setActiveDetailDialog) = remember { mutableStateOf<Pair<String, List<SenderStat>>?>(null) }
+    // 下鑽結果裡每個人的通話紀錄，給對話框列出「每一通多久」
+    var drillCalls by remember { mutableStateOf<Map<String, List<InteractionRecord>>>(emptyMap()) }
 
     // 構成卡片共用的下鑽：挑出符合條件的紀錄，算成排行後開對話框
     val overviewDrill: (String, (InteractionRecord) -> Boolean) -> Unit = { title, pred ->
         val rs = filteredRecords.filter(pred)
+        drillCalls = viewModel.groupCallsByPerson(rs, aliases)
         setActiveDetailDialog(title to viewModel.getDrillLeaderboard(rs, categoriesMap, aliases, availableCats))
     }
     val (showDemoUI, setShowDemoUI) = remember { mutableStateOf(false) }
@@ -8269,6 +8404,7 @@ fun OverviewView(viewModel: RelateViewModel) {
         OverviewDetailDialog(
             title = activeDetailDialog!!.first,
             stats = activeDetailDialog!!.second,
+            callsByPerson = drillCalls,
             onDismiss = { setActiveDetailDialog(null) }
         )
     }
@@ -10013,8 +10149,14 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         MergeTargetDialog(
             source = source,
             candidates = unifiedNamesList.filter { it != source && (aliases[it] ?: it) != source },
-            // 合併完直接打開「帳號與名稱」，讓使用者當場挑要用哪個名字
-            onPick = { target -> viewModel.mergeContact(source, target); mergeSource = null; accountsTarget = target },
+            // ⚠️ 方向是「把勾選的帳號併進 source」，所以 source 的名字會留下來 ——
+            //    這才符合按鈕寫的「綁定其他帳號到這個人」。
+            //    合併完留在「帳號與名稱」，讓使用者當場確認綁了哪些。
+            onPick = { targets ->
+                targets.forEach { viewModel.mergeContact(it, source) }
+                mergeSource = null
+                accountsTarget = source
+            },
             onDismiss = { mergeSource = null }
         )
     }
@@ -10317,10 +10459,19 @@ fun ContactAccountsDialog(
     )
 }
 
-/** 可搜尋的合併對象選擇器 */
+/**
+ * 綁定帳號：可搜尋、可複選。
+ *
+ * ⚠️ 方向是「把勾選的帳號併進 target」，不是反過來。
+ *    以前是單選而且方向相反（把 target 併進你挑的那個），
+ *    所以按了「綁定其他帳號到這個人」之後，顯示名稱會變成對方的名字。
+ * ⚠️ 一次只能綁一個是這個畫面最大的痛點：同一個人常常有五、六個帳號
+ *    （LINE、IG、Messenger…），一次一個要重複開五次對話框。
+ */
 @Composable
-fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (List<String>) -> Unit, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
+    val picked = remember { mutableStateListOf<String>() }
     val filtered = remember(query, candidates) {
         if (query.isBlank()) candidates else candidates.filter { it.contains(query, ignoreCase = true) }
     }
@@ -10329,8 +10480,8 @@ fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (String)
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text("合併「$source」", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("選擇要併入的主帳號", fontSize = 12.sp, color = AppColors.TextSecondary)
+                Text("綁定帳號到「$source」", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("勾選要併進來的帳號，可以複選", fontSize = 12.sp, color = AppColors.TextSecondary)
             }
         },
         text = {
@@ -10348,8 +10499,16 @@ fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (String)
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
                         items(filtered, key = { it }) { name ->
-                            Row(modifier = Modifier.fillMaxWidth().clickable { onPick(name) }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val on = name in picked
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable { if (on) picked.remove(name) else picked.add(name) }
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = on, onCheckedChange = { if (on) picked.remove(name) else picked.add(name) })
+                                Text(name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                             }
                             HorizontalDivider(color = AppColors.BorderLight)
                         }
@@ -10357,7 +10516,14 @@ fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (String)
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+        confirmButton = {
+            Button(
+                onClick = { onPick(picked.toList()) }, enabled = picked.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text(if (picked.isEmpty()) "綁定" else "綁定 ${picked.size} 個", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
     )
 }
 
@@ -11215,6 +11381,12 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
                 maxLines = 1, softWrap = false)
             Text(" 通", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
                 modifier = Modifier.padding(bottom = 4.dp))
+            // 總時長擺在通數旁邊：平均沒有總量有感，「這週講掉三小時」才是重點
+            if (calls.hasDuration) {
+                Text("　共 " + formatDuration(calls.totalSeconds), fontSize = T.Body,
+                    fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                    maxLines = 1, softWrap = false, modifier = Modifier.padding(bottom = 4.dp))
+            }
             Spacer(modifier = Modifier.weight(1f))
             Text("點看是誰 ›", fontSize = T.Micro, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
                 modifier = Modifier.padding(bottom = 6.dp))
@@ -11252,6 +11424,13 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
                     )
                 }
             }
+        }
+        // ⚠️ 總時長只加得到「抓得到秒數」的通話。沒講的話使用者會拿總時長去對
+        //    「22 通 × 平均」，發現對不起來。差多少直接寫出來。
+        if (calls.hasDuration && calls.timed < calls.answered) {
+            Text("有 ${calls.answered - calls.timed} 通接通了但抓不到秒數，沒算進總時長與平均。",
+                fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 8.dp))
         }
         if (calls.unknownDir > 0) {
             Text("「分不出方向」多半是 v3.31 以前的紀錄，或通話結束的通知沒寫是誰打的。",
@@ -11556,6 +11735,7 @@ private val USER_GUIDE = listOf(
             "同一個人在不同平台會被當成不同帳號。點聯絡人 →「帳號與名稱」可以把其他帳號綁到這個人身上，之後統計會合併計算。",
             "在「帳號與名稱」裡看得到這個人綁了哪些帳號，可以挑其中一個按「用這個名字」，或按顯示名稱旁的藍色「✎ 自訂暱稱」自己打。改名只影響本 App，不會動到 LINE 或 IG。",
             "帳號名稱太長被切掉時，長按（或點一下）名字就會展開全名，再按一次收回。",
+            "按「＋ 綁定其他帳號到這個人」可以一次勾選多個帳號，按鈕會顯示「綁定 N 個」。綁進來之後，你目前看的這個人的名字會留著。",
             "綁錯了按「取消綁定」，那個帳號會變回獨立的聯絡人，紀錄跟著它走，不會遺失。",
             "卡片上寫「已合併 N 個帳號 ›」的那一行也可以直接點開。長按聯絡人可以多選，批次設定標籤或刪除。"
         )
@@ -11586,6 +11766,7 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
+            "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是開發與著作權（小數據所）、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "常聊的人累積到 20 位還沒分類時，App 會發一則提醒帶你去分（最多一天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
