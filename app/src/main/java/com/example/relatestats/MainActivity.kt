@@ -11798,7 +11798,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
-            "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
+            "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是小數據所的品牌區：同一個人做的三個工具（壽星日、Bandary、RelateStats）、封閉測試報名連結、聯絡信箱與版本號。連結是交給瀏覽器開的，App 本身沒有網路權限。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
@@ -12584,9 +12584,19 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsDivider()
                 SettingsRow("功能許願區", "想要什麼功能就寫下來") { showWishlist = true }
                 SettingsDivider()
-                SettingsRow("分享給朋友", "把 RelateStats 傳給朋友") {
-                    val text = "RelateStats：$PRODUCT_TAGLINE。\n" +
-                        "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + PLAY_STORE_URL
+                SettingsRow(
+                    "分享給朋友",
+                    if (IN_CLOSED_BETA) "封測期間分享的是報名表" else "把 RelateStats 傳給朋友"
+                ) {
+                    // ⚠️ 封測期間分享報名表，不是 Play 連結（見 IN_CLOSED_BETA）
+                    val text = if (IN_CLOSED_BETA)
+                        "RelateStats：$PRODUCT_TAGLINE。\n" +
+                            "訊息、停留時間、每日報告一次看完，資料只存在自己的手機 —— " +
+                            "這個 App 沒有網路權限，傳不出去。\n\n" +
+                            "現在還在上架前的封閉測試，這是報名表：\n" + RELATESTATS_BETA_URL
+                    else
+                        "RelateStats：$PRODUCT_TAGLINE。\n" +
+                            "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + PLAY_STORE_URL
                     runCatching {
                         context.startActivity(Intent.createChooser(
                             Intent(Intent.ACTION_SEND).apply {
@@ -13296,6 +13306,17 @@ const val BRAND_POSITIONING = "把沒人在記的生活，變成你看得懂的�
 const val SHOUXINGRI_URL = "https://birthdaydeals.celine-fu-work.workers.dev/"
 const val RELATESTATS_BETA_URL = "https://forms.gle/6HT4LzRSsPA76b6s7"
 const val BANDARY_BETA_URL = "https://forms.gle/FhBJgWBWb72MCg5x5"
+
+/**
+ * 還在封閉測試嗎。
+ *
+ * ⚠️ 封測期間「分享給朋友」不能分享 Play 連結 ——
+ *    商店頁還沒過審，朋友點進去只會看到「找不到這個頁面」。
+ *    這種第一印象比沒分享還糟。改成分享封測報名表。
+ * ⚠️ 商店頁上線後把這裡改成 false，分享就自動換回 Play 連結。
+ *    只有這一個開關，不要在別的地方再判斷一次。
+ */
+const val IN_CLOSED_BETA = true
 
 /** ⚠️ RelateStats **這個產品**的一句話，不是品牌 tagline（見 BRAND_HOUSE_TAGLINE）。 */
 const val PRODUCT_TAGLINE = "看見你把時間花在誰身上"
