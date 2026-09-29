@@ -5622,6 +5622,39 @@ fun DemoDashboardScreen(onClose: () -> Unit) {
  * ⚠️ 藍色用 #3B82F6，跟圖示與 colors.xml 的 brand_blue 同一個值。
  *    標題列原本寫的是 #2563EB，跟桌面圖示差一階 —— v3.44 統一掉。
  */
+/**
+ * 小數據所的 4x4 點陣記號。
+ *
+ * ⚠️ 這是**品牌**的記號，跟 RelateStats 自己的三圓記號（BrandMark）是兩個東西。
+ *    它只出現在署名層（設定頁品牌區），不要拿去當 App 圖示或放進其他畫面。
+ * ⚠️ 點位是品牌規範定死的，**不要重畫、不要改點位**：
+ *      . W . A
+ *      W A . .
+ *      . . A W
+ *      A . W .
+ * ⚠️ 琥珀色固定；白點與暗點跟著深淺模式走，才不會在淺色底上看不見
+ *    （網站頁尾在白底上也是這樣處理）。
+ */
+@Composable
+fun HouseMark(markSize: Dp) {
+    val rows = listOf(".W.A", "WA..", "..AW", "A.W.")
+    Canvas(modifier = Modifier.size(markSize)) {
+        val step = size.minDimension / 4f
+        val r = step * 0.30f
+        rows.forEachIndexed { row, line ->
+            line.forEachIndexed { col, ch ->
+                val c = when (ch) {
+                    'A' -> Color(0xFFF2A73B)
+                    'W' -> AppColors.TextPrimary
+                    else -> AppColors.TextPrimary.copy(alpha = 0.22f)
+                }
+                drawCircle(color = c, radius = r,
+                    center = Offset(step * (col + 0.5f), step * (row + 0.5f)))
+            }
+        }
+    }
+}
+
 @Composable
 fun BrandMark(markSize: Dp) {
     val dark = AppColors.darkState.value
@@ -11768,7 +11801,7 @@ private val USER_GUIDE = listOf(
             "「設定 → 分享給朋友」會把 App 的 Play 商店連結傳出去。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
-            "設定頁捲到最下面是開發與著作權（小數據所）、聯絡信箱與版本號。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
+            "設定頁捲到最下面是小數據所的品牌區：同一個人做的三個工具（壽星日、Bandary、RelateStats）、封閉測試報名連結、聯絡信箱與版本號。連結是交給瀏覽器開的，App 本身沒有網路權限。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "常聊的人累積到 20 位還沒分類時，App 會發一則提醒帶你去分（最多一天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
             "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
             "「設定 → 圖表與標籤配色」有五組色盤，會一起換掉圖表、標籤、按鈕與連結的顏色；背景、文字與 App 圖示維持原樣。",
@@ -12976,15 +13009,65 @@ fun SettingsView(viewModel: RelateViewModel) {
              *    也要一起改。
              */
             Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                BrandMark(markSize = 32.dp)
+                /**
+                 * 品牌區，排版跟壽星日網站的頁尾一致：
+                 * 點陣記號＋品牌名＋tagline → 定位句 → 三個產品 → 版本與聯絡方式。
+                 * ⚠️ 三個產品並列是重點：這是「同一個人做的三個工具」，
+                 *    不是三個互不相干的 App。目前這一個標成琥珀色、不可點。
+                 */
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    HouseMark(markSize = 34.dp)
+                    Column(modifier = Modifier.padding(start = 10.dp)) {
+                        Text(BRAND_HOUSE, fontSize = T.Body, fontWeight = FontWeight.Black,
+                            color = AppColors.TextPrimary, letterSpacing = 3.sp)
+                        Text(BRAND_HOUSE_TAGLINE, fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF2A73B), letterSpacing = 4.sp)
+                    }
+                }
+                Text(BRAND_POSITIONING, fontSize = T.Micro, color = AppColors.TextSecondary,
+                    textAlign = TextAlign.Center, lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 10.dp, start = D.Gutter, end = D.Gutter))
+
+                HorizontalDivider(color = AppColors.BorderLight,
+                    modifier = Modifier.padding(top = 12.dp, start = D.Gutter, end = D.Gutter))
+
+                // 三個產品。前兩個開瀏覽器，目前這一個標成琥珀色不可點。
+                Row(
+                    modifier = Modifier.padding(top = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("壽星日", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .clickable { openUrl(context, SHOUXINGRI_URL) }
+                            .padding(horizontal = 6.dp, vertical = 2.dp))
+                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary)
+                    Text("Bandary", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .clickable { openUrl(context, BANDARY_BETA_URL) }
+                            .padding(horizontal = 6.dp, vertical = 2.dp))
+                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary)
+                    Text("RelateStats", fontSize = T.Label, fontWeight = FontWeight.Black,
+                        color = Color(0xFFF2A73B), maxLines = 1, softWrap = false,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
+
+                // 封測報名表：Play 商店還沒過審，要找人測就是給這張表
+                Text("RelateStats 封閉測試報名 ›", fontSize = T.Micro, fontWeight = FontWeight.Medium,
+                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                    modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
+                        .clickable { openUrl(context, RELATESTATS_BETA_URL) }
+                        .padding(horizontal = 8.dp, vertical = 3.dp))
+
+                HorizontalDivider(color = AppColors.BorderLight,
+                    modifier = Modifier.padding(top = 12.dp, start = D.Gutter, end = D.Gutter))
+
                 // ⚠️ 版本號一定要跟 App 名稱寫在一起，而且要帶 build 號 ——
                 //    使用者回報問題時截的就是這一行。
                 Text("RelateStats v$APP_VERSION", fontSize = T.Micro,
                     color = AppColors.TextSecondary, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(top = 8.dp))
-                // 作者歸屬掛品牌名稱（小數據所），不是 App 名稱
-                Text(BRAND_AUTHOR, fontSize = T.Micro, color = AppColors.TextTertiary,
-                    modifier = Modifier.padding(top = 4.dp))
+                    modifier = Modifier.padding(top = 10.dp))
                 // 點一下直接開郵件 App；沒有郵件 App 就把信箱複製起來，
                 // 跟意見回饋同一套退路（App 沒有網路權限，不可能自己送出）
                 Text(
@@ -13003,8 +13086,8 @@ fun SettingsView(viewModel: RelateViewModel) {
                         }
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 )
-                // 版權與標準署名併成一行，省掉一個列高
-                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_SIGNATURE",
+                // 版權用個人署名，跟網站頁尾一致
+                Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_AUTHOR",
                     fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
             }
@@ -13195,10 +13278,40 @@ const val BRAND_SIGNATURE = "小數據所 · 日子有數"
 /** 個人署名，用在作者歸屬 */
 const val BRAND_AUTHOR = "小數據所｜Celine Fu"
 
+/**
+ * Positioning statement。
+ * ⚠️ 跟 tagline（日子有數）是兩個不同的東西，規範明文寫不要混用。
+ *    tagline 跟記號綁在一起；這句只出現在「需要一句話說明白」的地方，
+ *    設定頁的品牌區就是其中之一（網站頁尾也是這樣放）。
+ */
+const val BRAND_POSITIONING = "把沒人在記的生活，變成你看得懂的數據。"
+
+/**
+ * 小數據所旗下三個產品。
+ * ⚠️ App 沒有網路權限，這些連結是丟 ACTION_VIEW 給瀏覽器開的，
+ *    跟「隱私權政策」入口同一個做法，App 本身不連線。
+ * ⚠️ 網址失效時整列會變成沒反應的字。改網址要同時改這裡與
+ *    docs/play/SUBMISSION.md、社群貼文裡的連結。
+ */
+const val SHOUXINGRI_URL = "https://birthdaydeals.celine-fu-work.workers.dev/"
+const val RELATESTATS_BETA_URL = "https://forms.gle/6HT4LzRSsPA76b6s7"
+const val BANDARY_BETA_URL = "https://forms.gle/FhBJgWBWb72MCg5x5"
+
 /** ⚠️ RelateStats **這個產品**的一句話，不是品牌 tagline（見 BRAND_HOUSE_TAGLINE）。 */
 const val PRODUCT_TAGLINE = "看見你把時間花在誰身上"
 
 const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-privacy/"
+
+/**
+ * 用瀏覽器開一個網址。
+ * ⚠️ App 沒有網路權限，這只是把網址交給瀏覽器，App 本身不連線 ——
+ *    跟「隱私權政策」入口同一個做法。不要因為要顯示網頁內容就去加 INTERNET。
+ */
+fun openUrl(context: Context, url: String) {
+    if (url.isBlank()) return
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        .onFailure { Toast.makeText(context, "找不到瀏覽器", Toast.LENGTH_SHORT).show() }
+}
 
 /** 開系統權限頁。⚠️ 一律先經過 PermissionDisclosureDialog，不要直接呼叫。 */
 fun openPermissionSettings(context: Context, kind: String) {
