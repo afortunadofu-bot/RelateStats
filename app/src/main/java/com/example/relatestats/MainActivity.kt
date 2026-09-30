@@ -2295,6 +2295,38 @@ object DataRepository {
      * 帳號合併。
      * 目標解析到最終節點，並把原本指向來源的別名一起改指，支援鏈式合併。
      */
+    /**
+     * 批次合併：把 others 全部併進 keep。
+     *
+     * ⚠️ 不要在迴圈裡呼叫 setAlias() —— 它每次都 saveData(immediate)，
+     *    45 個人就是 45 次全量寫檔，畫面會整個卡住。
+     *    這裡一次算完再寫一次。
+     * ⚠️ 先拍快照：一次併掉幾十個人，按錯的代價很大。
+     *    設定頁的「復原」吃的就是這份快照。
+     *    個別綁錯也可以在「帳號與名稱」取消綁定，紀錄跟著走不會遺失。
+     */
+    fun mergeInto(rawNames: List<String>, unifiedName: String) {
+        if (screenshotGuard()) return
+        val keep = unifiedName.trim()
+        if (keep.isBlank()) return
+        val others = rawNames.map { it.trim() }.filter { it.isNotBlank() && it != keep }.distinct()
+        if (others.isEmpty()) return
+        snapshotForUndo("批次合併 ${others.size} 個聯絡人")
+        _aliases.update { current ->
+            val target = resolveAlias(keep, current)
+            val next = HashMap(current)
+            others.forEach { raw ->
+                // 併進來的那個就是最終歸戶對象時會形成循環，跳過
+                if (raw == target) return@forEach
+                next[raw] = target
+                // 原本指向 raw 的，一起改指向 target，否則會斷成兩層
+                current.forEach { (k, v) -> if (v == raw) next[k] = target }
+            }
+            next
+        }
+        saveData(immediate = true)
+    }
+
     fun setAlias(rawName: String, unifiedName: String) {
         if (screenshotGuard()) return
         if (rawName == unifiedName || rawName.isBlank() || unifiedName.isBlank()) return
@@ -4989,6 +5021,7 @@ class RelateViewModel : ViewModel() {
     fun clearInteractionsInRange(start: Long, end: Long, keep: Set<String>) =
         DataRepository.clearInteractionsInRange(start, end, keep)
     fun mergeContact(rawName: String, unifiedName: String) { DataRepository.setAlias(rawName, unifiedName) }
+    fun mergeContacts(rawNames: List<String>, unifiedName: String) = DataRepository.mergeInto(rawNames, unifiedName)
     fun renameContact(oldName: String, newName: String) = DataRepository.renameContact(oldName, newName)
     fun unmergeAccount(rawName: String) = DataRepository.unmergeAccount(rawName)
     val lastCleanupRemoved = DataRepository.lastCleanupRemoved
@@ -9709,6 +9742,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     var showBatchCat by remember { mutableStateOf(false) }
     var showCategoryManager by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<Set<String>?>(null) }
+    var pendingMerge by remember { mutableStateOf<List<String>?>(null) }
     val junkContacts = cb.junk
 
     fun toggleSelect(name: String) {
@@ -10022,11 +10056,12 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             if (selected.isEmpty()) "點卡片選取" else "已選 ${selected.size} 位",
                             fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false
                         )
+                        Spacer(modifier = Modifier.weight(1f))
                         // ⚠️ 以前是一行 12sp 的藍字，跟旁邊的說明文字看起來一樣，使用者根本沒發現那是按鈕。
                         //    做成有框、有圖示的按鈕。
                         val allOn = selected.size == filteredContacts.size && filteredContacts.isNotEmpty()
@@ -10052,6 +10087,30 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                 fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
                                 color = if (allOn) Color.White else AppColors.TextPrimary
                             )
+                        }
+                        /**
+                         * 離開勾選模式。
+                         *
+                         * ⚠️ 這一頁的多選是長按進來的，以前只有返回鍵能出去，
+                         *    勾選框就一直掛在每張卡片左邊，會被當成壞掉。
+                         *    排行頁的操作列本來就有「完成」，這裡缺一顆。
+                         * ⚠️ 用 ✕ 不要用打勾圖示：旁邊的「全選」已經是打勾了，
+                         *    兩顆都打勾會分不出哪顆是離開。
+                         */
+                        Row(
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, AppColors.BorderStrong, RoundedCornerShape(8.dp))
+                                .clickable { exitSelection() }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Rounded.Close, contentDescription = null,
+                                tint = AppColors.TextSecondary, modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("完成", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
                         }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
@@ -10082,17 +10141,40 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
                                 )
                             }
                         }
+                        // ⚠️ 合併要兩個人以上才有意義，只勾一個時停用，
+                        //    不要讓使用者按了才發現沒事發生。
+                        OutlinedButton(
+                            onClick = { pendingMerge = selected.toList() },
+                            enabled = selected.size > 1,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) { Text("合併", fontSize = 13.sp, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
                         Button(
                             onClick = { pendingDelete = selected.toSet() },
                             enabled = selected.isNotEmpty(),
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = AppColors.WorkText),
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                         ) { Text("刪除", fontSize = 13.sp, maxLines = 1, softWrap = false) }
                     }
                 }
             }
         }
+    }
+
+    pendingMerge?.let { names ->
+        BatchMergeDialog(
+            names = names,
+            onPick = { keep ->
+                viewModel.mergeContacts(names, keep)
+                Toast.makeText(context, "已把 ${names.size - 1} 個帳號併進「$keep」", Toast.LENGTH_LONG).show()
+                pendingMerge = null
+                exitSelection()
+            },
+            onDismiss = { pendingMerge = null }
+        )
     }
 
     pendingDelete?.let { targets ->
@@ -10493,6 +10575,66 @@ fun ContactAccountsDialog(
 }
 
 /**
+ * 批次合併：從勾選的聯絡人裡挑一個名字留下來，其餘全部併進去。
+ *
+ * ⚠️ 一定要讓使用者自己挑留哪個名字。自動挑（例如互動最多的那個）
+ *    看起來聰明，但挑錯就是幾十個人掛在一個莫名其妙的名字底下。
+ * ⚠️ 併進去的是「帳號」不是「刪除」—— 紀錄跟著走，
+ *    在「帳號與名稱」可以逐一取消綁定。這句要寫在畫面上，
+ *    不然使用者不敢按。
+ */
+@Composable
+fun BatchMergeDialog(names: List<String>, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    var keep by remember { mutableStateOf(names.firstOrNull() ?: "") }
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("合併 ${names.size} 位聯絡人", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary)
+                Text("挑一個名字留下來，其餘併進去", fontSize = 12.sp, color = AppColors.TextSecondary)
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    "合併不是刪除：其他名字會變成這個人底下的帳號，紀錄跟著走。" +
+                        "綁錯了到「帳號與名稱」可以逐一取消綁定，設定頁也有「復原」。",
+                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+                LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                    items(names, key = { it }) { name ->
+                        val on = name == keep
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { keep = name }.padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = on, onClick = { keep = name })
+                            Text(
+                                name, fontSize = 14.sp,
+                                fontWeight = if (on) FontWeight.Black else FontWeight.Medium,
+                                color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        HorizontalDivider(color = AppColors.BorderLight)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onPick(keep) }, enabled = keep.isNotBlank() && names.size > 1,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("全部併進「" + keep.take(8) + "」", maxLines = 1, softWrap = false) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = AppColors.TextSecondary) } }
+    )
+}
+
+/**
  * 綁定帳號：可搜尋、可複選。
  *
  * ⚠️ 方向是「把勾選的帳號併進 target」，不是反過來。
@@ -10514,7 +10656,7 @@ fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (List<St
         title = {
             Column {
                 Text("綁定帳號到「$source」", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("勾選要併進來的帳號，可以複選", fontSize = 12.sp, color = AppColors.TextSecondary)
+                Text("勾選要併進來的帳號，可以搜尋後全選", fontSize = 12.sp, color = AppColors.TextSecondary)
             }
         },
         text = {
@@ -10527,6 +10669,49 @@ fun MergeTargetDialog(source: String, candidates: List<String>, onPick: (List<St
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
+                /**
+                 * 全選。
+                 *
+                 * ⚠️ 範圍是**搜尋後**的清單，不是全部候選人。
+                 *    同一個人的帳號通常名字相近（「小明」「小明 IG」「Ming」），
+                 *    使用者的實際動作是「搜尋 → 全選 → 綁定」，
+                 *    這時候全選幾百個無關的人反而是災難。
+                 *    所以按鈕上直接寫數字，讓使用者看得到自己要選幾個。
+                 * ⚠️ allOn 用「filtered 全都在 picked 裡」判定，不能用
+                 *    size 相等 —— 搜尋過再清掉關鍵字時 picked 會比 filtered 多。
+                 */
+                val allOn = filtered.isNotEmpty() && filtered.all { it in picked }
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 4.dp)) {
+                    Text(
+                        if (picked.isEmpty()) "點名字勾選" else "已選 ${picked.size} 個",
+                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                        maxLines = 1, softWrap = false
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Row(
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .background(if (allOn) AppColors.ActiveBlue else AppColors.Surface)
+                            .border(1.dp, if (allOn) AppColors.ActiveBlue else AppColors.BorderStrong, RoundedCornerShape(8.dp))
+                            .clickable {
+                                if (allOn) picked.removeAll(filtered)
+                                else filtered.forEach { if (it !in picked) picked.add(it) }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Rounded.Check, contentDescription = null,
+                            tint = if (allOn) Color.White else AppColors.TextPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            if (allOn) "取消全選" else "全選 ${filtered.size}",
+                            fontSize = T.Label, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                            color = if (allOn) Color.White else AppColors.TextPrimary
+                        )
+                    }
+                }
                 if (filtered.isEmpty()) {
                     Text("找不到符合的名字", fontSize = 13.sp, color = AppColors.TextSecondary, modifier = Modifier.padding(12.dp))
                 } else {
@@ -11768,9 +11953,11 @@ private val USER_GUIDE = listOf(
             "同一個人在不同平台會被當成不同帳號。點聯絡人 →「帳號與名稱」可以把其他帳號綁到這個人身上，之後統計會合併計算。",
             "在「帳號與名稱」裡看得到這個人綁了哪些帳號，可以挑其中一個按「用這個名字」，或按顯示名稱旁的藍色「✎ 自訂暱稱」自己打。改名只影響本 App，不會動到 LINE 或 IG。",
             "帳號名稱太長被切掉時，長按（或點一下）名字就會展開全名，再按一次收回。",
-            "按「＋ 綁定其他帳號到這個人」可以一次勾選多個帳號，按鈕會顯示「綁定 N 個」。綁進來之後，你目前看的這個人的名字會留著。",
+            "按「＋ 綁定其他帳號到這個人」可以一次勾選多個帳號，按鈕會顯示「綁定 N 個」。上面有「全選」，範圍是搜尋後的清單 —— 先打幾個字把同一個人的帳號篩出來再全選，比一個個點快很多。綁進來之後，你目前看的這個人的名字會留著。",
             "綁錯了按「取消綁定」，那個帳號會變回獨立的聯絡人，紀錄跟著它走，不會遺失。",
-            "卡片上寫「已合併 N 個帳號 ›」的那一行也可以直接點開。長按聯絡人可以多選，批次設定標籤或刪除。"
+            "卡片上寫「已合併 N 個帳號 ›」的那一行也可以直接點開。長按聯絡人可以多選，批次設定標籤、合併或刪除。",
+            "勾選框是長按聯絡人卡片叫出來的，下方操作列右邊的「完成」可以收掉它（按返回鍵也可以）。",
+            "多選之後按「合併」，會問你要留哪一個名字，其餘全部併進去。合併不是刪除 —— 其他名字會變成那個人底下的帳號，紀錄跟著走；綁錯了到「帳號與名稱」逐一取消綁定，設定頁也有「復原」可以整批還原。"
         )
     ),
     GuideSection(
