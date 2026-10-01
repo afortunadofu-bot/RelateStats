@@ -34,6 +34,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **頭貼一律由使用者自己挑**（`ActivityResultContracts.PickVisualMedia`，不需要任何權限）。不要為了「自動抓 Gmail 頭貼」去加 `INTERNET`（要連 Google 伺服器）或 `READ_CONTACTS`（讀裝置上的個人檔案照片）——後者尤其荒謬：一個主打「不讀你的聯絡人」的 App 去要聯絡人權限，商店文案會自相矛盾。
 - **相片挑選器給的 URI 只有當次授權**，挑完必須馬上把圖片複製進 `filesDir`，不能只存 URI。
 - **商店頁上線後，把 `IN_CLOSED_BETA` 改成 `false`**。封測期間「分享給朋友」分享的是報名表；商店上線後才換回 Play 連結。只有這一個開關，不要在別的地方再判斷一次。
+- **系統列不要用 `window.statusBarColor` / `navigationBarColor`**。Android 15 已淘汰，Play Console 會擋。無邊框一律走 `onCreate` 裡的 `enableEdgeToEdge()`；畫面內容靠 `Scaffold` 的 insets、`systemBarsPadding()`、`safeDrawingPadding()` 避開系統列。
 - **不要為了任何功能加 `INTERNET` 權限**。功能許願區要讓使用者互相看到並投票，做法是用瀏覽器開外部網頁（`WISHLIST_FORM_URL` / `WISHLIST_BOARD_URL`），App 本身不連線。加了 `INTERNET` 就要重寫隱私權政策、重填資料安全性申報、重報無障礙聲明、改商店文案，而且把願望搬進 App 內顯示會觸發 Play 的使用者自建內容政策（檢舉、封鎖、審核）。
 - **下鑽（點卡片看「是誰」）一律用 `getDrillLeaderboard()`**，不要直接呼叫 `getDynamicLeaderboard()`。全是通話的集合必須走 `getCallLeaderboard()`，否則未接來電的來電者（電話號碼、「未接來電」）會被「非真人」規則整筆濾掉，名單人數跟統計數字對不起來。概況頁與分析頁各寫一份就是這樣漏過兩次。
 - **開發版與正式版的系統服務名稱必須分得開**（`manifestPlaceholders["labelSuffix"]`）。兩版都裝時，系統的無障礙清單會出現兩個同名項目，開錯的那個不會讓正式版記到任何資料。
@@ -635,6 +636,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.0.8 | 2026-10-01 | build 85：改用 enableEdgeToEdge()，修掉 Play 的兩則無邊框警告 |
 | v1.0.7 | 2026-09-30 | build 84：聯絡人多選可批次合併、綁定帳號可全選、多選列加「完成」 |
 | v1.0.6 | 2026-09-29 | build 83：封測期間「分享給朋友」改分享報名表 |
 | v1.0.5 | 2026-09-29 | build 82：設定頁品牌區改成網站頁尾那套（小數據所點陣、三個產品、封測連結） |

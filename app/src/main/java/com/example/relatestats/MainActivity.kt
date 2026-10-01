@@ -40,6 +40,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -5180,6 +5182,29 @@ class MainActivity : ComponentActivity() {
         setTheme(R.style.Theme_RelateStats)
         super.onCreate(savedInstanceState)
 
+        /**
+         * 無邊框（edge-to-edge）。
+         *
+         * ⚠️ 不要再用 window.statusBarColor / navigationBarColor ——
+         *    Android 15 已經淘汰這兩個參數，Play Console 會把它列進
+         *    「下次發布版本前應處理的問題」。它們在 15 以上也不再有效果。
+         * ⚠️ 也不能只靠 targetSdk 35 以上的系統預設無邊框：那只在 Android 15
+         *    以上生效，14 以下的使用者看到的還是有邊框的版本 ——
+         *    Play 的另一則警告（「可能不會向所有使用者顯示無邊框畫面」）就是在講這個。
+         *    enableEdgeToEdge() 會一路往回相容到 minSdk。
+         * ⚠️ 兩條系統列都給透明 scrim，維持原本「系統列透出畫面底色」的外觀。
+         *    畫面內容是靠 Scaffold 的 contentWindowInsets、systemBarsPadding()
+         *    與 safeDrawingPadding() 避開系統列的，那些已經寫在各頁了，
+         *    不要為了這個改回 fitsSystemWindows。
+         * ⚠️ 要在 setContent 之前呼叫。
+         */
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+        )
+
         // 每晚回顧與「服務被關掉」提醒。
         // ⚠️ 排程要每次啟動都做 —— AlarmManager 的錳鐘會被「強制停止」清掉，
         //    只靠開機廣播補不回來。重複排同一個 PendingIntent 不會累加。
@@ -5193,10 +5218,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        @Suppress("DEPRECATION")
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        @Suppress("DEPRECATION")
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        // 系統列圖示的亮暗：這裡只給起始值，之後跟著深淺模式走（見下面的 SideEffect）。
+        // ⚠️ 顏色不要在這裡設，無邊框交給上面的 enableEdgeToEdge()。
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true

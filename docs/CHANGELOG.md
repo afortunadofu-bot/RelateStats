@@ -1,5 +1,18 @@
 # 修復紀錄
 
+## v1.0.8 build 85（2026-10-01）— 修掉 Play 的兩則無邊框警告
+
+Play Console「下次發布版本前應處理的問題」出現兩則，都歸在使用者體驗：
+
+| # | 警告 | 根因 | 修法 |
+|---|------|------|------|
+| 1 | 應用程式使用已淘汰的無邊框 API 或參數 | `onCreate` 裡設了 `window.statusBarColor` 與 `window.navigationBarColor`。這兩個參數在 Android 15 已淘汰，在 15 以上也不再有效果（之前是加 `@Suppress("DEPRECATION")` 壓掉編譯警告，但 Play 照樣掃得到）。 | 整段刪掉，改由 `enableEdgeToEdge()` 處理。 |
+| 2 | 可能不會向所有使用者顯示無邊框畫面 | `targetSdk` 36 讓 Android 15 以上**系統預設**走無邊框，所以在新機上看起來是對的；但 14 以下沒有這個預設，那些使用者看到的是有邊框的版本。等於同一版 App 兩種外觀。 | `onCreate`（`setContent` 之前）呼叫 `enableEdgeToEdge()`，一路相容到 `minSdk` 24。兩條系統列都給透明 scrim，維持原本「系統列透出畫面底色」的外觀。 |
+
+**沒有改版面**：畫面內容本來就是靠 `Scaffold` 的 `contentWindowInsets`、`systemBarsPadding()`
+與 `safeDrawingPadding()` 避開系統列（Android 15 上已經是無邊框，一直是這樣跑的），
+這次只是讓 14 以下的機器也走同一條路。⚠️ 不要為了這個改回 `fitsSystemWindows`。
+
 ## v1.0.7 build 84（2026-09-30）— 批次合併、綁定全選、離開勾選模式
 
 | # | 症狀 | 根因 | 修法 |
