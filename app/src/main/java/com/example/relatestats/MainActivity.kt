@@ -10670,6 +10670,54 @@ fun ContactAccountsDialog(
 }
 
 /**
+ * 更新紀錄。
+ * ⚠️ 目前這一版標出來，使用者才知道自己停在哪裡 ——
+ *    不然一長串版本號看起來都一樣。
+ */
+@Composable
+fun ReleaseNotesDialog(onDismiss: () -> Unit) {
+    val current = BuildConfig.VERSION_NAME
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("更新紀錄", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary)
+                Text("目前是 v$APP_VERSION", fontSize = 12.sp, color = AppColors.TextSecondary)
+            }
+        },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                items(RELEASE_NOTES, key = { it.first }) { (version, lines) ->
+                    val isCurrent = version == current
+                    Row(modifier = Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("v$version", fontSize = T.Body, fontWeight = FontWeight.Black,
+                            color = if (isCurrent) AppColors.ActiveBlue else AppColors.TextPrimary,
+                            maxLines = 1, softWrap = false)
+                        if (isCurrent) {
+                            Text("使用中", fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                                color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                                modifier = Modifier.padding(start = 6.dp)
+                                    .background(AppColors.ActiveBlue.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 5.dp, vertical = 2.dp))
+                        }
+                    }
+                    lines.forEach { line ->
+                        Row(modifier = Modifier.padding(top = 4.dp)) {
+                            Text("·", fontSize = T.Body, color = AppColors.TextTertiary,
+                                modifier = Modifier.padding(end = 6.dp))
+                            Text(line, fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 18.sp)
+                        }
+                    }
+                    HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(top = 10.dp))
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.ActiveBlue) } }
+    )
+}
+
+/**
  * 批次合併：從勾選的聯絡人裡挑一個名字留下來，其餘全部併進去。
  *
  * ⚠️ 一定要讓使用者自己挑留哪個名字。自動挑（例如互動最多的那個）
@@ -12081,6 +12129,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
+            "設定頁最下面的「關於」有四列：「前往商店更新」會開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「應用程式版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
@@ -12664,6 +12713,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     if (showFeedback) FeedbackDialog { showFeedback = false }
     var showWishlist by remember { mutableStateOf(false) }
     if (showWishlist) WishlistDialog(viewModel) { showWishlist = false }
+    var showReleaseNotes by remember { mutableStateOf(false) }
+    if (showReleaseNotes) ReleaseNotesDialog { showReleaseNotes = false }
     val cloudUri by viewModel.cloudBackupUri.collectAsState()
     val cloudLast by viewModel.cloudBackupLast.collectAsState()
     val cloudInterval by viewModel.cloudBackupInterval.collectAsState()
@@ -13288,6 +13339,40 @@ fun SettingsView(viewModel: RelateViewModel) {
             }
         }
 
+        // ── 關於 ──
+        item { SettingsSection("關於") }
+        item {
+            SettingsCard {
+                /**
+                 * ⚠️ 這一列不要寫成「檢查更新」。
+                 *    App 沒有網路權限，查不到有沒有新版 —— 寫「檢查更新」
+                 *    會讓使用者以為按了就查過了，實際上只是開商店。
+                 *    副標直接把這件事講明白。
+                 */
+                SettingsRow("前往商店更新", "App 沒有網路權限，無法自己檢查新版") {
+                    openPlayStore(context)
+                }
+                SettingsDivider()
+                SettingsRow("更新紀錄", "每一版改了什麼") { showReleaseNotes = true }
+                SettingsDivider()
+                SettingsRow("聯絡我們", FEEDBACK_EMAIL) { contactDeveloper(context) }
+                SettingsDivider()
+                /**
+                 * ⚠️ 點一下複製「版本 + 機型 + Android 版本」。
+                 *    回報問題時最常漏掉的就是這三樣，每次都要來回問一輪。
+                 *    讓使用者直接貼上，比請他們自己去翻設定快得多。
+                 */
+                SettingsRow("應用程式版本", "v$APP_VERSION　·　點一下複製裝置資訊") {
+                    val info = "RelateStats v$APP_VERSION\n" +
+                        Build.MANUFACTURER + " " + Build.MODEL + "\n" +
+                        "Android " + Build.VERSION.RELEASE + "（SDK " + Build.VERSION.SDK_INT + "）"
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+                        ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 版本", info))
+                    Toast.makeText(context, "已複製版本與裝置資訊", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
         item {
             /**
              * 設定頁最下方的品牌與著作權區。
@@ -13332,15 +13417,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                     color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
                     modifier = Modifier.padding(top = 4.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .clickable {
-                            val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL))
-                                .putExtra(Intent.EXTRA_SUBJECT, "RelateStats")
-                            if (runCatching { context.startActivity(mail) }.isFailure) {
-                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
-                                    ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 信箱", FEEDBACK_EMAIL))
-                                Toast.makeText(context, "找不到郵件 App，信箱已複製", Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        .clickable { contactDeveloper(context) }
                 )
 
                 HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(top = 12.dp))
@@ -13557,6 +13634,60 @@ fun PermissionRow(title: String, subtitle: String, isGranted: Boolean, declined:
 const val PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.relatestats.app"
 
 /**
+ * Play 商店上的套件名。
+ * ⚠️ 不要用 BuildConfig.APPLICATION_ID —— 開發版帶 ".debug" 後綴，
+ *    拿去開商店只會得到「找不到這個應用程式」。商店上永遠是這一個。
+ */
+const val PLAY_PACKAGE = "com.relatestats.app"
+
+/**
+ * 更新紀錄，給使用者看的版本。
+ *
+ * ⚠️ 跟 docs/CHANGELOG.md 是兩份東西，不要直接把那邊的內容貼過來：
+ *    那份寫的是「症狀／根因／修法」，給開發看的；這裡只寫
+ *    「你會看到什麼不一樣」。
+ * ⚠️ 新版加在最前面。只留最近 10 版，再往前的看 GitHub ——
+ *    沒人會在手機上捲三十個版本。
+ */
+val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.12" to listOf(
+        "設定頁多了「關於」區：前往商店更新、更新紀錄、聯絡我們、版本資訊。",
+        "點版本那一列會把版本與機型複製起來，回報問題時直接貼上就好。"
+    ),
+    "1.0.11" to listOf(
+        "設定頁最下面的品牌區改成跟 Bandary、壽星日一致的排版，版本號移到最上面。"
+    ),
+    "1.0.10" to listOf(
+        "滑 Threads／IG 動態牆時，不會再把貼文內文記成聊天室。",
+        "名字讀起來像一整句話的，會被歸到「系統通知」，可在提醒卡還原。"
+    ),
+    "1.0.9" to listOf(
+        "Threads 的「讚 92」這類計數按鈕不再被收成聯絡人。"
+    ),
+    "1.0.8" to listOf(
+        "系統列顯示方式更新，舊版 Android 也能正確顯示無邊框畫面。"
+    ),
+    "1.0.7" to listOf(
+        "聯絡人多選之後可以「合併」，一次把幾十個帳號歸到同一個人。",
+        "綁定帳號可以搜尋後全選；多選列加了「完成」可以收掉勾選框。"
+    ),
+    "1.0.6" to listOf(
+        "封測期間「分享給朋友」改成分享報名表。"
+    ),
+    "1.0.5" to listOf(
+        "設定頁加上小數據所的品牌區與三個產品的連結。"
+    ),
+    "1.0.4" to listOf(
+        "通話可以看到每一通各自多久，每個人的通話時長與停留時間分開顯示。"
+    ),
+    "1.0.3" to listOf(
+        "通話統計加上總時長。",
+        "IG／Threads 的動態推播不再被當成聯絡人。",
+        "LINE 社群會歸到社群名稱，不再拆成一個個聯絡人。"
+    )
+)
+
+/**
  * 品牌標語。
  * ⚠️ 要跟商店「簡短說明」的第一句一字不差（docs/play/SUBMISSION.md），
  *    也要跟社群宣傳圖上的那句一樣。品牌就是同一句話到處都一樣 ——
@@ -13632,6 +13763,35 @@ const val IN_CLOSED_BETA = true
 const val PRODUCT_TAGLINE = "看見你把時間花在誰身上"
 
 const val PRIVACY_POLICY_URL = "https://afortunadofu-bot.github.io/relatestats-privacy/"
+
+/**
+ * 開 Play 商店的本 App 頁面。
+ *
+ * ⚠️ App 沒有網路權限，**查不到**有沒有新版 —— 只能把使用者送到商店自己看。
+ *    所以按鈕不要寫「檢查更新」，那會讓人以為真的查過了。
+ * ⚠️ 先試 market://（直接跳 Play App），失敗才退回網頁版。
+ *    有些機器沒有 Play 服務，兩個都會失敗，這時給一句提示就好。
+ */
+fun openPlayStore(context: Context) {
+    val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=" + PLAY_PACKAGE))
+    if (runCatching { context.startActivity(market) }.isSuccess) return
+    if (runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PLAY_STORE_URL))) }.isSuccess) return
+    Toast.makeText(context, "找不到 Play 商店", Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * 開郵件 App 寄給開發者。
+ * ⚠️ 沒有郵件 App 就把信箱複製起來 —— App 沒有網路權限，不可能自己送出，
+ *    一定要留一條使用者自己能走的路。
+ */
+fun contactDeveloper(context: Context, subject: String = "RelateStats") {
+    val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL))
+        .putExtra(Intent.EXTRA_SUBJECT, subject)
+    if (runCatching { context.startActivity(mail) }.isSuccess) return
+    (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+        ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 信箱", FEEDBACK_EMAIL))
+    Toast.makeText(context, "找不到郵件 App，信箱已複製", Toast.LENGTH_SHORT).show()
+}
 
 /**
  * 用瀏覽器開一個網址。
