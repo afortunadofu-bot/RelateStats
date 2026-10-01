@@ -590,6 +590,44 @@ private val NON_PERSON_EXTRA = listOf(
 )
 
 /**
+ * 動態牆貼文下方那排操作鈕的文字。
+ * 畫面上同時出現兩個以上＝這是動態牆，不是聊天室。
+ */
+private val FEED_ACTION_LABELS = setOf(
+    "讚", "按讚", "已讚", "留言", "回覆", "轉發", "引用", "分享", "轉發貼文",
+    "like", "likes", "comment", "comments", "repost", "quote", "share"
+)
+
+/** 「讚 92」這種帶數字的計數鈕 */
+private val FEED_COUNT_BUTTON = Regex("^(讚|留言|轉發|分享|瀏覽)\\s*[\\d.,]+")
+
+/** 中文句子裡的高頻功能詞。名字裡偶爾會有一兩個，整句話才會有一堆。 */
+private val SENTENCE_WORDS = listOf(
+    "的", "了", "我", "你", "是", "有", "不", "在", "也", "都", "就", "很", "可以", "要", "會",
+    "把", "跟", "嗎", "呢", "吧", "請", "還", "沒", "們", "這", "那", "什麼", "怎麼", "因為", "所以"
+)
+
+/**
+ * 這段文字讀起來像「一句話」而不是「一個名字」。
+ *
+ * ⚠️ 這是**猜**的，一定會有誤判，所以門檻訂得很保守：
+ *    「有沒有人要一起吃晚餐的群組」這種真的存在的群組名不能被擋掉。
+ *    長度門檻 14 就是為了讓它活下來（它 13 個字）。
+ *    真正負責擋短貼文的是無障礙那邊的動態牆偵測（看畫面上有沒有
+ *    讚／留言／轉發那排鈕），不是這個函式。
+ * ⚠️ 判錯的代價：這個名字會被歸到「系統通知」標籤、不列入統計。
+ *    資料不會刪，聯絡人頁的提醒卡可以選「確認是真人」放它一馬。
+ */
+fun looksLikeSentence(text: String): Boolean {
+    val t = text.trim()
+    if (t.length < 8) return false
+    // 句號、問號、驚嘆號、刪節號：名字不會有這些
+    if (t.any { it in "。！？…" }) return true
+    if (t.length < 14) return false
+    return SENTENCE_WORDS.count { t.contains(it) } >= 3
+}
+
+/**
  * 判斷是否為非真人通知（讚、追蹤、推播、促銷、介面文字）。
  *
  * ⚠️ 這個函式是統計的熱點：活躍密度、新出現的人、連續互動都會**逐筆紀錄**呼叫它，
@@ -608,7 +646,8 @@ fun isNonPersonContact(name: String): Boolean {
             n.isEmpty() -> true
             n.lowercase() in UI_LABEL_NAMES -> true
             NON_PERSON_PATTERNS.any { it.containsMatchIn(n) } -> true
-            else -> NON_PERSON_EXTRA.any { it.containsMatchIn(n) }
+            NON_PERSON_EXTRA.any { it.containsMatchIn(n) } -> true
+            else -> looksLikeSentence(n)
         }
     }
 }
@@ -626,6 +665,7 @@ fun junkReason(name: String): String {
     if (n.lowercase() in UI_LABEL_NAMES) return "這是 App 介面上的字，不是聊天室"
     if (NON_PERSON_PATTERNS.any { it.containsMatchIn(n) }) return "名稱符合系統通知格式（讚／追蹤／貼文／推播）"
     if (NON_PERSON_EXTRA.any { it.containsMatchIn(n) }) return "名稱是數字型標籤（讚數、觀看次數等）"
+    if (looksLikeSentence(n)) return "讀起來像貼文內文，不像名字（太長、有句號或整句都是口語）"
     return "手動標記"
 }
 
@@ -3576,7 +3616,13 @@ class ChatTrackerService : AccessibilityService() {
         //  3. 連續兩次掃到同一個標題 —— 動態瀏覽（動態牆、探索）的頂端文字會一直變，
         //     穩定不變才可能是聊天室標題。這條是為了 IG/Threads：它們的輸入框常包在
         //     摺疊容器裡或未取得焦點時不回報 isEditable，只靠前兩條會永遠判定不在聊天室。
-        val stable = name != null && name == lastCandidate
+        // ⚠️ 動態牆上不採信「連續兩次掃到同一個標題」。
+        //    那條規則本來是為了 IG／Threads 的私訊（它們的輸入框常常
+        //    偵測不到），但在動態牆上，使用者停下來看一則貼文時，
+        //    頂端那段內文也會連續兩次相同 —— 貼文內文就是這樣被
+        //    讀成聊天室的。有輸入框或標題來自已知 view id 時不受影響，
+        //    所以真正的私訊照常記錄。
+        val stable = name != null && name == lastCandidate && !hit.feedLike
         val trustworthy = hit.fromViewId || appName == "電話" || hit.hasEditText || stable
         val valid = !name.isNullOrEmpty() && name.length <= 60 && name !in ignoreTitles && trustworthy
         lastCandidate = name
@@ -3584,7 +3630,8 @@ class ChatTrackerService : AccessibilityService() {
         if (!valid) {
             missStreak++
             DataRepository.logDetect(
-                "$appName 未採用 · 標題=${name ?: "(抓不到)"} · viewId=${hit.fromViewId} · 輸入框=${hit.hasEditText}"
+                "$appName 未採用 · 標題=${name ?: "(抓不到)"} · viewId=${hit.fromViewId} · " +
+                    "輸入框=${hit.hasEditText}" + if (hit.feedLike) " · 動態牆" else ""
             )
             if (missStreak >= MISS_TOLERANCE) pauseTracking()
             return
@@ -3596,7 +3643,11 @@ class ChatTrackerService : AccessibilityService() {
         enterChat(name!!, appName)
     }
 
-    private class ScanResult(val title: String?, val hasEditText: Boolean, val fromViewId: Boolean)
+    private class ScanResult(
+        val title: String?, val hasEditText: Boolean, val fromViewId: Boolean,
+        /** 畫面上有動態牆那排操作鈕（讚／留言／轉發…）＝這不是聊天室 */
+        val feedLike: Boolean
+    )
 
     /**
      * 一次走訪就同時找出「聊天室標題」與「是否有輸入框」。
@@ -3614,6 +3665,10 @@ class ChatTrackerService : AccessibilityService() {
         var fallbackTop = Int.MAX_VALUE
         var hasEdit = false
         var visited = 0
+        // ⚠️ 動態牆偵測：這是擋掉「把貼文內文讀成聊天室」最可靠的訊號。
+        //    用畫面長相判斷，不是用名字猜 —— 名字猜一定會誤殺真的群組。
+        //    收集到兩種以上才算數，單一個「分享」可能只是選單項目。
+        val feedSignals = HashSet<String>()
 
         val bounds = Rect()
         // ⚠️ 必須用 BFS（removeFirst）。標題列在節點樹的淺層，訊息列表則又深又寬；
@@ -3632,6 +3687,12 @@ class ChatTrackerService : AccessibilityService() {
 
             // 有些 App 的標題只放在 contentDescription
             val text = (node.text?.toString() ?: node.contentDescription?.toString())?.trim()
+            if (!text.isNullOrBlank() && text.length <= 12) {
+                val low = text.lowercase()
+                if (low in FEED_ACTION_LABELS) feedSignals.add(low)
+                // 「讚 92」這種帶數字的計數鈕，算同一種訊號
+                FEED_COUNT_BUTTON.find(text)?.let { feedSignals.add(it.groupValues[1]) }
+            }
             if (!text.isNullOrBlank() && text.length <= 60) {
                 if (byId == null) {
                     val suffix = node.viewIdResourceName?.substringAfterLast('/')
@@ -3652,7 +3713,7 @@ class ChatTrackerService : AccessibilityService() {
             if (byId != null && hasEdit) break
         }
 
-        return ScanResult(byId ?: fallback, hasEdit, byId != null)
+        return ScanResult(byId ?: fallback, hasEdit, byId != null, feedSignals.size >= 2)
     }
 
     /** 排除時鐘、純數字、單一符號等明顯不是聊天室名稱的文字 */
@@ -3677,6 +3738,7 @@ class ChatTrackerService : AccessibilityService() {
         if (Regex("(的大頭貼|大頭貼照|個人檔案相片|profile picture|avatar)", RegexOption.IGNORE_CASE)
                 .containsMatchIn(text)) return false
         // 貼文內文通常帶句號、換行或很長；聊天室標題是人名，不會這樣
+        if (looksLikeSentence(text)) return false
         if (text.length > 28) return false
         if (text.contains('\n')) return false
         // 帶連結、hashtag 的一定是貼文
@@ -11998,6 +12060,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "聯絡人頁的標籤列會直接顯示每個標籤有幾位，點一下就只看那個標籤。「全部」不含系統通知。",
             "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」，不列入排行與統計。Threads 與 IG 貼文下方的計數按鈕（「讚 92」「轉發 1.2萬」）也算在內。聯絡人頁的提醒卡可以逐筆確認：標為系統通知、刪除，或確認是真人後保留不再提醒。",
+            "滑動態牆時不會再把貼文內文記成聊天室：畫面上同時出現讚、留言、轉發那排按鈕時，App 就知道這是動態牆而不是聊天室，私訊不受影響。另外名字讀起來像一整句話（很長、有句號、整句都是口語）也會被歸到「系統通知」，判錯的話在提醒卡選「確認是真人」就會放它一馬。",
             "刪除這類來源沒有用——對方下次推播就會重建。刪除聯絡人時可以勾「同時加入永不記錄名單」，之後就不會再記下來。",
             "「未分類」是虛線框，代表還沒分；分好類之後圖表才看得出你的時間花在哪種關係上。"
         )

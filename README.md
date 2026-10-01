@@ -636,6 +636,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.0.10 | 2026-10-01 | build 87：動態牆的貼文內文不再被讀成聊天室 |
 | v1.0.9 | 2026-10-01 | build 86：Threads 的「讚 92」等計數按鈕不再收成聯絡人 |
 | v1.0.8 | 2026-10-01 | build 85：改用 enableEdgeToEdge()，修掉 Play 的兩則無邊框警告 |
 | v1.0.7 | 2026-09-30 | build 84：聯絡人多選可批次合併、綁定帳號可全選、多選列加「完成」 |
