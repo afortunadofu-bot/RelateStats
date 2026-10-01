@@ -636,6 +636,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.0.11 | 2026-10-01 | build 88：設定頁品牌區排版改成跟 Bandary 頁尾一致 |
 | v1.0.10 | 2026-10-01 | build 87：動態牆的貼文內文不再被讀成聊天室 |
 | v1.0.9 | 2026-10-01 | build 86：Threads 的「讚 92」等計數按鈕不再收成聯絡人 |
 | v1.0.8 | 2026-10-01 | build 85：改用 enableEdgeToEdge()，修掉 Play 的兩則無邊框警告 |

@@ -13301,72 +13301,36 @@ fun SettingsView(viewModel: RelateViewModel) {
              *    改信箱時記得 docs/play/SUBMISSION.md 與 docs/privacy-policy.html
              *    也要一起改。
              */
-            Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                /**
-                 * 品牌區，排版跟壽星日網站的頁尾一致：
-                 * 點陣記號＋品牌名＋tagline → 定位句 → 三個產品 → 版本與聯絡方式。
-                 * ⚠️ 三個產品並列是重點：這是「同一個人做的三個工具」，
-                 *    不是三個互不相干的 App。目前這一個標成琥珀色、不可點。
-                 */
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    HouseMark(markSize = 34.dp)
-                    Column(modifier = Modifier.padding(start = 10.dp)) {
-                        Text(BRAND_HOUSE, fontSize = T.Body, fontWeight = FontWeight.Black,
-                            color = AppColors.TextPrimary, letterSpacing = 3.sp)
-                        Text(BRAND_HOUSE_TAGLINE, fontSize = T.Micro, fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF2A73B), letterSpacing = 4.sp)
-                    }
-                }
-                Text(BRAND_POSITIONING, fontSize = T.Micro, color = AppColors.TextSecondary,
-                    textAlign = TextAlign.Center, lineHeight = 16.sp,
-                    modifier = Modifier.padding(top = 10.dp, start = D.Gutter, end = D.Gutter))
-
-                HorizontalDivider(color = AppColors.BorderLight,
-                    modifier = Modifier.padding(top = 12.dp, start = D.Gutter, end = D.Gutter))
-
-                // 三個產品。前兩個開瀏覽器，目前這一個標成琥珀色不可點。
-                Row(
-                    modifier = Modifier.padding(top = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("壽星日", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                            .clickable { openUrl(context, SHOUXINGRI_URL) }
-                            .padding(horizontal = 6.dp, vertical = 2.dp))
-                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary)
-                    Text("Bandary", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                            .clickable { openUrl(context, BANDARY_BETA_URL) }
-                            .padding(horizontal = 6.dp, vertical = 2.dp))
-                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary)
-                    Text("RelateStats", fontSize = T.Label, fontWeight = FontWeight.Black,
-                        color = Color(0xFFF2A73B), maxLines = 1, softWrap = false,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                }
-
-                // 封測報名表：Play 商店還沒過審，要找人測就是給這張表
-                Text("RelateStats 封閉測試報名 ›", fontSize = T.Micro, fontWeight = FontWeight.Medium,
-                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
-                    modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
-                        .clickable { openUrl(context, RELATESTATS_BETA_URL) }
-                        .padding(horizontal = 8.dp, vertical = 3.dp))
-
-                HorizontalDivider(color = AppColors.BorderLight,
-                    modifier = Modifier.padding(top = 12.dp, start = D.Gutter, end = D.Gutter))
-
-                // ⚠️ 版本號一定要跟 App 名稱寫在一起，而且要帶 build 號 ——
-                //    使用者回報問題時截的就是這一行。
-                Text("RelateStats v$APP_VERSION", fontSize = T.Micro,
-                    color = AppColors.TextSecondary, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(top = 10.dp))
+            /**
+             * 品牌區，排版跟 Bandary 與壽星日的頁尾完全一致：
+             *
+             *   App 名稱 + 版本
+             *   聯絡信箱
+             *   ────────────
+             *   點陣記號  小數據所 / 日子有數
+             *   定位句
+             *   ────────────
+             *   壽星日 · Bandary · RelateStats
+             *   © 年份 小數據所 · Celine Fu
+             *
+             * ⚠️ 三個 App 的頁尾要長得一模一樣，這是「同一個人做的三個工具」
+             *    唯一會被看見的地方。改這裡就要三個 App 一起改。
+             * ⚠️ 全部靠左，不要置中 —— 置中會跟上面的設定列對不齊。
+             * ⚠️ 版本號排在最上面而且帶 build 號：使用者回報問題時截的就是這一行，
+             *    擺在最下面他們要捲到底才看得到。
+             */
+            Column(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(top = 18.dp, bottom = 10.dp, start = D.Gutter + 4.dp, end = D.Gutter + 4.dp)
+            ) {
+                Text("RelateStats v$APP_VERSION", fontSize = T.Title, fontWeight = FontWeight.Black,
+                    color = AppColors.TextPrimary)
                 // 點一下直接開郵件 App；沒有郵件 App 就把信箱複製起來，
                 // 跟意見回饋同一套退路（App 沒有網路權限，不可能自己送出）
                 Text(
-                    FEEDBACK_EMAIL, fontSize = T.Micro, fontWeight = FontWeight.Medium,
-                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
-                    modifier = Modifier.padding(top = 2.dp)
+                    FEEDBACK_EMAIL, fontSize = T.Body, fontWeight = FontWeight.Medium,
+                    color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
+                    modifier = Modifier.padding(top = 4.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .clickable {
                             val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL))
@@ -13377,12 +13341,71 @@ fun SettingsView(viewModel: RelateViewModel) {
                                 Toast.makeText(context, "找不到郵件 App，信箱已複製", Toast.LENGTH_SHORT).show()
                             }
                         }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
                 )
-                // 版權用個人署名，跟網站頁尾一致
+
+                HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(top = 12.dp))
+
+                Row(
+                    modifier = Modifier.padding(top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    HouseMark(markSize = 36.dp)
+                    Column(modifier = Modifier.padding(start = 14.dp)) {
+                        Text(BRAND_HOUSE, fontSize = T.KpiSm, fontWeight = FontWeight.Black,
+                            color = AppColors.TextPrimary, letterSpacing = 6.sp)
+                        Text(BRAND_HOUSE_TAGLINE, fontSize = T.Label, fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF2A73B), letterSpacing = 5.sp,
+                            modifier = Modifier.padding(top = 2.dp))
+                    }
+                }
+                Text(BRAND_POSITIONING, fontSize = T.Body, color = AppColors.TextSecondary,
+                    lineHeight = 19.sp, modifier = Modifier.padding(top = 12.dp))
+
+                HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(top = 12.dp))
+
+                /**
+                 * 三個產品並列。
+                 * ⚠️ 目前這一個是深色粗體、不可點；另外兩個是灰字、點了開瀏覽器。
+                 *    灰字是照頁尾規範走的（Bandary 也是這樣），不要改成藍色連結色 ——
+                 *    這一排是署名，不是導覽列。
+                 */
+                Row(
+                    modifier = Modifier.padding(top = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("壽星日", fontSize = T.Body, fontWeight = FontWeight.Medium,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .clickable { openUrl(context, SHOUXINGRI_URL) }
+                            .padding(horizontal = 4.dp, vertical = 2.dp))
+                    Text("·", fontSize = T.Body, color = AppColors.TextTertiary,
+                        modifier = Modifier.padding(horizontal = 2.dp))
+                    Text("Bandary", fontSize = T.Body, fontWeight = FontWeight.Medium,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .clickable { openUrl(context, BANDARY_BETA_URL) }
+                            .padding(horizontal = 4.dp, vertical = 2.dp))
+                    Text("·", fontSize = T.Body, color = AppColors.TextTertiary,
+                        modifier = Modifier.padding(horizontal = 2.dp))
+                    Text("RelateStats", fontSize = T.Body, fontWeight = FontWeight.Black,
+                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                }
+
+                // 封測報名表：Play 商店還沒過審，要找人測就是給這張表。
+                // ⚠️ 商店上線後 IN_CLOSED_BETA 改成 false，這一行就會消失。
+                if (IN_CLOSED_BETA) {
+                    Text("RelateStats 封閉測試報名 ›", fontSize = T.Label,
+                        fontWeight = FontWeight.Medium, color = AppColors.ActiveBlue,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.padding(top = 8.dp).clip(RoundedCornerShape(6.dp))
+                            .clickable { openUrl(context, RELATESTATS_BETA_URL) }
+                            .padding(horizontal = 4.dp, vertical = 3.dp))
+                }
+
                 Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_AUTHOR",
-                    fontSize = T.Micro, color = AppColors.TextTertiary.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                    fontSize = T.Label, color = AppColors.TextTertiary, letterSpacing = 1.sp,
+                    modifier = Modifier.padding(top = 10.dp))
             }
         }
     }
@@ -13568,8 +13591,12 @@ const val BRAND_HOUSE = "小數據所"
 const val BRAND_HOUSE_TAGLINE = "日子有數"
 /** 標準署名，用在頁尾 */
 const val BRAND_SIGNATURE = "小數據所 · 日子有數"
-/** 個人署名，用在作者歸屬 */
-const val BRAND_AUTHOR = "小數據所｜Celine Fu"
+/**
+ * 個人署名，用在頁尾版權那一行。
+ * ⚠️ 分隔符是「 · 」，跟 Bandary 與壽星日的頁尾一致。
+ *    三個 App 的這一行要一模一樣，不要在這裡自己改成其他符號。
+ */
+const val BRAND_AUTHOR = "小數據所 · Celine Fu"
 
 /**
  * Positioning statement。
