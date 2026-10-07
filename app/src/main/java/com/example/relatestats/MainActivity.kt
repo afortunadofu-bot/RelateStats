@@ -552,7 +552,17 @@ private val NON_PERSON_PATTERNS = listOf(
     //    動詞加在前面，原本的 ^讚 錨點就打不到了。
     //    但如果放寬成任意前綴，「電影分享 2024」這種群組名也會被誤殺，
     //    所以只列實際出現過的那幾個動詞。
-    Regex("^(收回|取消|已|按|說|想|加|給)?(讚|留言|回覆|轉發|引用|分享|瀏覽|觀看|追蹤者|粉絲)\\s*[\\d.,]+\\s*(萬|k|K|M)?$")
+    Regex("^(收回|取消|已|按|說|想|加|給)?(讚|留言|回覆|轉發|引用|分享|瀏覽|觀看|追蹤者|粉絲)\\s*[\\d.,]+\\s*(萬|k|K|M)?$"),
+    // 「[lavender_0806] 1 個新的讚」——Threads 把帳號用方括號包在最前面，
+    // 上面那條錨在 ^ 就打不到了。
+    // ⚠️ 這條**不錨定位置**，但要求「數字＋量詞＋新」三件事同時出現，
+    //    所以「3 個新的讚」會中、「新竹」「個人」這種單獨的詞不會中。
+    Regex("\\d+\\s*(位|個|則)\\s*新(的)?(讚|追蹤者|粉絲|留言|通知|互動|訊息邀請)"),
+    // IG 限時動態的介面字：「限時動態典藏」「限時動態縮圖，1／2，24位瀏覽」
+    // 「這則限時動態的發佈日期：10月5日」
+    // ⚠️ 用「限時動態」當關鍵字比較寬，但真人聊天室叫這個名字的機率極低，
+    //    而且判錯只是歸到「系統通知」標籤，隨時改得回來。
+    Regex("(限時動態|精選動態|連續短片)")
 )
 
 /**
@@ -580,7 +590,8 @@ private val UI_LABEL_NAMES = setOf(
     "相簿", "檔案", "位置資訊", "搜尋訊息", "封鎖", "檢舉", "說明", "隱私權", "服務條款",
     // Threads／IG 貼文下方那排按鈕，沒有數字時抓到的就是光禿禿的標籤字
     "讚", "已讚", "按讚", "轉發", "引用", "轉發貼文", "like", "likes", "repost", "quote",
-    "收回讚", "取消讚", "取消追蹤", "取消轉發", "unlike", "unfollow"
+    "收回讚", "取消讚", "取消追蹤", "取消轉發", "unlike", "unfollow",
+    "已儲存截圖", "儲存截圖", "搜尋結果", "最近搜尋", "搜尋訊息、聯絡人"
 )
 
 private val NON_PERSON_EXTRA = listOf(
@@ -3794,6 +3805,8 @@ class ChatTrackerService : AccessibilityService() {
         var fallbackTop = Int.MAX_VALUE
         var hasEdit = false
         var visited = 0
+        // 輸入框裡的字，最後要把它們從候選標題裡排除（見下面的說明）
+        val editTexts = HashSet<String>()
         // ⚠️ 動態牆偵測：這是擋掉「把貼文內文讀成聊天室」最可靠的訊號。
         //    用畫面長相判斷，不是用名字猜 —— 名字猜一定會誤殺真的群組。
         //    收集到兩種以上才算數，單一個「分享」可能只是選單項目。
@@ -3810,19 +3823,29 @@ class ChatTrackerService : AccessibilityService() {
             visited++
             if (depth > MAX_TREE_DEPTH) continue
 
-            if (!hasEdit && (node.isEditable || node.className?.toString()?.contains("EditText") == true)) {
-                hasEdit = true
-            }
+            val editable = node.isEditable || node.className?.toString()?.contains("EditText") == true
+            if (!hasEdit && editable) hasEdit = true
 
             // 有些 App 的標題只放在 contentDescription
             val text = (node.text?.toString() ?: node.contentDescription?.toString())?.trim()
-            if (!text.isNullOrBlank() && text.length <= 12) {
+            /**
+             * ⚠️ 輸入框裡的字**不是**聊天室標題。
+             *
+             *    LINE 的搜尋頁最上面就是一個輸入框。你打「tw」兩個字，
+             *    它就成了畫面最上方的文字被抓走；而搜尋頁本來就有輸入框
+             *    （hasEdit = true），採信條件第 2 條直接通過 ——
+             *    於是「tw」變成一個聊天室，被記了幾十秒。
+             *    聊天室的標題永遠是獨立的 TextView，訊息輸入框在下面而且通常是空的，
+             *    所以跳過可編輯節點不會傷到正常的聊天室。
+             */
+            if (editable && !text.isNullOrBlank()) editTexts.add(text)
+            if (!editable && !text.isNullOrBlank() && text.length <= 12) {
                 val low = text.lowercase()
                 if (low in FEED_ACTION_LABELS) feedSignals.add(low)
                 // 「讚 92」這種帶數字的計數鈕，算同一種訊號
                 FEED_COUNT_BUTTON.find(text)?.let { feedSignals.add(it.groupValues[1]) }
             }
-            if (!text.isNullOrBlank() && text.length <= 60) {
+            if (!editable && !text.isNullOrBlank() && text.length <= 60) {
                 if (byId == null) {
                     val suffix = node.viewIdResourceName?.substringAfterLast('/')
                     if (suffix != null && suffix in titleIdSuffixes && looksLikeTitle(text)) byId = text
@@ -3842,7 +3865,10 @@ class ChatTrackerService : AccessibilityService() {
             if (byId != null && hasEdit) break
         }
 
-        return ScanResult(byId ?: fallback, hasEdit, byId != null, feedSignals.size >= 2)
+        // ⚠️ 最後再擋一次：標題是從別的節點抓到、但內容跟輸入框一樣時
+        //    （搜尋頁常常把查詢字串同時放在標題列），一樣不採信。
+        val title = (byId ?: fallback)?.takeIf { it !in editTexts }
+        return ScanResult(title, hasEdit, title != null && title == byId, feedSignals.size >= 2)
     }
 
     /** 排除時鐘、純數字、單一符號等明顯不是聊天室名稱的文字 */
@@ -12314,6 +12340,8 @@ private val USER_GUIDE = listOf(
         listOf(
             "聯絡人頁的標籤列會直接顯示每個標籤有幾位，點一下就只看那個標籤。「全部」不含系統通知。",
             "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」，不列入排行與統計。Threads 與 IG 貼文下方的計數按鈕（「讚 92」「轉發 1.2萬」）也算在內。聯絡人頁的提醒卡可以逐筆確認：標為系統通知、刪除，或確認是真人後保留不再提醒。",
+            "LINE 的搜尋頁不會再被當成聊天室。那一頁最上面就是輸入框，你打的字以前會被當成最上方的標題抓走，變成一個叫「tw」之類的聯絡人。現在輸入框裡的字一律不當標題。",
+            "IG 的限時動態介面（限時動態典藏、縮圖、發佈日期、已儲存截圖）與「[帳號] N 個新的讚」也不再被收成聯絡人。",
             "滑動態牆時不會再把貼文內文記成聊天室：畫面上同時出現讚、留言、轉發那排按鈕時，App 就知道這是動態牆而不是聊天室，私訊不受影響。另外名字讀起來像一整句話（很長、有句號、整句都是口語）也會被歸到「系統通知」，判錯的話在提醒卡選「確認是真人」就會放它一馬。",
             "刪除這類來源沒有用——對方下次推播就會重建。刪除聯絡人時可以勾「同時加入永不記錄名單」，之後就不會再記下來。",
             "「未分類」是虛線框，代表還沒分；分好類之後圖表才看得出你的時間花在哪種關係上。"
@@ -12371,7 +12399,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "「設定 → 清除資料」只會刪互動紀錄（訊息、停留、通話），標籤、合併的帳號、改過的名稱、常用詞都不會動。刪之前會列出清單讓你逐人取消。",
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
-            "所有資料只存在這支手機。到「設定 → 備份」按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
+            "所有資料只存在這支手機。到「設定 → 備份 → 備份與還原」點進去，按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
             "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
             "還原會跟目前的紀錄合併：備份裡的紀錄加回來，這支手機上備份之後才記到的新紀錄也會保留，重複的只算一次。",
             "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。",
@@ -12420,7 +12448,7 @@ private val USER_FAQ = listOf(
     "刪錯了可以救回來嗎？" to
         "可以。到「設定 → 最近刪除」，保留 7 天，可以整批還原，也可以只還原其中一個人。",
     "換手機資料會跟著走嗎？" to
-        "先綁定雲端備份：「設定 → 備份 → ☁ 綁定 Google 雲端硬碟」，之後依你設定的週期自動更新（預設每天）。" +
+        "先綁定雲端備份：「設定 → 備份 → 備份與還原 → ☁ 綁定 Google 雲端硬碟」，之後依你設定的週期自動更新（預設每天）。" +
         "新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔。沒綁定的話，換機前請手動「存成檔案」。",
     "App 會把我的資料傳出去嗎？" to
         "不會。App 沒有網路權限，無法把任何資料傳出手機，開發者也看不到。" +
@@ -12930,6 +12958,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     val cloudInterval by viewModel.cloudBackupInterval.collectAsState()
     val cloudLocation by viewModel.cloudBackupLocation.collectAsState()
     val cloudAccount by viewModel.cloudBackupAccount.collectAsState()
+    var showBackup by remember { mutableStateOf(false) }
     var editCloudAccount by remember { mutableStateOf(false) }
     if (editCloudAccount) {
         var input by remember { mutableStateOf(cloudAccount.orEmpty()) }
@@ -13319,155 +13348,24 @@ fun SettingsView(viewModel: RelateViewModel) {
         item { SettingsSection("備份") }
         item {
             SettingsCard {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    if (cloudUri != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(AppColors.FriendText))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("雲端備份已綁定", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                        }
-
-                        // 綁在哪裡：使用者要能確認自己真的綁到雲端，而不是手機裡的某個資料夾
-                        val cloudAuth = remember(cloudUri) { runCatching { Uri.parse(cloudUri).authority.orEmpty() }.getOrDefault("") }
-                        val isOnPhone = cloudAuth.startsWith("com.android.externalstorage") ||
-                            cloudAuth.startsWith("com.android.providers.downloads") ||
-                            cloudAuth.startsWith("com.android.providers.media")
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp))
-                                .background(AppColors.Background).padding(horizontal = 12.dp, vertical = 10.dp)
-                        ) {
-                            Text("備份位置", fontSize = T.Micro, color = AppColors.TextTertiary)
-                            Text(cloudLocation ?: "已選擇的位置", fontSize = T.Body, fontWeight = FontWeight.Bold,
-                                color = AppColors.TextPrimary, lineHeight = 20.sp)
-                            // 哪個 Google 帳號：抓得到就顯示，抓不到讓使用者自己標
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                                Text(
-                                    if (cloudAccount != null) "帳號：$cloudAccount" else "帳號：未標註",
-                                    fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    color = if (cloudAccount != null) AppColors.TextSecondary else AppColors.WorkText,
-                                    modifier = Modifier.weight(1f, fill = false)
-                                )
-                                Text(if (cloudAccount != null) "修改" else "標註帳號",
-                                    fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
-                                    maxLines = 1, softWrap = false,
-                                    modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(6.dp))
-                                        .clickable { editCloudAccount = true }.padding(horizontal = 6.dp, vertical = 4.dp))
-                                Text("開啟備份檔", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
-                                    maxLines = 1, softWrap = false,
-                                    modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                        .clickable {
-                                            val u = cloudUri ?: return@clickable
-                                            val ok = runCatching {
-                                                context.startActivity(Intent(Intent.ACTION_VIEW).apply {
-                                                    setDataAndType(Uri.parse(u), "text/plain")
-                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                })
-                                            }.isSuccess
-                                            if (!ok) Toast.makeText(context,
-                                                "這個位置無法直接開啟，請到雲端硬碟 App 搜尋「RelateStats_雲端備份」",
-                                                Toast.LENGTH_LONG).show()
-                                        }.padding(horizontal = 6.dp, vertical = 4.dp))
-                            }
-                            Text(
-                                if (cloudLast > 0) "上次備份 " + SimpleDateFormat("yyyy/M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast))
-                                else "尚未備份",
-                                fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.padding(top = 2.dp)
-                            )
-                            if (isOnPhone) {
-                                Text("⚠ 這個位置在手機裡，換機或重灌時不會跟著走。建議按「更換位置」改選雲端硬碟。",
-                                    fontSize = T.Micro, color = AppColors.WorkText, lineHeight = 15.sp,
-                                    modifier = Modifier.padding(top = 6.dp))
-                            }
-                        }
-
-                        // 自動備份週期
-                        Text("自動備份", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
-                            modifier = Modifier.padding(top = 12.dp, bottom = 6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth().background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)
-                        ) {
-                            listOf(1 to "每天", 3 to "每 3 天", 7 to "每週", 0 to "不自動").forEach { (days, label) ->
-                                val on = cloudInterval == days
-                                Box(
-                                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
-                                        .background(if (on) AppColors.BrandPrimary else Color.Transparent)
-                                        .clickable { viewModel.setCloudBackupInterval(days) }
-                                        .padding(vertical = 7.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
-                                        color = if (on) Color.White else AppColors.TextSecondary,
-                                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
-                                }
-                            }
-                        }
-                        Text(
-                            if (cloudInterval == 0) "不會自動更新，只在你按「立即備份」時更新。"
-                            else "每晚 9 點左右檢查，距離上次備份滿 ${if (cloudInterval == 1) "1 天" else if (cloudInterval == 7) "7 天" else "$cloudInterval 天"}就自動更新。",
-                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    ioScope.launch {
-                                        val ok = withContext(Dispatchers.IO) { viewModel.backupToCloudNow(context) }
-                                        Toast.makeText(context,
-                                            if (ok) "已更新雲端備份" else "備份失敗：檔案可能被移動或刪除，請按「更換位置」重新綁定",
-                                            Toast.LENGTH_LONG).show()
-                                    }
-                                },
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
-                                shape = RoundedCornerShape(10.dp), contentPadding = PaddingValues(vertical = 10.dp)
-                            ) { Text("立即備份", fontSize = T.Label, maxLines = 1, softWrap = false) }
-                            OutlinedButton(
-                                onClick = { cloudBindLauncher.launch("RelateStats_雲端備份.txt") },
-                                modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(vertical = 10.dp)
-                            ) { Text("更換位置", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
-                        }
-                        Text("解除綁定", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText,
-                            maxLines = 1, softWrap = false,
-                            modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
-                                .clickable { confirmUnbindCloud = true }.padding(horizontal = 4.dp, vertical = 6.dp))
-                    } else {
-                        Text("所有資料只存在這支手機。綁定 Google 雲端硬碟後會定期自動把備份更新到雲端（週期可調），換機或重灌都不怕。",
-                            fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = { cloudBindLauncher.launch("RelateStats_雲端備份.txt") },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(vertical = 12.dp)
-                        ) { Text("☁  綁定 Google 雲端硬碟", fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
-                        Text("按下後，在左側選「雲端硬碟」並留意下方的帳號，再按儲存。手機有多個 Google 帳號時，存好後可以標註是哪一個。",
-                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
-                            modifier = Modifier.padding(top = 6.dp))
-                    }
-
-                    HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(vertical = 12.dp))
-                    Text("手動備份", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { exportLauncher.launch("RelateStats_Backup.txt") },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(vertical = 10.dp)
-                        ) { Text("存成檔案", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
-                        OutlinedButton(
-                            onClick = { importLauncher.launch(arrayOf("text/plain")) },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(vertical = 10.dp)
-                        ) { Text("從檔案還原", fontSize = T.Label, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false) }
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // ⚠️ 這裡要講清楚「App 自己沒有網路」，否則使用者會以為綁了雲端就代表 App 會上網。
-                    Text("換機時在新手機按「從檔案還原」，到雲端硬碟選那份備份檔。App 本身沒有網路權限，上傳由 Google 雲端硬碟 App 代為處理。",
-                        fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
-                }
+                /**
+                 * ⚠️ 備份的細節收進對話框，不要在設定頁整個攤開。
+                 *    那一整塊（狀態、位置、帳號、週期、四顆按鈕、兩段說明）
+                 *    有一百多行，把設定頁撐成一條捲不完的長帶，
+                 *    下面的「資料」「關於」全被推到看不到的地方。
+                 *    這裡只留一行狀態，點進去才看細節。
+                 * ⚠️ 沒綁定時用 accent 色：這是整個 App 唯一能防止換機資料全失的東西，
+                 *    縮成一行之後更要讓它看起來需要被處理。
+                 */
+                SettingsRow(
+                    "備份與還原",
+                    if (cloudUri == null) "尚未綁定雲端，換機會整包不見"
+                    else "雲端已綁定 · " + (
+                        if (cloudLast > 0) "上次 " + SimpleDateFormat("M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast))
+                        else "尚未備份"
+                        ),
+                    accent = cloudUri == null
+                ) { showBackup = true }
             }
         }
 
@@ -13707,6 +13605,199 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
     }
 
+    /**
+     * 備份與還原。
+     * ⚠️ 內容跟以前一樣，只是從設定頁搬進對話框 ——
+     *    所有 launcher 與狀態都在 SettingsView 的作用域裡，
+     *    所以直接寫在這裡，不另外拉成獨立 Composable 傳十個參數。
+     */
+    if (showBackup) {
+        Dialog(
+            onDismissRequest = { showBackup = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize().safeDrawingPadding()
+                    .padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 28.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
+                        .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.82f).dp)
+                        .clip(RoundedCornerShape(28.dp)).background(AppColors.Surface)
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(androidx.compose.ui.graphics.Brush.linearGradient(
+                                listOf(AppColors.Chart.brand, AppColors.Chart.accent)))
+                            .padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 16.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(end = 40.dp)) {
+                            Text("備份與還原", fontSize = 19.sp, fontWeight = FontWeight.Black, color = Color.White)
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                                Box(modifier = Modifier.size(7.dp).clip(CircleShape)
+                                    .background(Color.White.copy(alpha = if (cloudUri != null) 0.95f else 0.45f)))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    if (cloudUri != null) "雲端備份已綁定" else "尚未綁定雲端",
+                                    fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = Color.White.copy(alpha = 0.9f), maxLines = 1, softWrap = false
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = { showBackup = false },
+                            modifier = Modifier.align(Alignment.TopEnd)
+                        ) { Icon(Icons.Rounded.Close, contentDescription = "關閉", tint = Color.White) }
+                    }
+                    Column(
+                        modifier = Modifier.verticalScroll(rememberScrollState()).padding(14.dp)
+                    ) {
+                    if (cloudUri != null) {
+                        // 綁在哪裡：使用者要能確認自己真的綁到雲端，而不是手機裡的某個資料夾
+                        val cloudAuth = remember(cloudUri) { runCatching { Uri.parse(cloudUri).authority.orEmpty() }.getOrDefault("") }
+                        val isOnPhone = cloudAuth.startsWith("com.android.externalstorage") ||
+                            cloudAuth.startsWith("com.android.providers.downloads") ||
+                            cloudAuth.startsWith("com.android.providers.media")
+                        Column(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                                .background(AppColors.Background).padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Text("備份位置", fontSize = T.Micro, color = AppColors.TextTertiary)
+                            Text(cloudLocation ?: "已選擇的位置", fontSize = T.Body, fontWeight = FontWeight.Bold,
+                                color = AppColors.TextPrimary, lineHeight = 20.sp)
+                            // 哪個 Google 帳號：抓得到就顯示，抓不到讓使用者自己標
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                                Text(
+                                    if (cloudAccount != null) "帳號：$cloudAccount" else "帳號：未標註",
+                                    fontSize = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    color = if (cloudAccount != null) AppColors.TextSecondary else AppColors.WorkText,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Text(if (cloudAccount != null) "修改" else "標註帳號",
+                                    fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(6.dp))
+                                        .clickable { editCloudAccount = true }.padding(horizontal = 6.dp, vertical = 4.dp))
+                                Text("開啟備份檔", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.ActiveBlue,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            val u = cloudUri ?: return@clickable
+                                            val ok = runCatching {
+                                                context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                                    setDataAndType(Uri.parse(u), "text/plain")
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                })
+                                            }.isSuccess
+                                            if (!ok) Toast.makeText(context,
+                                                "這個位置無法直接開啟，請到雲端硬碟 App 搜尋「RelateStats_雲端備份」",
+                                                Toast.LENGTH_LONG).show()
+                                        }.padding(horizontal = 6.dp, vertical = 4.dp))
+                            }
+                            Text(
+                                if (cloudLast > 0) "上次備份 " + SimpleDateFormat("yyyy/M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast))
+                                else "尚未備份",
+                                fontSize = T.Micro, color = AppColors.TextTertiary, modifier = Modifier.padding(top = 2.dp)
+                            )
+                            if (isOnPhone) {
+                                Text("⚠ 這個位置在手機裡，換機或重灌時不會跟著走。建議按「更換位置」改選雲端硬碟。",
+                                    fontSize = T.Micro, color = AppColors.WorkText, lineHeight = 15.sp,
+                                    modifier = Modifier.padding(top = 6.dp))
+                            }
+                        }
+
+                        // 自動備份週期
+                        Text("自動備份", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)
+                        ) {
+                            listOf(1 to "每天", 3 to "每 3 天", 7 to "每週", 0 to "不自動").forEach { (days, label) ->
+                                val on = cloudInterval == days
+                                Box(
+                                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
+                                        .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                        .clickable { viewModel.setCloudBackupInterval(days) }
+                                        .padding(vertical = 7.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
+                                        color = if (on) Color.White else AppColors.TextSecondary,
+                                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
+                                }
+                            }
+                        }
+                        Text(
+                            if (cloudInterval == 0) "不會自動更新，只在你按「立即備份」時更新。"
+                            else "每晚 9 點左右檢查，距離上次備份滿 ${if (cloudInterval == 1) "1 天" else if (cloudInterval == 7) "7 天" else "$cloudInterval 天"}就自動更新。",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    ioScope.launch {
+                                        val ok = withContext(Dispatchers.IO) { viewModel.backupToCloudNow(context) }
+                                        Toast.makeText(context,
+                                            if (ok) "已更新雲端備份" else "備份失敗：檔案可能被移動或刪除，請按「更換位置」重新綁定",
+                                            Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                                shape = RoundedCornerShape(10.dp), contentPadding = PaddingValues(vertical = 10.dp)
+                            ) { Text("立即備份", fontSize = T.Label, maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = { cloudBindLauncher.launch("RelateStats_雲端備份.txt") },
+                                modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(vertical = 10.dp)
+                            ) { Text("更換位置", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
+                        }
+                        Text("解除綁定", fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.WorkText,
+                            maxLines = 1, softWrap = false,
+                            modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
+                                .clickable { confirmUnbindCloud = true }.padding(horizontal = 4.dp, vertical = 6.dp))
+                    } else {
+                        Text("所有資料只存在這支手機。綁定 Google 雲端硬碟後會定期自動把備份更新到雲端（週期可調），換機或重灌都不怕。",
+                            fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { cloudBindLauncher.launch("RelateStats_雲端備份.txt") },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 12.dp)
+                        ) { Text("☁  綁定 Google 雲端硬碟", fontSize = T.Body, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
+                        Text("按下後，在左側選「雲端硬碟」並留意下方的帳號，再按儲存。手機有多個 Google 帳號時，存好後可以標註是哪一個。",
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp,
+                            modifier = Modifier.padding(top = 6.dp))
+                    }
+
+                    HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(vertical = 12.dp))
+                    Text("手動備份", fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextSecondary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { exportLauncher.launch("RelateStats_Backup.txt") },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) { Text("存成檔案", fontSize = T.Label, color = AppColors.TextPrimary, maxLines = 1, softWrap = false) }
+                        OutlinedButton(
+                            onClick = { importLauncher.launch(arrayOf("text/plain")) },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) { Text("從檔案還原", fontSize = T.Label, color = AppColors.ActiveBlue, maxLines = 1, softWrap = false) }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // ⚠️ 這裡要講清楚「App 自己沒有網路」，否則使用者會以為綁了雲端就代表 App 會上網。
+                    }
+                }
+            }
+        }
+    }
+
     if (showCategoryManager) {
         CategoryManagerDialog(viewModel, availableCats) { showCategoryManager = false }
     }
@@ -13881,6 +13972,10 @@ const val BUYMEACOFFEE_URL = "https://buymeacoffee.com/celinefu"
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.16" to listOf(
+        "備份收進「設定 → 備份 → 備份與還原」，點進去才看細節，設定頁不再被撐長。",
+        "LINE 搜尋打的字、IG 限時動態介面、「[帳號] N 個新的讚」不再被收成聯絡人。"
+    ),
     "1.0.15" to listOf(
         "設定頁「關於」多了「請我喝杯咖啡」。這個 App 不收費，請不請都一樣好用。"
     ),
