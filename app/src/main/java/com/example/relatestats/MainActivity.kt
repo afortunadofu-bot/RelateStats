@@ -12336,6 +12336,7 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "設定頁最下面的「關於」有四列：「前往商店更新」會開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「應用程式版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
+            "「關於 → 請我喝杯咖啡」會開贊助頁。完全自願 —— 這個 App 沒有付費功能，贊助也不會解鎖任何東西，不想按完全不影響使用。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
@@ -13566,6 +13567,13 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsDivider()
                 SettingsRow("聯絡我們", FEEDBACK_EMAIL) { contactDeveloper(context) }
                 SettingsDivider()
+                // ⚠️ 副標要寫明「不會解鎖任何功能」。
+                //    不寫的話使用者會以為付了錢有東西拿，那既是誤導，
+                //    也會讓這一列變成 Play 眼中的「繞過帳務的付費功能」。
+                SettingsRow("請我喝杯咖啡", "完全自願，不會解鎖任何功能") {
+                    openUrl(context, BUYMEACOFFEE_URL)
+                }
+                SettingsDivider()
                 /**
                  * ⚠️ 點一下複製「版本 + 機型 + Android 版本」。
                  *    回報問題時最常漏掉的就是這三樣，每次都要來回問一輪。
@@ -13850,6 +13858,17 @@ const val PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.re
 const val PLAY_PACKAGE = "com.relatestats.app"
 
 /**
+ * 贊助頁（Buy Me a Coffee）。
+ *
+ * ⚠️ 這杯咖啡**不能解鎖任何東西** —— 不給功能、不去廣告、不加額度。
+ *    Google Play 的付款政策只在「款項換到 App 內的東西」時才要求走
+ *    Play 帳務；純粹的贊助連結是可以的，但只要它跟任何功能掛勾，
+ *    就變成繞過 Play 收費，會被下架。所以這一列永遠只是一個連結。
+ * ⚠️ 一樣是丟 ACTION_VIEW 給瀏覽器，App 本身沒有網路權限。
+ */
+const val BUYMEACOFFEE_URL = "https://buymeacoffee.com/celinefu"
+
+/**
  * 更新紀錄，給使用者看的版本。
  *
  * ⚠️ 跟 docs/CHANGELOG.md 是兩份東西，不要直接把那邊的內容貼過來：
@@ -13859,6 +13878,9 @@ const val PLAY_PACKAGE = "com.relatestats.app"
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.15" to listOf(
+        "設定頁「關於」多了「請我喝杯咖啡」。完全自願，不會解鎖任何功能。"
+    ),
     "1.0.14" to listOf(
         "分析頁的常用詞會跟著日期篩選走了，不再是不管選什麼都一樣。",
         "逐日累積從這一版開始，只保留最近 90 天；選到更早的區間時卡片上會寫明。"
