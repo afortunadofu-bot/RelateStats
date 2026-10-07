@@ -1333,6 +1333,39 @@ object DataRepository {
     // 同時存 2/3/4 字組合，上限需放大
     private const val MAX_WORDS = 9000
 
+    /**
+     * 逐日詞頻：天 → (詞 → 次數)。這是「常用詞能跟著日期篩選走」的唯一來源。
+     *
+     * ⚠️ 本來只有 _wordFreq 一張全期間累計表，沒有任何時間維度 ——
+     *    所以不管選今天、本週還是指定區間，看到的都是同一份。
+     *    那不是篩選壞掉，是資料裡根本沒有日期可以篩。
+     * ⚠️ 只保留最近 WORD_DAYS_KEEP 天、每天最多 MAX_WORDS_PER_DAY 個詞。
+     *    不設上限的話：90 天 × 每天上千個 2~4 字組合，光這個檔就會比
+     *    互動紀錄還大，每次存檔都要重寫一遍。
+     * ⚠️ 每天超過上限時留次數最高的，所以把一週加起來會略少於真實值。
+     *    這是刻意的取捨 —— 畫面上只顯示前 12 名，被丟掉的本來也排不進去。
+     * ⚠️ 「全部」仍然走 _wordFreq，因為它涵蓋 WORD_DAYS_KEEP 以前的歷史。
+     */
+    private val _wordDays = MutableStateFlow<Map<Int, Map<String, Int>>>(emptyMap())
+    val wordDays: StateFlow<Map<Int, Map<String, Int>>> = _wordDays.asStateFlow()
+
+    /**
+     * 從哪一天開始有逐日資料（epoch day，0 = 還沒有）。
+     * ⚠️ 一定要存這個。使用者選的區間比它早時，看到的數字會偏少，
+     *    畫面上要講明白是「從某天才開始分日統計」，不然會被當成算錯。
+     */
+    private val _wordDaysSince = MutableStateFlow(0)
+    val wordDaysSince: StateFlow<Int> = _wordDaysSince.asStateFlow()
+
+    private const val WORD_DAYS_KEEP = 90
+    private const val MAX_WORDS_PER_DAY = 250
+    private const val WORD_DAYS_FILE = "RelateStats_WordDays.txt"
+    @Volatile
+    private var lastWrittenWordDays: Map<Int, Map<String, Int>>? = null
+
+    /** 本地時區的第幾天。時區固定時遞增且唯一，拿來當 key 比字串便宜。 */
+    fun epochDayOf(ts: Long): Int = (startOfDayMs(ts) / 86_400_000L).toInt()
+
     @Volatile
     private var prefs: SharedPreferences? = null
     @Volatile
@@ -1469,6 +1502,19 @@ object DataRepository {
                 if (i <= 0) null else line.substring(0, i) to (line.substring(i + 3).toIntOrNull() ?: return@mapNotNull null)
             }.toMap()
         }.getOrDefault(emptyMap())
+
+        _wordDays.value = readWordDaysFile()
+        lastWrittenWordDays = _wordDays.value
+        _wordDaysSince.value = p.getInt("word_days_since", 0).let { saved ->
+            // ⚠️ 檔案可能因為保留天數到期被裁掉，since 要跟著往後推，
+            //    不然畫面會說「從三個月前開始統計」但其實只剩最近 90 天。
+            val earliest = _wordDays.value.keys.minOrNull()
+            when {
+                earliest == null -> saved
+                saved == 0 -> earliest
+                else -> maxOf(saved, earliest)
+            }
+        }
     }
 
     private fun parsePairs(raw: Set<String>?): Map<String, String> {
@@ -1631,6 +1677,51 @@ object DataRepository {
         }
     }
 
+    /**
+     * 逐日詞頻存成獨立檔案，不放 SharedPreferences。
+     * ⚠️ prefs 會在啟動時整包載進記憶體，塞幾萬行進去會拖慢冷啟動。
+     * 格式：天<TAB>次數<TAB>詞。詞是 2~4 字中文或純英文單字，
+     * 不可能含 TAB 或換行，所以用 TAB 當分隔是安全的。
+     */
+    private fun writeWordDaysFile() {
+        val ctx = appContext ?: return
+        val snapshot = _wordDays.value
+        runCatching {
+            File(ctx.filesDir, WORD_DAYS_FILE).bufferedWriter().use { w ->
+                snapshot.forEach { (day, words) ->
+                    words.forEach { (word, count) ->
+                        w.write(day.toString()); w.write("\t")
+                        w.write(count.toString()); w.write("\t")
+                        w.write(word); w.newLine()
+                    }
+                }
+            }
+            lastWrittenWordDays = snapshot
+        }
+    }
+
+    private fun readWordDaysFile(): Map<Int, Map<String, Int>> {
+        val ctx = appContext ?: return emptyMap()
+        return runCatching {
+            val f = File(ctx.filesDir, WORD_DAYS_FILE)
+            if (!f.exists()) return emptyMap()
+            val cutoff = epochDayOf(System.currentTimeMillis()) - WORD_DAYS_KEEP
+            val out = HashMap<Int, HashMap<String, Int>>()
+            f.forEachLine { line ->
+                val a = line.indexOf('\t')
+                if (a <= 0) return@forEachLine
+                val b = line.indexOf('\t', a + 1)
+                if (b <= a) return@forEachLine
+                val day = line.substring(0, a).toIntOrNull() ?: return@forEachLine
+                if (day < cutoff) return@forEachLine
+                val count = line.substring(a + 1, b).toIntOrNull() ?: return@forEachLine
+                val word = line.substring(b + 1)
+                if (word.isNotEmpty()) out.getOrPut(day) { HashMap() }[word] = count
+            }
+            out as Map<Int, Map<String, Int>>
+        }.getOrDefault(emptyMap())
+    }
+
     private fun readRecordsFile(): List<InteractionRecord>? {
         val ctx = appContext ?: return null
         return runCatching {
@@ -1643,6 +1734,7 @@ object DataRepository {
     private fun writeToDisk() {
         val p = prefs ?: return
         if (_interactions.value !== lastWrittenRecords) writeRecordsFile()
+        if (_wordDays.value !== lastWrittenWordDays) writeWordDaysFile()
         runCatching {
             val aliases = _aliases.value.map { "${it.key}|=|${it.value}" }.toSet()
             val cats = _categories.value.map { "${it.key}|=|${it.value}" }.toSet()
@@ -1653,6 +1745,7 @@ object DataRepository {
                 putStringSet("categories", cats)
                 putString("all_categories", allCats)
                 putStringSet("word_freq", words)
+                putInt("word_days_since", _wordDaysSince.value)
                 // word \u0001 sender \u0001 count —— 用控制字元當分隔，名字裡不可能出現
                 putStringSet("word_senders", _wordSenders.value.flatMap { (w, senders) ->
                     senders.map { (n, c) -> w + "\u0001" + n + "\u0001" + c }
@@ -1984,6 +2077,24 @@ object DataRepository {
             if (m.size > MAX_WORDS) m.entries.sortedByDescending { it.value }.take(MAX_WORDS).associate { it.key to it.value }
             else m
         }
+        // 同一批詞也記進「今天」那一格，常用詞才有辦法跟著日期篩選走
+        val today = epochDayOf(System.currentTimeMillis())
+        _wordDays.update { cur ->
+            val m = HashMap(cur)
+            val day = HashMap(m[today] ?: emptyMap())
+            clean.forEach { day[it] = (day[it] ?: 0) + 1 }
+            m[today] = if (day.size > MAX_WORDS_PER_DAY)
+                day.entries.sortedByDescending { it.value }.take(MAX_WORDS_PER_DAY)
+                    .associate { it.key to it.value }
+            else day
+            // 太舊的整天丟掉。⚠️ 用 keys.filter 先收集再刪，
+            //    直接在迭代中 remove 會 ConcurrentModificationException。
+            val cutoff = today - WORD_DAYS_KEEP
+            m.keys.filter { it < cutoff }.forEach { m.remove(it) }
+            m
+        }
+        if (_wordDaysSince.value == 0 || today < _wordDaysSince.value) _wordDaysSince.value = today
+
         if (!senderName.isNullOrBlank()) recordWordSenders(clean, senderName)
         saveData()
     }
@@ -2035,9 +2146,18 @@ object DataRepository {
         val removed = cur.size - kept.size
         if (removed > 0) {
             _wordFreq.value = kept
+            // ⚠️ 逐日那份也要清。只清累計表的話，選區間時被刪掉的詞會原地復活。
+            purgeFromDays(words)
             saveData(immediate = true)
         }
         return removed
+    }
+
+    private fun purgeFromDays(words: Set<String>) {
+        if (words.isEmpty()) return
+        _wordDays.update { cur ->
+            cur.mapValues { (_, m) -> m.filterKeys { it !in words } }.filterValues { it.isNotEmpty() }
+        }
     }
 
     fun purgeJunkWords(): Int {
@@ -2048,6 +2168,7 @@ object DataRepository {
         val removed = cur.size - kept.size
         if (removed > 0) {
             _wordFreq.value = kept
+            purgeFromDays(cur.keys - kept.keys)
             saveData(immediate = true)
         }
         return removed
@@ -2056,6 +2177,8 @@ object DataRepository {
     fun clearWordFreq() {
         _wordFreq.value = emptyMap()
         _wordSenders.value = emptyMap()
+        _wordDays.value = emptyMap()
+        _wordDaysSince.value = 0
         saveData(immediate = true)
     }
 
@@ -5106,6 +5229,8 @@ class RelateViewModel : ViewModel() {
     fun unmergeAccount(rawName: String) = DataRepository.unmergeAccount(rawName)
     val lastCleanupRemoved = DataRepository.lastCleanupRemoved
     val wordFreq = DataRepository.wordFreq
+    val wordDays = DataRepository.wordDays
+    val wordDaysSince = DataRepository.wordDaysSince
     fun clearWordFreq() = DataRepository.clearWordFreq()
     fun purgeJunkWords() = DataRepository.purgeJunkWords()
     fun previewJunkWords() = DataRepository.previewJunkWords()
@@ -7681,6 +7806,22 @@ fun InsightsView(viewModel: RelateViewModel) {
     var drillCalls by remember { mutableStateOf<Map<String, List<InteractionRecord>>>(emptyMap()) }
     val wordFreq by viewModel.wordFreq.collectAsState()
     val wordSenders by viewModel.wordSenders.collectAsState()
+    val wordDays by viewModel.wordDays.collectAsState()
+    val wordSince by viewModel.wordDaysSince.collectAsState()
+    // ⚠️ 在 remember 裡算沒問題：逐日表最多 90 天 × 250 個詞，
+    //    跟排行榜那種要掃全表的運算不是同一個量級，不需要 produceState。
+    val wordScope = remember(wordFreq, wordDays, wordSince, filter, weekStartDay) {
+        scopeWords(
+            wordFreq, wordDays, wordSince,
+            viewModel.rangeOf(filter, weekStartDay),
+            when (filter.type) {
+                FilterType.SPECIFIC_DAY -> "這一天"
+                FilterType.WEEK -> "這一週"
+                FilterType.RANGE -> "這段期間"
+                FilterType.ALL -> "全期間"
+            }
+        )
+    }
     val secOrder by viewModel.sectionOrder.collectAsState()
     val secHidden by viewModel.hiddenSections.collectAsState()
     var showSectionEditor by remember { mutableStateOf(false) }
@@ -7902,7 +8043,7 @@ fun InsightsView(viewModel: RelateViewModel) {
             })
 
             sections.add(Sec("words", "常用詞") {
-                TopWordsCard(wordFreq, wordSenders)
+                TopWordsCard(wordScope, wordSenders)
             })
 
             // 「活躍天數」區塊已拿掉（v3.24）：多數人天天都在聊，
@@ -8734,9 +8875,56 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
     }
 }
 
+/**
+ * 一個區間的常用詞。
+ *
+ * @param words  這個區間加總後的詞頻
+ * @param label  畫面上那顆小標籤要寫什麼（「全期間」「本週」…）
+ * @param note   資料不完整時要講的話；null 表示這個區間的資料是完整的
+ */
+class WordScope(val words: Map<String, Int>, val label: String, val note: String?)
+
+/**
+ * 把逐日詞頻在選取區間內加總。
+ *
+ * ⚠️ 「全部」直接回傳全期間累計表 —— 它涵蓋逐日資料保留期以前的歷史，
+ *    逐日那份只留最近 90 天，拿它加總會比實際少掉一大塊。
+ * ⚠️ 區間比「開始逐日累積的那天」還早時，一定要回一句 note。
+ *    這個功能是 1.0.14 才加的，在那之前的日期一個詞都沒有；
+ *    不講的話使用者會看到空白然後以為是壞的。
+ */
+fun scopeWords(
+    all: Map<String, Int>,
+    days: Map<Int, Map<String, Int>>,
+    since: Int,
+    range: Pair<Long, Long>?,
+    rangeLabel: String
+): WordScope {
+    if (range == null) return WordScope(all, "全期間", null)
+    val from = DataRepository.epochDayOf(range.first)
+    val to = DataRepository.epochDayOf(range.second)
+    val sum = HashMap<String, Int>()
+    for (d in from..to) {
+        days[d]?.forEach { (w, c) -> sum[w] = (sum[w] ?: 0) + c }
+    }
+    val note = when {
+        since == 0 -> "常用詞從這一版才開始分日累積，之後才會有資料。現在先看「全部」。"
+        from < since -> "只統計 " + dayLabel(since) + " 之後的訊息（常用詞從那天才開始分日累積）。"
+        else -> null
+    }
+    return WordScope(sum, rangeLabel, note)
+}
+
+/** epoch day 轉成「10/7」這種標籤 */
+fun dayLabel(epochDay: Int): String {
+    val cal = Calendar.getInstance().apply { timeInMillis = epochDay * 86_400_000L + 43_200_000L }
+    return "${cal.get(Calendar.MONTH) + 1}/${cal.get(Calendar.DAY_OF_MONTH)}"
+}
+
 /** 常用詞（只累計詞頻，不保留訊息原文） */
 @Composable
-fun TopWordsCard(wordFreq: Map<String, Int>, wordSenders: Map<String, Map<String, Int>> = emptyMap()) {
+fun TopWordsCard(scope: WordScope, wordSenders: Map<String, Map<String, Int>> = emptyMap()) {
+    val wordFreq = scope.words
     // 預設看 3 字：2 字組合太容易切出「送了」「了貼」這種跨詞邊界的碎片
     var mode by remember { mutableStateOf("3") }
     var picked by remember { mutableStateOf<Pair<String, Int>?>(null) }
@@ -8758,16 +8946,21 @@ fun TopWordsCard(wordFreq: Map<String, Int>, wordSenders: Map<String, Map<String
 
     Panel {
         SectionHead("常用詞") {
-            // 只存詞頻不存原文，事後無法重新切詞，所以只能是全期間累計。
-            // 不跟隨日期篩選就一定要標明，否則使用者會以為數字算錯。
-            ScopeTag("全期間")
+            // ⚠️ 標籤一定要寫目前算的是哪個區間 ——
+            //    這張卡以前永遠是全期間，使用者切日期看到數字沒變會以為壞了。
+            ScopeTag(scope.label)
             Spacer(modifier = Modifier.width(4.dp))
             SegBar(listOf("2" to "2字", "3" to "3字", "4" to "4字", "EN" to "英文"), mode) { mode = it }
+        }
+        // 資料不完整時先把話講清楚，再給數字
+        scope.note?.let { n ->
+            Text(n, fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
+                modifier = Modifier.padding(bottom = 6.dp))
         }
         run {
             if (top.isEmpty()) {
                 Text(
-                    if (wordFreq.isEmpty()) "接收訊息後會在這裡累積常用詞（只統計詞頻，不保留訊息內容）"
+                    if (wordFreq.isEmpty()) "這段期間沒有累積到常用詞（只統計詞頻，不保留訊息內容）"
                     else "這個字數還沒有累積到資料，換一個看看",
                     fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp
                 )
@@ -8791,8 +8984,15 @@ fun TopWordsCard(wordFreq: Map<String, Int>, wordSenders: Map<String, Map<String
                     }
                     // 誰傳的。⚠️ 只有 v3.20 之後收到的訊息才有這份資料 ——
                     //    過去的訊息沒有留內容，發話者回推不出來，所以舊詞會是空的。
+                    // ⚠️ 發話者是**全期間**累計，沒有分日。上面那個次數跟著區間走、
+                    //    這一段不會，兩邊對不起來是正常的 —— 所以要標出來，不要讓使用者自己猜。
                     if (senders.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(6.dp))
+                        if (scope.label != "全期間") {
+                            Text("以下發話者是全期間累計，不跟著上面的日期篩選",
+                                fontSize = T.Micro, color = AppColors.TextTertiary,
+                                modifier = Modifier.padding(bottom = 3.dp))
+                        }
                         senders.forEach { (name, cnt) ->
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
@@ -12093,7 +12293,7 @@ private val USER_GUIDE = listOf(
             "頁面頂端的日期列決定統計範圍，可選單日、單週、自訂區間或全部。左右滑動畫面也能換到上一天／上一週。",
             "翻到別的日期後，日期列會出現「今天」或「本週」按鈕，一鍵回到現在；月曆上的今天會有外框。",
             "點日期打開月曆後，在月曆上左右滑動可以換月份，不用一直點箭頭。有紀錄的日期會加粗並帶一顆小圓點，沒紀錄的變淡（仍然點得進去）。",
-            "常用詞固定是全期間累計（不保留訊息原文，事後無法分期）；「哪幾天在聊」固定看最近數月。"
+            "常用詞會跟著日期篩選走；「哪幾天在聊」固定看最近數月。"
         )
     ),
     GuideSection(
@@ -12150,7 +12350,10 @@ private val USER_GUIDE = listOf(
         "8", "常用詞",
         listOf(
             "只統計詞頻，不保留任何訊息原文。系統自動產生的文字（傳送了貼圖、回覆了限時動態等）與聯絡人名稱都會排除。",
-            "點一個詞可以看到是誰傳的。這份資料是 v3.20 之後才開始記錄，之前累積的詞看不到發話者。"
+            "點一個詞可以看到是誰傳的。這份資料是 v3.20 之後才開始記錄，之前累積的詞看不到發話者。",
+            "常用詞會跟著上面的日期篩選走：選「這一週」看到的就是這一週的詞，卡片上那顆小標籤會寫目前算的是哪個區間。",
+            "逐日累積是從 1.0.14 才開始的，而且只保留最近 90 天。選到更早的區間時，卡片上會寫明只統計到哪一天；想看全部累積的就把日期篩選切到「全部」。",
+            "發話者那一段是全期間累計、不跟日期篩選走，所以它的次數跟上面對不起來是正常的，卡片上也會標出來。"
         )
     ),
     GuideSection(
@@ -13656,6 +13859,10 @@ const val PLAY_PACKAGE = "com.relatestats.app"
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.14" to listOf(
+        "分析頁的常用詞會跟著日期篩選走了，不再是不管選什麼都一樣。",
+        "逐日累積從這一版開始，只保留最近 90 天；選到更早的區間時卡片上會寫明。"
+    ),
     "1.0.13" to listOf(
         "Threads 的「收回讚 34」這類計數按鈕不再被收成聯絡人。"
     ),
