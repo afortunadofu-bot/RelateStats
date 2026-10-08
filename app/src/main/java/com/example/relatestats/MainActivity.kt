@@ -1393,6 +1393,18 @@ object DataRepository {
     }
 
     /**
+     * 這個新版號提醒過了沒。
+     * ⚠️ 同一版只提醒一次 —— 按過「稍後」就不要再追著問，
+     *    那比不提醒更讓人想關掉整個 App 的通知。
+     */
+    fun updatePromptDone(versionCode: Int): Boolean =
+        (prefs?.getInt("update_prompted_for", 0) ?: 0) >= versionCode
+
+    fun markUpdatePrompted(versionCode: Int) {
+        prefs?.edit()?.putInt("update_prompted_for", versionCode)?.apply()
+    }
+
+    /**
      * 這次開啟是不是「更新之後第一次開」。
      *
      * ⚠️ 第一次安裝不算 —— 新使用者第一眼看到的不該是更新說明。
@@ -9037,16 +9049,30 @@ fun InAppUpdateWatcher() {
                     return@addOnSuccessListener
                 }
                 if (!DataRepository.updateCheckDue()) return@addOnSuccessListener
-                if (info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE &&
-                    info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)
-                ) {
-                    DataRepository.markUpdateChecked()
-                    runCatching {
-                        m.startUpdateFlowForResult(
-                            info, launcher,
-                            AppUpdateOptions.newBuilder(AppUpdateType.FLEXIBLE).build()
-                        )
-                    }
+                if (info.updateAvailability() != UpdateAvailability.UPDATE_AVAILABLE) return@addOnSuccessListener
+                if (!info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)) return@addOnSuccessListener
+                /**
+                 * ⚠️ **不是每一版都跳**。每次更新都彈一次，使用者三次之後
+                 *    就只會閉著眼睛按掉，真正重要的那次也一起被按掉。
+                 *    只有兩種情況才打斷人：
+                 *      1. 你在發版時把 inAppUpdatePriority 設成 4 以上
+                 *      2. 他手上這版已經舊到超過 UPDATE_STALE_DAYS 天
+                 *    其他時候完全安靜，想更新的人自己走「設定 → 關於 → 前往商店更新」。
+                 */
+                val stale = info.clientVersionStalenessDays() ?: 0
+                val worthInterrupting =
+                    info.updatePriority() >= UPDATE_PRIORITY_MIN || stale >= UPDATE_STALE_DAYS
+                if (!worthInterrupting) return@addOnSuccessListener
+                // 同一個新版只提醒一次
+                if (DataRepository.updatePromptDone(info.availableVersionCode())) return@addOnSuccessListener
+
+                DataRepository.markUpdateChecked()
+                DataRepository.markUpdatePrompted(info.availableVersionCode())
+                runCatching {
+                    m.startUpdateFlowForResult(
+                        info, launcher,
+                        AppUpdateOptions.newBuilder(AppUpdateType.FLEXIBLE).build()
+                    )
                 }
             }
         }
@@ -9090,7 +9116,10 @@ fun WhatsNewGate() {
     // ⚠️ remember 不帶 key：一次啟動只判定一次。
     //    consumeVersionBump() 有副作用，重組時再跑一次會永遠回 null。
     val from = remember { DataRepository.consumeVersionBump() }
-    var show by remember { mutableStateOf(from != null) }
+    // ⚠️ 版本號還是要吃掉（consumeVersionBump 有副作用，一定要跑），
+    //    但只有標成重要的版本才真的跳出來。其他版本安靜更新，
+    //    想看改了什麼的人自己去「設定 → 關於 → 更新紀錄」。
+    var show by remember { mutableStateOf(from != null && WHATS_NEW_IMPORTANT) }
     if (!show) return
     val notes = remember { RELEASE_NOTES.firstOrNull { it.first == BuildConfig.VERSION_NAME } }
     AlertDialog(
@@ -12547,8 +12576,9 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "設定頁最下面的「關於」有四列：「前往商店更新」會開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「應用程式版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
-            "有新版時 App 會跳出 Google Play 的更新提示，背景下載完再問你要不要重啟安裝，下載期間 App 照常可以用。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
-            "更新完第一次打開會跳出「這一版改了什麼」。完整的歷史在「設定 → 關於 → 更新紀錄」。",
+            "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。想隨時看有沒有新版，到「設定 → 關於 → 前往商店更新」。",
+            "跳出提示後是背景下載，下載期間 App 照常可以用，載完才問你要不要重啟安裝。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
+            "更新完也不會每次都跳說明，只有改動比較大的版本才會。每一版改了什麼都在「設定 → 關於 → 更新紀錄」。",
             "「關於 → 請我喝杯咖啡」會開贊助頁。這個 App 不收費，也沒有任何付費功能；請不請都一樣好用，純粹是心意。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
@@ -13642,7 +13672,9 @@ fun SettingsView(viewModel: RelateViewModel) {
                  *    會讓使用者以為按了就查過了，實際上只是開商店。
                  *    副標直接把這件事講明白。
                  */
-                SettingsRow("前往商店更新", "App 沒有網路權限，無法自己檢查新版") {
+                // ⚠️ 副標要說明「平常不會自動提醒」，
+                //    不然使用者會以為有新版一定會通知他，然後一直停在舊版。
+                SettingsRow("前往商店更新", "只有重要更新會自動提醒，平常可以自己來看") {
                     openPlayStore(context)
                 }
                 SettingsDivider()
@@ -14148,6 +14180,31 @@ const val PLAY_PACKAGE = "com.relatestats.app"
 const val BUYMEACOFFEE_URL = "https://buymeacoffee.com/celinefu"
 
 /**
+ * 這一版的更新說明值不值得打斷使用者。
+ *
+ * ⚠️ 預設 **false**。只有真的改變使用方式的版本才設 true ——
+ *    每一版都跳，第三次之後使用者就只會閉著眼睛按掉，
+ *    真正重要的那次也會被一起按掉。
+ *    平常的更新說明放在「設定 → 關於 → 更新紀錄」，想看的人自己會去看。
+ * ⚠️ 發版時記得把它改回 false，不然下一版會繼承上一版的「重要」。
+ */
+const val WHATS_NEW_IMPORTANT = false
+
+/**
+ * 什麼樣的新版才值得自動跳出更新提示。
+ *
+ * ⚠️ `updatePriority` 是在**發布那一版時**設進 Play 的（0~5），
+ *    由舊版的 App 讀出來——所以「這次重不重要」是你在發版時決定的，
+ *    不是寫在 App 裡。設 >= 4 才跳。
+ * ⚠️ 但 `inAppUpdatePriority` **只能透過 Play Developer API（Edits）設定**，
+ *    Play Console 的網頁介面沒有這個欄位。沒設的話一律是 0，永遠不會自動跳。
+ *    所以另外留一條退路：裝了太久沒更新（clientVersionStalenessDays）也會提醒一次。
+ * ⚠️ 同一個新版只提醒一次。按了「稍後」就不要再追著問。
+ */
+const val UPDATE_PRIORITY_MIN = 4
+const val UPDATE_STALE_DAYS = 30
+
+/**
  * 更新紀錄，給使用者看的版本。
  *
  * ⚠️ 跟 docs/CHANGELOG.md 是兩份東西，不要直接把那邊的內容貼過來：
@@ -14157,6 +14214,10 @@ const val BUYMEACOFFEE_URL = "https://buymeacoffee.com/celinefu"
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.18" to listOf(
+        "更新提示改成只有重要更新才跳，平常不會打擾你；同一版只提醒一次。",
+        "想自己看有沒有新版：設定 → 關於 → 前往商店更新。"
+    ),
     "1.0.17" to listOf(
         "有新版時會跳出更新提示，下載完再問你要不要重啟安裝。",
         "更新完第一次打開會跳出「這一版改了什麼」。"
