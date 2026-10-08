@@ -1,5 +1,18 @@
 # 修復紀錄
 
+## v1.0.17 build 95（2026-10-08）— 有新版跳出提示、更新後說明改了什麼
+
+兩件不同的事，分成兩段程式：
+
+| 功能 | 做法 | 取捨 |
+|------|------|------|
+| **有新版 → 跳出更新提示**（`InAppUpdateWatcher`） | Play 的 in-app update，FLEXIBLE 模式。 | ⚠️ **App 沒有因此連網**。它透過 IPC 問手機上已安裝的 Play 商店 App，查詢與下載都由 Play 做。實測合併後的 manifest 只多一個自家的 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`（signature 層級），**沒有 INTERNET**。⚠️ 用 FLEXIBLE 不用 IMMEDIATE：IMMEDIATE 會蓋一張全螢幕強制更新頁、下載期間 App 不能用；這是一個看統計的 App，沒有「舊版會壞掉」的理由值得把人擋在門外。⚠️ 一天只問一次（`UPDATE_CHECK_INTERVAL_MS`）——每次回前景都問等於每切換一次就彈一次，使用者會直接關掉通知。⚠️ 只有**從 Play 安裝的正式版**會有反應；開發版（`.debug`）與手動安裝的 APK 一律回 `ERROR_APP_NOT_OWNED`，所以整段包在 `runCatching` 裡靜靜失敗——更新檢查壞掉絕不能影響 App 本身能不能用。 |
+| **更新後 → 這一版改了什麼**（`WhatsNewGate`） | 比對 `last_seen_version` 與 `BuildConfig.VERSION_CODE`，變了就顯示 `RELEASE_NOTES` 對應那一段。 | ⚠️ 完全離線，跟 Play 無關，所以**開發版也會動**。⚠️ 第一次安裝不顯示——新使用者第一眼看到的不該是更新說明（`consumeVersionBump()` 在沒存過版本號時只記錄、回 null）。⚠️ 那個函式有副作用，`remember` 不帶 key，一次啟動只判定一次。 |
+
+⚠️ **升級 `app-update` 套件之後一定要重驗權限**：
+`gradlew processDebugMainManifest`，再 grep 合併後的 manifest。
+看到 `INTERNET` 就立刻退版——那是整個隱私主張的根。
+
 ## v1.0.16 build 94（2026-10-08）— 備份收進對話框、LINE 搜尋不再被當聊天室
 
 | # | 症狀 | 根因 | 修法 |

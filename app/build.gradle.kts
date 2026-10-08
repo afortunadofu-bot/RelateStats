@@ -34,8 +34,8 @@ android {
          *    1.0.0 起為公開發行版；在那之前的 3.x 是上架前的開發版本，
          *    歷史保留在 docs/CHANGELOG.md，沒有刪掉。
          */
-        versionCode = 94
-        versionName = "1.0.16"
+        versionCode = 95
+        versionName = "1.0.17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -90,6 +90,19 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    /**
+     * Play 的「應用程式內更新」。
+     *
+     * ⚠️ 這個套件**不會加 INTERNET 權限** —— 它是透過 IPC 去問手機上
+     *    已安裝的 Play 商店 App，查詢與下載都由 Play 商店做。
+     *    實測合併後的 manifest 只多一個自家的
+     *    DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION（signature 層級，不對外）。
+     * ⚠️ **升級這個套件之後一定要重驗**：
+     *      gradlew processDebugMainManifest
+     *      grep uses-permission app/build/intermediates/merged_manifest/debug/.../AndroidManifest.xml
+     *    一旦看到 INTERNET 就立刻退版 —— 那是整個隱私主張的根。
+     */
+    implementation("com.google.android.play:app-update:2.1.0")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)

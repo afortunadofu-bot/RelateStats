@@ -90,6 +90,13 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.result.IntentSenderRequest
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory
+import com.google.android.play.core.appupdate.AppUpdateOptions
+import com.google.android.play.core.install.InstallStateUpdatedListener
+import com.google.android.play.core.install.model.AppUpdateType
+import com.google.android.play.core.install.model.InstallStatus
+import com.google.android.play.core.install.model.UpdateAvailability
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -1367,6 +1374,39 @@ object DataRepository {
      */
     private val _wordDaysSince = MutableStateFlow(0)
     val wordDaysSince: StateFlow<Int> = _wordDaysSince.asStateFlow()
+
+    /**
+     * 上次問過 Play「有沒有新版」的時間，以及使用者看過哪一版的更新說明。
+     *
+     * ⚠️ 要節流。每次回到前景都問一次，等於每切換一次 App 就彈一次對話框，
+     *    使用者會直接關掉通知權限。一天問一次就夠了。
+     */
+    private const val UPDATE_CHECK_INTERVAL_MS = 24L * 3600_000L
+
+    fun updateCheckDue(): Boolean {
+        val p = prefs ?: return false
+        return System.currentTimeMillis() - p.getLong("last_update_check", 0L) > UPDATE_CHECK_INTERVAL_MS
+    }
+
+    fun markUpdateChecked() {
+        prefs?.edit()?.putLong("last_update_check", System.currentTimeMillis())?.apply()
+    }
+
+    /**
+     * 這次開啟是不是「更新之後第一次開」。
+     *
+     * ⚠️ 第一次安裝不算 —— 新使用者第一眼看到的不該是更新說明。
+     *    所以沒有存過版本號時只記下目前版本，回 null。
+     * ⚠️ 回傳的是**舊版號**，呼叫端用它判斷要不要顯示；
+     *    這個函式有副作用（會把版本號寫進去），一次啟動只能呼叫一次。
+     */
+    fun consumeVersionBump(): Int? {
+        val p = prefs ?: return null
+        val seen = p.getInt("last_seen_version", 0)
+        val now = BuildConfig.VERSION_CODE
+        if (seen != now) p.edit().putInt("last_seen_version", now).apply()
+        return if (seen == 0 || seen >= now) null else seen
+    }
 
     private const val WORD_DAYS_KEEP = 90
     private const val MAX_WORDS_PER_DAY = 250
@@ -5487,6 +5527,10 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = appColorScheme()) {
                 Surface(color = AppColors.Background, modifier = Modifier.fillMaxSize()) {
                     RelateStatsApp()
+                    // 有新版時由 Play 跳出更新提示；更新之後跳出「這一版改了什麼」。
+                    // 兩者都不會讓 App 連網，詳見各自的註解。
+                    InAppUpdateWatcher()
+                    WhatsNewGate()
                 }
             }
         }
@@ -8947,6 +8991,145 @@ fun dayLabel(epochDay: Int): String {
     return "${cal.get(Calendar.MONTH) + 1}/${cal.get(Calendar.DAY_OF_MONTH)}"
 }
 
+/**
+ * Play 的「應用程式內更新」。
+ *
+ * ⚠️ 這**不會讓 App 自己連網**。它是透過 IPC 去問手機上已安裝的 Play 商店 App，
+ *    查詢與下載都由 Play 商店做。實測合併後的 manifest 只多一個自家的
+ *    `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`（signature 層級，不對外），
+ *    **沒有 INTERNET**。每次升級 app-update 套件都要重新確認這件事：
+ *    指令是 `gradlew processDebugMainManifest`，再 grep 合併後的 manifest。
+ * ⚠️ 只有「從 Play 安裝的正式版」才會有反應。開發版（.debug）與手動安裝的 APK
+ *    一律回 ERROR_APP_NOT_OWNED／INSTALL_NOT_ALLOWED，所以整段包在 runCatching 裡
+ *    靜靜失敗 —— 更新檢查失敗絕對不能影響 App 本身能不能用。
+ * ⚠️ 用 FLEXIBLE 不用 IMMEDIATE：IMMEDIATE 會蓋一張全螢幕強制更新頁，
+ *    在背景下載期間 App 不能用。這是一個看統計的 App，沒有任何
+ *    「舊版會壞掉」的理由值得把人擋在門外。
+ */
+@Composable
+fun InAppUpdateWatcher() {
+    val context = LocalContext.current
+    val activity = context as? android.app.Activity ?: return
+    var downloaded by remember { mutableStateOf(false) }
+    // 使用者在 Play 的更新畫面按了什麼，這裡不需要處理：
+    // 同意就會開始背景下載，取消就什麼都不會發生，下次再問。
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { }
+    val manager = remember { runCatching { AppUpdateManagerFactory.create(activity) }.getOrNull() }
+
+    DisposableEffect(manager) {
+        val m = manager
+        val listener = InstallStateUpdatedListener { state ->
+            if (state.installStatus() == InstallStatus.DOWNLOADED) downloaded = true
+        }
+        runCatching { m?.registerListener(listener) }
+        onDispose { runCatching { m?.unregisterListener(listener) } }
+    }
+
+    LaunchedEffect(manager) {
+        val m = manager ?: return@LaunchedEffect
+        runCatching {
+            m.appUpdateInfo.addOnSuccessListener { info ->
+                // 已經下載完還沒重啟：直接提示安裝，不要再問一次 Play
+                if (info.installStatus() == InstallStatus.DOWNLOADED) {
+                    downloaded = true
+                    return@addOnSuccessListener
+                }
+                if (!DataRepository.updateCheckDue()) return@addOnSuccessListener
+                if (info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE &&
+                    info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)
+                ) {
+                    DataRepository.markUpdateChecked()
+                    runCatching {
+                        m.startUpdateFlowForResult(
+                            info, launcher,
+                            AppUpdateOptions.newBuilder(AppUpdateType.FLEXIBLE).build()
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (downloaded) {
+        AlertDialog(
+            containerColor = AppColors.Surface,
+            onDismissRequest = { downloaded = false },
+            title = { Text("新版已經下載好了", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary) },
+            text = {
+                Text(
+                    "重新啟動就會換成新版。你的紀錄、標籤與合併設定都留著，不會因為更新不見。",
+                    fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 19.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { runCatching { manager?.completeUpdate() } },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                    shape = RoundedCornerShape(10.dp)
+                ) { Text("立即重啟") }
+            },
+            dismissButton = {
+                TextButton(onClick = { downloaded = false }) { Text("稍後", color = AppColors.TextSecondary) }
+            }
+        )
+    }
+}
+
+/**
+ * 更新之後第一次打開，跳出「這一版改了什麼」。
+ *
+ * ⚠️ 這條路**完全離線**，跟 Play 無關，所以開發版也會動。
+ *    它跟 InAppUpdateWatcher 是兩件事：那個是「有新版，要不要更新」，
+ *    這個是「已經更新了，改了什麼」。
+ * ⚠️ 第一次安裝不顯示（見 consumeVersionBump）。
+ */
+@Composable
+fun WhatsNewGate() {
+    // ⚠️ remember 不帶 key：一次啟動只判定一次。
+    //    consumeVersionBump() 有副作用，重組時再跑一次會永遠回 null。
+    val from = remember { DataRepository.consumeVersionBump() }
+    var show by remember { mutableStateOf(from != null) }
+    if (!show) return
+    val notes = remember { RELEASE_NOTES.firstOrNull { it.first == BuildConfig.VERSION_NAME } }
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = { show = false },
+        title = {
+            Column {
+                Text("已更新到 v" + BuildConfig.VERSION_NAME, fontWeight = FontWeight.Black,
+                    fontSize = 17.sp, color = AppColors.TextPrimary)
+                Text("這一版改了什麼", fontSize = 12.sp, color = AppColors.TextSecondary)
+            }
+        },
+        text = {
+            Column {
+                val lines = notes?.second.orEmpty()
+                if (lines.isEmpty()) {
+                    Text("這一版沒有列出說明，完整紀錄在「設定 → 關於 → 更新紀錄」。",
+                        fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 19.sp)
+                } else {
+                    lines.forEach { line ->
+                        Row(modifier = Modifier.padding(bottom = 6.dp)) {
+                            Text("·", fontSize = T.Body, color = AppColors.TextTertiary,
+                                modifier = Modifier.padding(end = 6.dp))
+                            Text(line, fontSize = T.Body, color = AppColors.TextSecondary, lineHeight = 19.sp)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { show = false },
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("知道了") }
+        }
+    )
+}
+
 /** 常用詞（只累計詞頻，不保留訊息原文） */
 @Composable
 fun TopWordsCard(scope: WordScope, wordSenders: Map<String, Map<String, Int>> = emptyMap()) {
@@ -12364,6 +12547,8 @@ private val USER_GUIDE = listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "設定頁最下面的「關於」有四列：「前往商店更新」會開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「應用程式版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
+            "有新版時 App 會跳出 Google Play 的更新提示，背景下載完再問你要不要重啟安裝，下載期間 App 照常可以用。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
+            "更新完第一次打開會跳出「這一版改了什麼」。完整的歷史在「設定 → 關於 → 更新紀錄」。",
             "「關於 → 請我喝杯咖啡」會開贊助頁。這個 App 不收費，也沒有任何付費功能；請不請都一樣好用，純粹是心意。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
@@ -13972,6 +14157,10 @@ const val BUYMEACOFFEE_URL = "https://buymeacoffee.com/celinefu"
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.17" to listOf(
+        "有新版時會跳出更新提示，下載完再問你要不要重啟安裝。",
+        "更新完第一次打開會跳出「這一版改了什麼」。"
+    ),
     "1.0.16" to listOf(
         "備份收進「設定 → 備份 → 備份與還原」，點進去才看細節，設定頁不再被撐長。",
         "LINE 搜尋打的字、IG 限時動態介面、「[帳號] N 個新的讚」不再被收成聯絡人。"
