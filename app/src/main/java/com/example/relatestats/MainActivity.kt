@@ -12582,6 +12582,7 @@ private val USER_GUIDE = listOf(
             "「關於 → 請我喝杯咖啡」會開贊助頁。這個 App 不收費，也沒有任何付費功能；請不請都一樣好用，純粹是心意。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
+            "「設定 → 功能許願區」裡的「填表單許願」會用瀏覽器開一張 Google 表單，填好送出就直接進到開發者的清單。⚠️ 表單沒辦法預先帶入內容，所以按下去之前 App 會先把你打的字複製起來，到表單長按貼上就行。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是小數據所的品牌區：同一個人做的三個工具（壽星日、Bandary、RelateStats）、封閉測試報名連結、聯絡信箱與版本號。連結是交給瀏覽器開的，App 本身沒有網路權限。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "常聊的人累積到 20 位還沒分類時，App 會發一則提醒帶你去分（最多一天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
@@ -14214,6 +14215,10 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.19" to listOf(
+        "功能許願區多了「填表單許願」，直接送到開發者的清單，比 Email 可靠。",
+        "按下去之前會先把你打的字複製好，到表單長按貼上就行。"
+    ),
     "1.0.18" to listOf(
         "更新提示改成只有重要更新才跳，平常不會打擾你；同一版只提醒一次。",
         "想自己看有沒有新版：設定 → 關於 → 前往商店更新。"
@@ -14653,7 +14658,7 @@ fun RecapTimeDialog(hour: Int, minute: Int, onPick: (Int, Int) -> Unit, onDismis
  *    不會出現點了沒反應的按鈕。建好表單把網址填進來就會自動出現。
  *    建立步驟見 docs/WISHLIST.md。
  */
-const val WISHLIST_FORM_URL = ""
+const val WISHLIST_FORM_URL = "https://forms.gle/hwgPeSLk4zkG9scj6"
 const val WISHLIST_BOARD_URL = ""
 
 const val FEEDBACK_EMAIL = "celine.fu.work@gmail.com"
@@ -14692,6 +14697,25 @@ fun WishlistDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         if (url.isBlank()) return
         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             .onFailure { Toast.makeText(context, "找不到瀏覽器", Toast.LENGTH_SHORT).show() }
+    }
+
+    /**
+     * 把輸入框的字複製起來，順便存進本機清單。
+     *
+     * ⚠️ 表單沒辦法預先帶入內容（要有 entry id 才行，Google 的短網址拿不到），
+     *    所以使用者打完字點「到許願板許願」會看到一張空表單 ——
+     *    他得再打一次，大部分人就直接放棄了。
+     *    先複製起來，他到表單只要長按貼上。
+     * ⚠️ 一樣存進本機清單：寄出去就石沉大海的話，隔兩週會重許一次一樣的。
+     */
+    fun stashForForm(): Boolean {
+        val t = text.trim()
+        if (t.isBlank()) return false
+        viewModel.addWish(t)
+        (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+            ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 許願", t))
+        text = ""
+        return true
     }
 
     fun send() {
@@ -14740,10 +14764,18 @@ fun WishlistDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                         modifier = Modifier.fillMaxWidth().padding(top = 14.dp)
                             .clip(RoundedCornerShape(12.dp)).background(AppColors.SurfaceAlt).padding(12.dp)
                     ) {
-                        Text("看看大家想要什麼", fontSize = T.Label, fontWeight = FontWeight.Black,
-                            color = AppColors.TextPrimary)
+                        // ⚠️ 文案要跟著實際有哪些網址走。只有表單卻寫
+                        //    「可以看到別人許的願、投票」是在騙人，按下去只會看到一張表單。
+                        val hasBoard = WISHLIST_BOARD_URL.isNotBlank()
                         Text(
-                            "許願板是一個網頁，會用瀏覽器打開。在那裡可以看到別人許的願、投票給你也想要的功能。",
+                            if (hasBoard) "看看大家想要什麼" else "直接送到開發者手上",
+                            fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextPrimary
+                        )
+                        Text(
+                            if (hasBoard)
+                                "許願板是一個網頁，會用瀏覽器打開。在那裡可以看到別人許的願、投票給你也想要的功能。"
+                            else
+                                "用瀏覽器開一張表單，填好送出就直接進到開發者的清單 —— 比 Email 可靠，不會卡在你的信箱草稿匣裡。上面打的字會先幫你複製好，到表單長按貼上就行。",
                             fontSize = T.Micro, color = AppColors.TextSecondary, lineHeight = 16.sp,
                             modifier = Modifier.padding(top = 2.dp)
                         )
@@ -14759,12 +14791,23 @@ fun WishlistDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                                 )
                             }
                             if (WISHLIST_FORM_URL.isNotBlank()) {
+                                val primary = !WISHLIST_BOARD_URL.isNotBlank()
                                 Text(
-                                    "到許願板許願", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                    color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                                    "填表單許願", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                                    color = if (primary) AppColors.OnAccent else AppColors.ActiveBlue,
+                                    maxLines = 1, softWrap = false,
                                     modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                        .border(1.dp, AppColors.ActiveBlue, RoundedCornerShape(8.dp))
-                                        .clickable { openUrl(WISHLIST_FORM_URL) }
+                                        .then(
+                                            if (primary) Modifier.background(AppColors.ActiveBlue)
+                                            else Modifier.border(1.dp, AppColors.ActiveBlue, RoundedCornerShape(8.dp))
+                                        )
+                                        .clickable {
+                                            // 有打字就先複製起來，使用者到表單只要貼上
+                                            if (stashForForm()) {
+                                                Toast.makeText(context, "願望已複製，到表單長按貼上就好", Toast.LENGTH_LONG).show()
+                                            }
+                                            openUrl(WISHLIST_FORM_URL)
+                                        }
                                         .padding(horizontal = 10.dp, vertical = 6.dp)
                                 )
                             }
