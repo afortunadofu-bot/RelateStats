@@ -12582,6 +12582,7 @@ private val USER_GUIDE = listOf(
             "「關於 → 請我喝杯咖啡」會開贊助頁。這個 App 不收費，也沒有任何付費功能；請不請都一樣好用，純粹是心意。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
+            "「設定 → 功能許願區」裡的「看大家的願望」會用瀏覽器打開公開的許願板。那上面是開發者看過之後才放上去的，不是填了就會出現。",
             "「設定 → 功能許願區」裡的「填表單許願」會用瀏覽器開一張 Google 表單，填好送出就直接進到開發者的清單。⚠️ 表單沒辦法預先帶入內容，所以按下去之前 App 會先把你打的字複製起來，到表單長按貼上就行。",
             "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
             "設定頁捲到最下面是小數據所的品牌區：同一個人做的三個工具（壽星日、Bandary、RelateStats）、封閉測試報名連結、聯絡信箱與版本號。連結是交給瀏覽器開的，App 本身沒有網路權限。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
@@ -14215,6 +14216,9 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.20" to listOf(
+        "功能許願區多了「看大家的願望」，用瀏覽器打開公開的許願板。"
+    ),
     "1.0.19" to listOf(
         "功能許願區多了「填表單許願」，直接送到開發者的清單，比 Email 可靠。",
         "按下去之前會先把你打的字複製好，到表單長按貼上就行。"
@@ -14659,7 +14663,16 @@ fun RecapTimeDialog(hour: Int, minute: Int, onPick: (Int, Int) -> Unit, onDismis
  *    建立步驟見 docs/WISHLIST.md。
  */
 const val WISHLIST_FORM_URL = "https://forms.gle/hwgPeSLk4zkG9scj6"
-const val WISHLIST_BOARD_URL = ""
+/**
+ * 公開許願板。
+ *
+ * ⚠️ 這是 Google 試算表的「發布到網路」網址（pubhtml），**不是共用連結**。
+ *    發布只開放指定的那一張工作表；共用是整份文件，
+ *    而那份試算表裡還有封測報名的回應。兩者不能互換。
+ * ⚠️ 網址裡的 gid 綁定某一張工作表。把那張表刪掉或改名重建，
+ *    這個連結就會變成空白頁，而且舊版 App 裡的連結換不掉。
+ */
+const val WISHLIST_BOARD_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQnZaJB8Hq0IrOSqIGGDfJYDLtqPxBSyxqRcBVvXqRIDNUFVD7yWhLvDLHHKco82cCKjn55ZO63Pkb2/pubhtml?gid=2103271230&single=true"
 
 const val FEEDBACK_EMAIL = "celine.fu.work@gmail.com"
 
