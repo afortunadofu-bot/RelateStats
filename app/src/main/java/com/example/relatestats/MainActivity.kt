@@ -12423,15 +12423,34 @@ fun ScopeTag(text: String) {
  */
 @Composable
 fun SettingsSection(title: String) {
-    Text(
-        title,
-        fontSize = T.Micro,
-        fontWeight = FontWeight.Black,
-        color = AppColors.TextTertiary,
-        letterSpacing = 1.2.sp,
-        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
-        maxLines = 1, softWrap = false
-    )
+    /**
+     * ⚠️ 區段標題要「看得出來是新的一段」。
+     *    以前是 9sp 的淺灰字、上下只留 8dp／2dp，
+     *    整頁捲下來就是一條沒有停頓的灰白帶 —— 眼睛找不到落點。
+     *    放大一級、加粗、上方留 22dp，並在左邊加一小段色塊當錨點。
+     * ⚠️ 上方留白要比下方大得多（22 vs 6）。
+     *    標題要跟**下面那張卡**是一組，離上一張卡遠一點，
+     *    距離相等的話會讀成「標題屬於上一張」。
+     */
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(start = 4.dp, top = 22.dp, bottom = 6.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(width = 3.dp, height = 11.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(AppColors.BrandPrimary.copy(alpha = 0.55f))
+        )
+        Text(
+            title,
+            fontSize = T.Label,
+            fontWeight = FontWeight.Black,
+            color = AppColors.TextSecondary,
+            letterSpacing = 1.5.sp,
+            modifier = Modifier.padding(start = 7.dp),
+            maxLines = 1, softWrap = false
+        )
+    }
 }
 
 /**
@@ -12459,9 +12478,11 @@ fun SettingsDivider() {
 }
 
 /**
- * 設定頁的標準一列：標題 + 說明 + 右側箭號。
- * 說明是必填的 —— 只有標題的話，「整理系統通知」這種名字猜不出會發生什麼事，
- * 使用者就不敢按。
+ * 設定頁的標準一列：標題 + 右側箭號，說明是選填的。
+ *
+ * ⚠️ 說明只寫在「光看名字猜不出會發生什麼」的項目上，
+ *    例如「整理系統通知」。每一列都掛一句灰字，整頁會變成一面文字牆，
+ *    反而更難掃 —— 「關於」那一區就是因為每列都有副標而顯得很吵。
  */
 @Composable
 fun SettingsRow(
@@ -12575,16 +12596,15 @@ private val USER_GUIDE = listOf(
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
-            "設定頁最下面的「關於」有四列：「前往商店更新」會開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「應用程式版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
+            "設定頁最下面的「關於」：「前往商店更新」開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁、最後一列「版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
             "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。想隨時看有沒有新版，到「設定 → 關於 → 前往商店更新」。",
             "跳出提示後是背景下載，下載期間 App 照常可以用，載完才問你要不要重啟安裝。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
             "更新完也不會每次都跳說明，只有改動比較大的版本才會。每一版改了什麼都在「設定 → 關於 → 更新紀錄」。",
             "「關於 → 請我喝杯咖啡」會開贊助頁。這個 App 不收費，也沒有任何付費功能；請不請都一樣好用，純粹是心意。",
             "「設定 → 分享給朋友」會用系統分享把介紹文字傳出去。封閉測試期間傳的是報名表連結（商店頁還沒上線，傳商店連結朋友只會看到找不到頁面）；正式上架後會換成 Play 商店連結。",
             "概況頁的「通話統計」會顯示總通數與總時長。點「點看是誰」或任何一個方向標籤，名單裡每個人各自有「每一通的時長」可以展開，列出每通的時間、方向與秒數（只列最近 30 通）。未接沒有秒數；接通但抓不到秒數的會寫明，不會顯示成 0 秒。",
-            "「設定 → 功能許願區」裡的「看大家的願望」會用瀏覽器打開公開的許願板，上面是大家透過表單送出的願望。⚠️ 送出之後就會直接出現在上面，所以不要把任何人的真實姓名或聯絡方式寫進願望裡。",
-            "「設定 → 功能許願區」裡的「填表單許願」會用瀏覽器開一張 Google 表單，填好送出就直接進到開發者的清單。⚠️ 表單沒辦法預先帶入內容，所以按下去之前 App 會先把你打的字複製起來，到表單長按貼上就行。",
-            "「設定 → 功能許願區」可以寫下想要的功能，按「寄出」用你自己的郵件 App 寄給開發者；許過的願會留在下方清單，看得到自己許過什麼，也可以刪掉。",
+            "「設定 → 功能許願」會用瀏覽器開一張 Google 表單，想要什麼功能寫在那裡，送出就直接進到開發者的清單。",
+            "「設定 → 看大家的願望」打開公開的許願板，上面是大家送出的願望。⚠️ 送出之後就會直接出現在上面，所以不要把任何人的真實姓名或聯絡方式寫進願望裡。",
             "設定頁捲到最下面是小數據所的品牌區：同一個人做的三個工具（壽星日、Bandary、RelateStats）、封閉測試報名連結、聯絡信箱與版本號。連結是交給瀏覽器開的，App 本身沒有網路權限。點信箱可以直接開郵件 App；沒有郵件 App 時會把信箱複製起來。",
             "常聊的人累積到 20 位還沒分類時，App 會發一則提醒帶你去分（最多一天一次，可在「設定 → 偏好 → 未分類提醒」關掉）。分類不是為了整齊，是為了「關係分布」那張圖有意義 —— 全部掛在未分類的話，那張圖只會說你的時間都花在未分類身上。",
             "「設定 → 偏好 → 每晚回顧通知」打開後，下面會多一列「通知時間」可以自己挑（預設 21:00，分鐘只給 00/15/30/45）。實際發送會落在設定時間之後的一小時內 —— 系統挑省電的時機發，不會分秒不差。",
@@ -13166,8 +13186,6 @@ fun SettingsView(viewModel: RelateViewModel) {
     }
     var showFeedback by remember { mutableStateOf(false) }
     if (showFeedback) FeedbackDialog { showFeedback = false }
-    var showWishlist by remember { mutableStateOf(false) }
-    if (showWishlist) WishlistDialog(viewModel) { showWishlist = false }
     var showReleaseNotes by remember { mutableStateOf(false) }
     if (showReleaseNotes) ReleaseNotesDialog { showReleaseNotes = false }
     val cloudUri by viewModel.cloudBackupUri.collectAsState()
@@ -13372,7 +13390,21 @@ fun SettingsView(viewModel: RelateViewModel) {
                 SettingsDivider()
                 SettingsRow("意見回饋", "回報問題或數字不對") { showFeedback = true }
                 SettingsDivider()
-                SettingsRow("功能許願區", "想要什麼功能就寫下來") { showWishlist = true }
+                /**
+                 * ⚠️ 許願走表單，不在 App 裡輸入。
+                 *    App 沒有網路權限，自己收的願望送不出去 ——
+                 *    以前那個輸入框只是把字存在本機、再開郵件 App 請使用者自己寄，
+                 *    有人寫了卻沒按傳送，那則願望就永遠卡在他手機裡。
+                 *    表單填完送出就直接進試算表，少一個會斷的環節。
+                 * ⚠️ 網址空著時整列不出現，不要放點了沒反應的按鈕。
+                 */
+                if (WISHLIST_FORM_URL.isNotBlank()) {
+                    SettingsRow("功能許願") { openUrl(context, WISHLIST_FORM_URL) }
+                    SettingsDivider()
+                }
+                if (WISHLIST_BOARD_URL.isNotBlank()) {
+                    SettingsRow("看大家的願望") { openUrl(context, WISHLIST_BOARD_URL) }
+                }
                 SettingsDivider()
                 SettingsRow(
                     "分享給朋友",
@@ -13672,34 +13704,31 @@ fun SettingsView(viewModel: RelateViewModel) {
                  * ⚠️ 這一列不要寫成「檢查更新」。
                  *    App 沒有網路權限，查不到有沒有新版 —— 寫「檢查更新」
                  *    會讓使用者以為按了就查過了，實際上只是開商店。
-                 *    副標直接把這件事講明白。
                  */
-                // ⚠️ 副標要說明「平常不會自動提醒」，
-                //    不然使用者會以為有新版一定會通知他，然後一直停在舊版。
-                SettingsRow("前往商店更新", "只有重要更新會自動提醒，平常可以自己來看") {
-                    openPlayStore(context)
-                }
+                SettingsRow("前往商店更新") { openPlayStore(context) }
                 SettingsDivider()
-                SettingsRow("更新紀錄", "每一版改了什麼") { showReleaseNotes = true }
+                SettingsRow("更新紀錄") { showReleaseNotes = true }
                 SettingsDivider()
-                SettingsRow("聯絡我們", FEEDBACK_EMAIL) { contactDeveloper(context) }
+                SettingsRow("聯絡我們") { contactDeveloper(context) }
                 SettingsDivider()
-                // ⚠️ 副標一定要講清楚「付了也不會多拿到什麼」。
-                //    不講的話使用者會以為付了錢有東西拿，那既是誤導，
-                //    也會讓這一列變成 Play 眼中的「繞過帳務的付費功能」。
-                //    但話要講得像人話 —— 寫成免責聲明的語氣很冷，
-                //    在一個請人喝咖啡的按鈕上更怪。「不收費」已經把
-                //    「沒有付費功能」講完了，不必再加一句「不會解鎖」。
+                /**
+                 * ⚠️ **這一列的副標不能拿掉。**
+                 *    它要講清楚「付了也不會多拿到什麼」：不講的話使用者會以為
+                 *    付了錢有東西拿，那既是誤導，也會讓 Play 把這一列讀成
+                 *    「繞過帳務的付費功能」而下架。
+                 *    這是整個「關於」區唯一留著副標的一列，不是漏改的。
+                 */
                 SettingsRow("請我喝杯咖啡", "這個 App 不收費，咖啡純粹是心意") {
                     openUrl(context, BUYMEACOFFEE_URL)
                 }
                 SettingsDivider()
                 /**
-                 * ⚠️ 點一下複製「版本 + 機型 + Android 版本」。
-                 *    回報問題時最常漏掉的就是這三樣，每次都要來回問一輪。
-                 *    讓使用者直接貼上，比請他們自己去翻設定快得多。
+                 * ⚠️ 版本號寫在標題裡，不要放副標 ——
+                 *    使用者回報問題時截的就是這一行，它不是補充說明。
+                 *    點一下複製「版本 + 機型 + Android 版本」，
+                 *    這三樣是回報時最常漏掉的，每次都要來回問一輪。
                  */
-                SettingsRow("應用程式版本", "v$APP_VERSION　·　點一下複製裝置資訊") {
+                SettingsRow("版本 v$APP_VERSION") {
                     val info = "RelateStats v$APP_VERSION\n" +
                         Build.MANUFACTURER + " " + Build.MODEL + "\n" +
                         "Android " + Build.VERSION.RELEASE + "（SDK " + Build.VERSION.SDK_INT + "）"
@@ -13745,14 +13774,14 @@ fun SettingsView(viewModel: RelateViewModel) {
                 modifier = Modifier.fillMaxWidth()
                     .padding(top = 18.dp, bottom = 10.dp, start = D.Gutter + 4.dp, end = D.Gutter + 4.dp)
             ) {
-                Text("RelateStats v$APP_VERSION", fontSize = T.Title, fontWeight = FontWeight.Black,
+                Text("RelateStats v$APP_VERSION", fontSize = T.Label, fontWeight = FontWeight.Black,
                     color = AppColors.TextPrimary)
                 // 點一下直接開郵件 App；沒有郵件 App 就把信箱複製起來，
                 // 跟意見回饋同一套退路（App 沒有網路權限，不可能自己送出）
                 Text(
-                    FEEDBACK_EMAIL, fontSize = T.Body, fontWeight = FontWeight.Medium,
+                    FEEDBACK_EMAIL, fontSize = T.Micro, fontWeight = FontWeight.Medium,
                     color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier.padding(top = 3.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .clickable { contactDeveloper(context) }
                 )
@@ -13763,63 +13792,49 @@ fun SettingsView(viewModel: RelateViewModel) {
                     modifier = Modifier.padding(top = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    HouseMark(markSize = 36.dp)
-                    Column(modifier = Modifier.padding(start = 14.dp)) {
-                        Text(BRAND_HOUSE, fontSize = T.KpiSm, fontWeight = FontWeight.Black,
-                            color = AppColors.TextPrimary, letterSpacing = 6.sp)
-                        Text(BRAND_HOUSE_TAGLINE, fontSize = T.Label, fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF2A73B), letterSpacing = 5.sp,
-                            modifier = Modifier.padding(top = 2.dp))
+                    HouseMark(markSize = 26.dp)
+                    Column(modifier = Modifier.padding(start = 10.dp)) {
+                        Text(BRAND_HOUSE, fontSize = T.Body, fontWeight = FontWeight.Black,
+                            color = AppColors.TextPrimary, letterSpacing = 4.sp)
+                        Text(BRAND_HOUSE_TAGLINE, fontSize = T.Micro, fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF2A73B), letterSpacing = 3.sp,
+                            modifier = Modifier.padding(top = 1.dp))
                     }
                 }
-                Text(BRAND_POSITIONING, fontSize = T.Body, color = AppColors.TextSecondary,
-                    lineHeight = 19.sp, modifier = Modifier.padding(top = 12.dp))
+                Text(BRAND_POSITIONING, fontSize = T.Micro, color = AppColors.TextSecondary,
+                    lineHeight = 15.sp, modifier = Modifier.padding(top = 10.dp))
 
                 HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(top = 12.dp))
 
                 /**
-                 * 三個產品並列。
-                 * ⚠️ 目前這一個是深色粗體、不可點；另外兩個是灰字、點了開瀏覽器。
-                 *    灰字是照頁尾規範走的（Bandary 也是這樣），不要改成藍色連結色 ——
-                 *    這一排是署名，不是導覽列。
+                 * 三個產品並列，**三個都不可點**。
+                 *
+                 * ⚠️ 這一排是署名，不是導覽列。壽星日與 Bandary 之前連到
+                 *    封測報名表，那是封測期間的權宜；等兩個 App 都上架之後
+                 *    再換成各自的 Play 商店連結。在那之前寧可沒有連結，
+                 *    也不要連到一個會過期的報名表。
+                 * ⚠️ 要加回連結時，三個一起加（目前這一個連自己的商店頁），
+                 *    不要只有兩個可點、一個不能點 —— 那看起來像壞掉。
                  */
                 Row(
-                    modifier = Modifier.padding(top = 12.dp),
+                    modifier = Modifier.padding(top = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("壽星日", fontSize = T.Body, fontWeight = FontWeight.Medium,
-                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                            .clickable { openUrl(context, SHOUXINGRI_URL) }
-                            .padding(horizontal = 4.dp, vertical = 2.dp))
-                    Text("·", fontSize = T.Body, color = AppColors.TextTertiary,
-                        modifier = Modifier.padding(horizontal = 2.dp))
-                    Text("Bandary", fontSize = T.Body, fontWeight = FontWeight.Medium,
-                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false,
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                            .clickable { openUrl(context, BANDARY_BETA_URL) }
-                            .padding(horizontal = 4.dp, vertical = 2.dp))
-                    Text("·", fontSize = T.Body, color = AppColors.TextTertiary,
-                        modifier = Modifier.padding(horizontal = 2.dp))
-                    Text("RelateStats", fontSize = T.Body, fontWeight = FontWeight.Black,
-                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
-                }
-
-                // 封測報名表：Play 商店還沒過審，要找人測就是給這張表。
-                // ⚠️ 商店上線後 IN_CLOSED_BETA 改成 false，這一行就會消失。
-                if (IN_CLOSED_BETA) {
-                    Text("RelateStats 封閉測試報名 ›", fontSize = T.Label,
-                        fontWeight = FontWeight.Medium, color = AppColors.ActiveBlue,
-                        maxLines = 1, softWrap = false,
-                        modifier = Modifier.padding(top = 8.dp).clip(RoundedCornerShape(6.dp))
-                            .clickable { openUrl(context, RELATESTATS_BETA_URL) }
-                            .padding(horizontal = 4.dp, vertical = 3.dp))
+                    Text("壽星日", fontSize = T.Label, fontWeight = FontWeight.Medium,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary,
+                        modifier = Modifier.padding(horizontal = 5.dp))
+                    Text("Bandary", fontSize = T.Label, fontWeight = FontWeight.Medium,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary,
+                        modifier = Modifier.padding(horizontal = 5.dp))
+                    Text("RelateStats", fontSize = T.Label, fontWeight = FontWeight.Black,
+                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
                 }
 
                 Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_AUTHOR",
-                    fontSize = T.Label, color = AppColors.TextTertiary, letterSpacing = 1.sp,
-                    modifier = Modifier.padding(top = 10.dp))
+                    fontSize = T.Micro, color = AppColors.TextTertiary, letterSpacing = 1.sp,
+                    modifier = Modifier.padding(top = 8.dp))
             }
         }
     }
@@ -13835,25 +13850,30 @@ fun SettingsView(viewModel: RelateViewModel) {
             onDismissRequest = { showBackup = false },
             properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
         ) {
-            Box(
-                modifier = Modifier.fillMaxSize().safeDrawingPadding()
-                    .padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 28.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
-                        .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.82f).dp)
-                        .clip(RoundedCornerShape(28.dp)).background(AppColors.Surface)
-                ) {
-                    Box(
+            /**
+             * ⚠️ 這是**整頁**，不是置中的小卡。
+             *    備份頁有狀態、位置、帳號、週期、四顆按鈕、兩段說明，
+             *    塞進一張浮在半透明背景上的卡片裡會變成「小視窗裡再捲一次」，
+             *    每一塊都被壓扁。改成滿版、左上角一個返回箭頭，
+             *    讀起來就是一個頁面。
+             * ⚠️ 底色用 Background 不是 Surface：滿版之後要跟設定頁同一個底，
+             *    內容再用卡片浮在上面，才有層次。
+             */
+            Box(modifier = Modifier.fillMaxSize().background(AppColors.Background)) {
+                Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
+                    Row(
                         modifier = Modifier.fillMaxWidth()
                             .background(androidx.compose.ui.graphics.Brush.linearGradient(
                                 listOf(AppColors.Chart.brand, AppColors.Chart.accent)))
-                            .padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 16.dp)
+                            .padding(start = 4.dp, end = 16.dp, top = 6.dp, bottom = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.padding(end = 40.dp)) {
-                            Text("備份與還原", fontSize = 19.sp, fontWeight = FontWeight.Black, color = Color.White)
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                        IconButton(onClick = { showBackup = false }) {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = Color.White)
+                        }
+                        Column(modifier = Modifier.padding(start = 2.dp)) {
+                            Text("備份與還原", fontSize = 20.sp, fontWeight = FontWeight.Black, color = Color.White)
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 3.dp)) {
                                 Box(modifier = Modifier.size(7.dp).clip(CircleShape)
                                     .background(Color.White.copy(alpha = if (cloudUri != null) 0.95f else 0.45f)))
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -13864,13 +13884,11 @@ fun SettingsView(viewModel: RelateViewModel) {
                                 )
                             }
                         }
-                        IconButton(
-                            onClick = { showBackup = false },
-                            modifier = Modifier.align(Alignment.TopEnd)
-                        ) { Icon(Icons.Rounded.Close, contentDescription = "關閉", tint = Color.White) }
                     }
                     Column(
-                        modifier = Modifier.verticalScroll(rememberScrollState()).padding(14.dp)
+                        modifier = Modifier.fillMaxWidth().weight(1f)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = D.Gutter, vertical = 14.dp)
                     ) {
                     if (cloudUri != null) {
                         // 綁在哪裡：使用者要能確認自己真的綁到雲端，而不是手機裡的某個資料夾
@@ -14216,6 +14234,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.22" to listOf(
+        "許願改成直接開表單，不用在 App 裡打一次再寄一次。",
+        "「備份與還原」改成整頁打開，不再是小彈窗。",
+        "設定頁的分區更清楚，「關於」拿掉了多餘的灰色說明。"
+    ),
     "1.0.21" to listOf(
         "許願板換成直接顯示大家送出的願望。送出後就會出現在上面，不要把真實姓名或聯絡方式寫進去。"
     ),
@@ -14694,188 +14717,6 @@ const val FEEDBACK_EMAIL = "celine.fu.work@gmail.com"
  *    沒有郵件 App 時退而求其次複製到剪貼簿。
  *    不要為了做表單去加 INTERNET，那會毀掉整個隱私說法與資料安全性申報。
  */
-/**
- * 功能許願區。
- *
- * ⚠️ 跟「意見回饋」分開：回饋是「壞掉了」，許願是「我想要」，
- *    兩者的心情與處理方式完全不同，混在一起兩邊都會被稀釋。
- * ⚠️ 許過的願存在本機，使用者看得到自己許過什麼 ——
- *    不然寄出去就石沉大海，隔兩週會重許一次一樣的。
- * ⚠️ 寄出的內容只有使用者自己打的字 ＋ 機型與版本，
- *    絕對不要把任何聯絡人、統計數字夾帶進去。
- */
-@Composable
-fun WishlistDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val wishes by viewModel.wishes.collectAsState()
-    var text by remember { mutableStateOf("") }
-    val dateFmt = remember { SimpleDateFormat("M/d", Locale.US) }
-    val deviceInfo = remember {
-        "裝置：" + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL +
-            "\nAndroid：" + android.os.Build.VERSION.RELEASE +
-            "\nApp：v" + APP_VERSION
-    }
-
-    fun openUrl(url: String) {
-        if (url.isBlank()) return
-        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            .onFailure { Toast.makeText(context, "找不到瀏覽器", Toast.LENGTH_SHORT).show() }
-    }
-
-    /**
-     * 把輸入框的字複製起來，順便存進本機清單。
-     *
-     * ⚠️ 表單沒辦法預先帶入內容（要有 entry id 才行，Google 的短網址拿不到），
-     *    所以使用者打完字點「到許願板許願」會看到一張空表單 ——
-     *    他得再打一次，大部分人就直接放棄了。
-     *    先複製起來，他到表單只要長按貼上。
-     * ⚠️ 一樣存進本機清單：寄出去就石沉大海的話，隔兩週會重許一次一樣的。
-     */
-    fun stashForForm(): Boolean {
-        val t = text.trim()
-        if (t.isBlank()) return false
-        viewModel.addWish(t)
-        (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
-            ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 許願", t))
-        text = ""
-        return true
-    }
-
-    fun send() {
-        val t = text.trim()
-        if (t.isBlank()) return
-        viewModel.addWish(t)
-        val mail = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + FEEDBACK_EMAIL)).apply {
-            putExtra(Intent.EXTRA_SUBJECT, "RelateStats 許願")
-            putExtra(Intent.EXTRA_TEXT, t + "\n\n———\n" + deviceInfo)
-        }
-        if (runCatching { context.startActivity(mail) }.isFailure) {
-            (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
-                ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 許願", t))
-            Toast.makeText(context, "找不到郵件 App，願望已存在下方清單並複製起來，請貼給 $FEEDBACK_EMAIL", Toast.LENGTH_LONG).show()
-        }
-        text = ""
-    }
-
-    AlertDialog(
-        containerColor = AppColors.Surface,
-        onDismissRequest = onDismiss,
-        title = { Text("功能許願區", fontWeight = FontWeight.Black, fontSize = 18.sp, color = AppColors.TextPrimary) },
-        text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    "想到什麼功能都可以寫，愈具體愈好（在哪一頁、想看到什麼）。",
-                    fontSize = T.Micro, color = AppColors.TextSecondary, lineHeight = 16.sp
-                )
-                OutlinedTextField(
-                    value = text, onValueChange = { text = it },
-                    placeholder = { Text("例：排行可以只看某個標籤的人", fontSize = 14.sp) },
-                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 90.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AppColors.BrandPrimary, unfocusedBorderColor = AppColors.BorderLight)
-                )
-                Text(
-                    "寄出的內容只有你打的這段字，加上機型與 App 版本。不會夾帶任何聯絡人或統計資料。",
-                    fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 16.sp,
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-
-                // 許願板：網址還沒填好就整塊不出現，不要放點了沒反應的按鈕
-                if (WISHLIST_BOARD_URL.isNotBlank() || WISHLIST_FORM_URL.isNotBlank()) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(top = 14.dp)
-                            .clip(RoundedCornerShape(12.dp)).background(AppColors.SurfaceAlt).padding(12.dp)
-                    ) {
-                        // ⚠️ 文案要跟著實際有哪些網址走。只有表單卻寫
-                        //    「可以看到別人許的願、投票」是在騙人，按下去只會看到一張表單。
-                        val hasBoard = WISHLIST_BOARD_URL.isNotBlank()
-                        Text(
-                            if (hasBoard) "看看大家想要什麼" else "直接送到開發者手上",
-                            fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextPrimary
-                        )
-                        Text(
-                            if (hasBoard)
-                                "許願板是一個網頁，會用瀏覽器打開。在那裡可以看到別人許的願、投票給你也想要的功能。"
-                            else
-                                "用瀏覽器開一張表單，填好送出就直接進到開發者的清單 —— 比 Email 可靠，不會卡在你的信箱草稿匣裡。上面打的字會先幫你複製好，到表單長按貼上就行。",
-                            fontSize = T.Micro, color = AppColors.TextSecondary, lineHeight = 16.sp,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                        Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (WISHLIST_BOARD_URL.isNotBlank()) {
-                                Text(
-                                    "看大家的願望", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                    color = AppColors.OnAccent, maxLines = 1, softWrap = false,
-                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                        .background(AppColors.ActiveBlue)
-                                        .clickable { openUrl(WISHLIST_BOARD_URL) }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                )
-                            }
-                            if (WISHLIST_FORM_URL.isNotBlank()) {
-                                val primary = !WISHLIST_BOARD_URL.isNotBlank()
-                                Text(
-                                    "填表單許願", fontSize = T.Label, fontWeight = FontWeight.Bold,
-                                    color = if (primary) AppColors.OnAccent else AppColors.ActiveBlue,
-                                    maxLines = 1, softWrap = false,
-                                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                        .then(
-                                            if (primary) Modifier.background(AppColors.ActiveBlue)
-                                            else Modifier.border(1.dp, AppColors.ActiveBlue, RoundedCornerShape(8.dp))
-                                        )
-                                        .clickable {
-                                            // 有打字就先複製起來，使用者到表單只要貼上
-                                            if (stashForForm()) {
-                                                Toast.makeText(context, "願望已複製，到表單長按貼上就好", Toast.LENGTH_LONG).show()
-                                            }
-                                            openUrl(WISHLIST_FORM_URL)
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (wishes.isNotEmpty()) {
-                    Text("我許過的願（${wishes.size}）", fontSize = T.Label, fontWeight = FontWeight.Black,
-                        color = AppColors.TextPrimary, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
-                    wishes.forEach { (ts, w) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
-                                .clip(RoundedCornerShape(10.dp)).background(AppColors.Background).padding(10.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Text(dateFmt.format(Date(ts)), fontSize = T.Micro, fontWeight = FontWeight.Black,
-                                color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
-                                modifier = Modifier.padding(end = 8.dp))
-                            Text(w, fontSize = T.Label, color = AppColors.TextPrimary, lineHeight = 18.sp,
-                                modifier = Modifier.weight(1f))
-                            Text("刪除", fontSize = T.Micro, color = AppColors.WorkText,
-                                maxLines = 1, softWrap = false,
-                                modifier = Modifier.padding(start = 8.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable { viewModel.removeWish(ts) }
-                                    .padding(horizontal = 4.dp, vertical = 2.dp))
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { send() }, enabled = text.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
-                shape = RoundedCornerShape(10.dp)
-            ) { Text("寄出", maxLines = 1, softWrap = false) }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) }
-        }
-    )
-}
-
 @Composable
 fun FeedbackDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
