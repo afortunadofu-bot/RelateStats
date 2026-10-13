@@ -569,7 +569,23 @@ private val NON_PERSON_PATTERNS = listOf(
     // 「這則限時動態的發佈日期：10月5日」
     // ⚠️ 用「限時動態」當關鍵字比較寬，但真人聊天室叫這個名字的機率極低，
     //    而且判錯只是歸到「系統通知」標籤，隨時改得回來。
-    Regex("(限時動態|精選動態|連續短片)")
+    Regex("(限時動態|精選動態|連續短片)"),
+    /**
+     * 「@2131955775」這種。
+     * ⚠️ 那是 Android 的**資源 ID**（0x7f13xxxx 的十進位），
+     *    App 把字串資源指錯時無障礙節點就會回這個。它不是帳號、不是名字。
+     * ⚠️ 要求 @ 後面全是數字而且至少六碼 —— IG 帳號不會長這樣，
+     *    「@abc123」這種真的帳號也不會中。
+     */
+    Regex("^@\\d{6,}$"),
+    /**
+     * 「24分鐘」「3 小時」這種相對時間標籤。
+     * ⚠️ 收尾用 $，只擋「整個名字就是一段時間」。
+     *    群組叫「30分鐘健身團」中間有別的字，不會中。
+     */
+    Regex("^\\d+\\s*(秒|分鐘|分|小時|天|週|個月|年)$"),
+    // 「搜尋 按鍵」「返回 按鈕」：無障礙節點的角色描述被當成名字
+    Regex("(按鍵|按鈕)$")
 )
 
 /**
@@ -598,7 +614,8 @@ private val UI_LABEL_NAMES = setOf(
     // Threads／IG 貼文下方那排按鈕，沒有數字時抓到的就是光禿禿的標籤字
     "讚", "已讚", "按讚", "轉發", "引用", "轉發貼文", "like", "likes", "repost", "quote",
     "收回讚", "取消讚", "取消追蹤", "取消轉發", "unlike", "unfollow",
-    "已儲存截圖", "儲存截圖", "搜尋結果", "最近搜尋", "搜尋訊息、聯絡人"
+    "已儲存截圖", "儲存截圖", "搜尋結果", "最近搜尋", "搜尋訊息、聯絡人",
+    "facebook 應用程式", "instagram 應用程式", "訊息應用程式", "你的限時動態", "新增到限時動態"
 )
 
 private val NON_PERSON_EXTRA = listOf(
@@ -3815,7 +3832,17 @@ class ChatTrackerService : AccessibilityService() {
         //    讀成聊天室的。有輸入框或標題來自已知 view id 時不受影響，
         //    所以真正的私訊照常記錄。
         val stable = name != null && name == lastCandidate && !hit.feedLike
-        val trustworthy = hit.fromViewId || appName == "電話" || hit.hasEditText || stable
+        /**
+         * ⚠️ 動態牆與**串文內頁**一律不採信，連 view id 抓到的標題也不採信。
+         *
+         *    點進一則 Threads 串文來看，那一頁有讚／留言／轉發／分享整排按鈕，
+         *    而且底下有回覆輸入框 —— 前三條採信規則（view id、有輸入框、連續兩次相同）
+         *    它每一條都過得了，於是「正在看的那則貼文」就被當成聊天室記了幾分鐘。
+         *    只靠 stable 擋不住，所以把 feedLike 提成**硬性否決**。
+         *    IG／Threads 的私訊頁不會同時出現兩種以上的動態操作鈕，不受影響。
+         */
+        val trustworthy = !hit.feedLike &&
+            (hit.fromViewId || appName == "電話" || hit.hasEditText || stable)
         val valid = !name.isNullOrEmpty() && name.length <= 60 && name !in ignoreTitles && trustworthy
         lastCandidate = name
 
@@ -11121,13 +11148,45 @@ fun ContactAccountsDialog(
 @Composable
 fun ReleaseNotesDialog(onDismiss: () -> Unit) {
     val current = BuildConfig.VERSION_NAME
+    val context = LocalContext.current
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text("更新紀錄", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary)
+                Text("版本與更新", fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary)
                 Text("目前是 v$APP_VERSION", fontSize = 12.sp, color = AppColors.TextSecondary)
+                /**
+                 * ⚠️ 這兩個動作本來各是設定頁的一列。
+                 *    它們跟版本號講的是同一件事，收進來少兩列。
+                 * ⚠️ 「前往商店更新」不要叫「檢查更新」——
+                 *    App 沒有網路權限，查不到有沒有新版，只是開商店。
+                 */
+                Row(
+                    modifier = Modifier.padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("前往商店更新", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.OnAccent, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .background(AppColors.ActiveBlue)
+                            .clickable { openPlayStore(context) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp))
+                    Text("複製裝置資訊", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .border(1.dp, AppColors.ActiveBlue, RoundedCornerShape(8.dp))
+                            .clickable {
+                                // 回報問題時最常漏掉的就是版本、機型、Android 版本
+                                val info = "RelateStats v$APP_VERSION\n" +
+                                    Build.MANUFACTURER + " " + Build.MODEL + "\n" +
+                                    "Android " + Build.VERSION.RELEASE + "（SDK " + Build.VERSION.SDK_INT + "）"
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+                                    ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 版本", info))
+                                Toast.makeText(context, "已複製版本與裝置資訊", Toast.LENGTH_SHORT).show()
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp))
+                }
             }
         },
         text = {
@@ -12207,26 +12266,47 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
                 }
             }
         }
-        // 分類標籤：每個都點得進去看是誰
-        FlowRow(
+        /**
+         * 方向分類：固定三欄等寬，每欄一張小卡。
+         *
+         * ⚠️ 以前是 FlowRow 排膠囊。膠囊寬度跟著字長走，
+         *    「對方打來 15」「我打出去 2」「未接 20（54%）」三個長度差很多，
+         *    第一行塞得下兩個、第三個被擠到下一行，右邊留一大片空白 ——
+         *    看起來像畫面壞掉，而不是刻意的排版。
+         * ⚠️ 不足三欄時用 Spacer 補位，寬度才會跟有三欄時一致。
+         *    直接讓兩張卡各佔一半，下一期變成三張時整個卡片的節奏會跳掉。
+         */
+        Column(
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            segs.forEach { sg ->
-                Row(
-                    modifier = Modifier.clip(RoundedCornerShape(50)).background(AppColors.Background)
-                        .clickable { drill(sg.title, sg.pred) }
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(sg.color))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        sg.label + " " + sg.n + (if (sg.label == "未接" && calls.total > 0) "（" + calls.missRate + "%）" else "") + " ›",
-                        fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
-                        maxLines = 1, softWrap = false
-                    )
+            segs.chunked(3).forEach { rowSegs ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    rowSegs.forEach { sg ->
+                        Column(
+                            modifier = Modifier.weight(1f)
+                                .clip(RoundedCornerShape(10.dp)).background(AppColors.Background)
+                                .clickable { drill(sg.title, sg.pred) }
+                                .padding(horizontal = 9.dp, vertical = 8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(sg.color))
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(sg.label, fontSize = T.Micro, color = AppColors.TextSecondary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 2.dp)) {
+                                Text(sg.n.toString(), fontSize = T.KpiSm, fontWeight = FontWeight.Black,
+                                    color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                                if (sg.label == "未接" && calls.total > 0) {
+                                    Text(" " + calls.missRate + "%", fontSize = T.Micro,
+                                        color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
+                                        modifier = Modifier.padding(bottom = 2.dp))
+                                }
+                            }
+                        }
+                    }
+                    repeat(3 - rowSegs.size) { Spacer(modifier = Modifier.weight(1f)) }
                 }
             }
         }
@@ -12575,6 +12655,7 @@ private val USER_GUIDE = listOf(
             "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」，不列入排行與統計。Threads 與 IG 貼文下方的計數按鈕（「讚 92」「轉發 1.2萬」）也算在內。聯絡人頁的提醒卡可以逐筆確認：標為系統通知、刪除，或確認是真人後保留不再提醒。",
             "LINE 的搜尋頁不會再被當成聊天室。那一頁最上面就是輸入框，你打的字以前會被當成最上方的標題抓走，變成一個叫「tw」之類的聯絡人。現在輸入框裡的字一律不當標題。",
             "IG 的限時動態介面（限時動態典藏、縮圖、發佈日期、已儲存截圖）與「[帳號] N 個新的讚」也不再被收成聯絡人。",
+            "點進一則 Threads 或 IG 串文來看，不會被記成聊天室。那一頁有讚、留言、轉發整排按鈕，App 看到就知道這不是聊天室。私訊不受影響。",
             "滑動態牆時不會再把貼文內文記成聊天室：畫面上同時出現讚、留言、轉發那排按鈕時，App 就知道這是動態牆而不是聊天室，私訊不受影響。另外名字讀起來像一整句話（很長、有句號、整句都是口語）也會被歸到「系統通知」，判錯的話在提醒卡選「確認是真人」就會放它一馬。",
             "刪除這類來源沒有用——對方下次推播就會重建。刪除聯絡人時可以勾「同時加入永不記錄名單」，之後就不會再記下來。",
             "「未分類」是虛線框，代表還沒分；分好類之後圖表才看得出你的時間花在哪種關係上。"
@@ -12596,7 +12677,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
-            "設定頁最下面的「關於」：「前往商店更新」開 Play 商店（App 沒有網路權限，沒辦法自己查有沒有新版，只能帶你去看）、「更新紀錄」列出每一版改了什麼、「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁、最後一列「版本」點一下會把版本與機型複製起來，回報問題時直接貼上就好。",
+            "設定頁最下面的「關於」有三列：「版本」點進去是更新紀錄，裡面還有「前往商店更新」（開 Play 商店，App 沒有網路權限、沒辦法自己查有沒有新版）與「複製裝置資訊」（回報問題時直接貼上就好）；另外兩列是「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁。",
             "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。想隨時看有沒有新版，到「設定 → 關於 → 前往商店更新」。",
             "跳出提示後是背景下載，下載期間 App 照常可以用，載完才問你要不要重啟安裝。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
             "更新完也不會每次都跳說明，只有改動比較大的版本才會。每一版改了什麼都在「設定 → 關於 → 更新紀錄」。",
@@ -13701,13 +13782,12 @@ fun SettingsView(viewModel: RelateViewModel) {
         item {
             SettingsCard {
                 /**
-                 * ⚠️ 這一列不要寫成「檢查更新」。
-                 *    App 沒有網路權限，查不到有沒有新版 —— 寫「檢查更新」
-                 *    會讓使用者以為按了就查過了，實際上只是開商店。
+                 * ⚠️ 版本、更新紀錄、前往商店更新本來是三列，講的是同一件事。
+                 *    合成一列「版本 vX (Y)」，點進去的對話框裡才放
+                 *    「前往商店更新」與「複製裝置資訊」兩個動作。
+                 *    設定頁的列數愈少愈好找，同一主題拆三列只是把頁面撐長。
                  */
-                SettingsRow("前往商店更新") { openPlayStore(context) }
-                SettingsDivider()
-                SettingsRow("更新紀錄") { showReleaseNotes = true }
+                SettingsRow("版本 v$APP_VERSION") { showReleaseNotes = true }
                 SettingsDivider()
                 SettingsRow("聯絡我們") { contactDeveloper(context) }
                 SettingsDivider()
@@ -13722,20 +13802,6 @@ fun SettingsView(viewModel: RelateViewModel) {
                     openUrl(context, BUYMEACOFFEE_URL)
                 }
                 SettingsDivider()
-                /**
-                 * ⚠️ 版本號寫在標題裡，不要放副標 ——
-                 *    使用者回報問題時截的就是這一行，它不是補充說明。
-                 *    點一下複製「版本 + 機型 + Android 版本」，
-                 *    這三樣是回報時最常漏掉的，每次都要來回問一輪。
-                 */
-                SettingsRow("版本 v$APP_VERSION") {
-                    val info = "RelateStats v$APP_VERSION\n" +
-                        Build.MANUFACTURER + " " + Build.MODEL + "\n" +
-                        "Android " + Build.VERSION.RELEASE + "（SDK " + Build.VERSION.SDK_INT + "）"
-                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
-                        ?.setPrimaryClip(android.content.ClipData.newPlainText("RelateStats 版本", info))
-                    Toast.makeText(context, "已複製版本與裝置資訊", Toast.LENGTH_SHORT).show()
-                }
             }
         }
 
@@ -14234,6 +14300,12 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.24" to listOf(
+        "點進串文看貼文不會再被記成聊天室。",
+        "「@2131955775」這類資源代碼、「24分鐘」這類時間標籤不再被收成聯絡人。",
+        "通話統計的方向分類改成三欄等寬，不再東一塊西一塊。",
+        "設定頁「關於」把版本、更新紀錄、前往商店更新併成一列。"
+    ),
     "1.0.23" to listOf(
         "贊助那一列的說明改成「這個 App 不收費，咖啡是贊助作者」。"
     ),
