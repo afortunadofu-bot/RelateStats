@@ -12684,6 +12684,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
+            "設定頁最下面的品牌區，「壽星日 · Bandary · RelateStats」三個都可以點，會用瀏覽器打開各自的頁面（壽星日是網站，另外兩個是 Play 商店）。",
             "設定頁最下面的「關於」有三列：「版本」點進去是更新紀錄，裡面還有「前往商店更新」（開 Play 商店，App 沒有網路權限、沒辦法自己查有沒有新版）與「複製裝置資訊」（回報問題時直接貼上就好）；另外兩列是「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁。",
             "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。想隨時看有沒有新版，到「設定 → 關於 → 前往商店更新」。",
             "跳出提示後是背景下載，下載期間 App 照常可以用，載完才問你要不要重啟安裝。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
@@ -13880,29 +13881,38 @@ fun SettingsView(viewModel: RelateViewModel) {
                 HorizontalDivider(color = AppColors.BorderLight, modifier = Modifier.padding(top = 12.dp))
 
                 /**
-                 * 三個產品並列，**三個都不可點**。
+                 * 三個產品並列，**三個都可點**。
                  *
-                 * ⚠️ 這一排是署名，不是導覽列。壽星日與 Bandary 之前連到
-                 *    封測報名表，那是封測期間的權宜；等兩個 App 都上架之後
-                 *    再換成各自的 Play 商店連結。在那之前寧可沒有連結，
-                 *    也不要連到一個會過期的報名表。
-                 * ⚠️ 要加回連結時，三個一起加（目前這一個連自己的商店頁），
-                 *    不要只有兩個可點、一個不能點 —— 那看起來像壞掉。
+                 * ⚠️ 三個一起加。只有兩個可點、一個不能點，看起來像壞掉 ——
+                 *    所以 RelateStats 連自己的商店頁（評分、分享都用得到）。
+                 * ⚠️ 顏色沿用署名層的灰字，不要改成藍色連結色；
+                 *    用淺色底的小膠囊給「可以按」的提示就夠了。
+                 *    這一排是署名，不是導覽列。
+                 * ⚠️ 網址一律走帶 UTM 的常數，不要在這裡手寫 ——
+                 *    轉換是在目的地量的，少帶 UTM 那一次點擊就完全看不到。
                  */
                 Row(
                     modifier = Modifier.padding(top = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("壽星日", fontSize = T.Label, fontWeight = FontWeight.Medium,
-                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary,
-                        modifier = Modifier.padding(horizontal = 5.dp))
-                    Text("Bandary", fontSize = T.Label, fontWeight = FontWeight.Medium,
-                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-                    Text("·", fontSize = T.Label, color = AppColors.TextTertiary,
-                        modifier = Modifier.padding(horizontal = 5.dp))
-                    Text("RelateStats", fontSize = T.Label, fontWeight = FontWeight.Black,
-                        color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                    @Composable
+                    fun product(name: String, url: String, current: Boolean) {
+                        Text(
+                            name, fontSize = T.Label,
+                            fontWeight = if (current) FontWeight.Black else FontWeight.Medium,
+                            color = if (current) AppColors.TextPrimary else AppColors.TextSecondary,
+                            maxLines = 1, softWrap = false,
+                            modifier = Modifier.clip(RoundedCornerShape(7.dp))
+                                .background(AppColors.Background)
+                                .clickable { openUrl(context, url) }
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                        )
+                    }
+                    product("壽星日", SHOUXINGRI_URL, false)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    product("Bandary", BANDARY_STORE_URL, false)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    product("RelateStats", RELATESTATS_STORE_URL, true)
                 }
 
                 Text("© ${Calendar.getInstance().get(Calendar.YEAR)} $BRAND_AUTHOR",
@@ -14307,6 +14317,9 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.26" to listOf(
+        "設定頁最下面的三個產品可以點了：壽星日開網站，Bandary 與 RelateStats 開 Play 商店。"
+    ),
     "1.0.25" to listOf(
         "更新底層元件，修掉 Google Play 回報的三個技術問題。"
     ),
@@ -14450,7 +14463,29 @@ const val BRAND_POSITIONING = "把沒人在記的生活，變成你看得懂的�
  * ⚠️ 網址失效時整列會變成沒反應的字。改網址要同時改這裡與
  *    docs/play/SUBMISSION.md、社群貼文裡的連結。
  */
-const val SHOUXINGRI_URL = "https://birthdaydeals.celine-fu-work.workers.dev/"
+/**
+ * 三個產品的目的地，**全部帶 UTM**。
+ *
+ * ⚠️ App 沒有 `INTERNET` 權限，量不到任何東西 ——
+ *    所以轉換要在**目的地**量，不是在 App 裡量：
+ *      · Play 商店：`&referrer=utm_source%3D...`，
+ *        Play Console →「使用者客戶開發」報表看得到來源。
+ *      · 壽星日網站：`?utm_source=...`，網站自己的分析看得到。
+ *    這是唯一不用加網路權限也能知道「有多少人從 App 點過去」的做法。
+ * ⚠️ `utm_campaign` 用**放置位置**命名（footer、about…），
+ *    不是用產品名。同一個產品之後可能出現在好幾個地方，
+ *    用位置命名才分得出是哪一處帶來的。
+ * ⚠️ Play 的 referrer 參數整串要 **URL-encode**（`%3D` 是 `=`、`%26` 是 `&`），
+ *    沒編碼的話 Play 只會收到第一段，後面全部丟掉。
+ */
+const val UTM_FOOTER = "utm_source=relatestats&utm_medium=app&utm_campaign=footer"
+private const val UTM_FOOTER_ENC = "utm_source%3Drelatestats%26utm_medium%3Dapp%26utm_campaign%3Dfooter"
+
+const val SHOUXINGRI_URL = "https://birthdaydeals.celine-fu-work.workers.dev/?" + UTM_FOOTER
+const val BANDARY_STORE_URL =
+    "https://play.google.com/store/apps/details?id=com.bandary.app&referrer=" + UTM_FOOTER_ENC
+const val RELATESTATS_STORE_URL =
+    "https://play.google.com/store/apps/details?id=com.relatestats.app&referrer=" + UTM_FOOTER_ENC
 const val RELATESTATS_BETA_URL = "https://forms.gle/6HT4LzRSsPA76b6s7"
 const val BANDARY_BETA_URL = "https://forms.gle/FhBJgWBWb72MCg5x5"
 
