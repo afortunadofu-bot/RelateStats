@@ -644,6 +644,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.0.27 | 2026-10-15 | build 105：設定頁大整理（八組合併、偏好拆成外觀／通知／偏好） |
 | v1.0.26 | 2026-10-15 | build 104：三個產品接上連結（帶 UTM，轉換在目的地量） |
 | v1.0.25 | 2026-10-15 | build 103：升 androidx.activity/fragment，清掉 Play 的三則警告 |
 | v1.0.24 | 2026-10-13 | build 102：串文不再被記成聊天室、通話卡排版、「關於」三合一 |

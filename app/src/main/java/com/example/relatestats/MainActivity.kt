@@ -12558,6 +12558,66 @@ fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     )
 }
 
+/** 「選一個」對話框裡的一個選項 */
+class SettingsChoice(
+    val title: String,
+    val desc: String? = null,
+    val danger: Boolean = false,
+    val onPick: () -> Unit
+)
+
+/**
+ * 把幾個同類的動作收進一個對話框。
+ *
+ * ⚠️ 設定頁上同一主題拆成三、四列，只是把頁面撐長、害人找不到東西。
+ *    收成一列、點進去再選，列數少一半，而且選項之間的關係變清楚。
+ * ⚠️ 每個選項**都要有一句說明**。這裡跟設定頁相反 ——
+ *    設定頁是掃的，對話框是讀的；使用者已經點進來了，
+ *    這時候不講清楚差別，他只會退出去。
+ * ⚠️ 危險的選項用紅字，而且不要放在第一個。
+ */
+@Composable
+fun ChoiceDialog(
+    title: String,
+    subtitle: String? = null,
+    items: List<SettingsChoice>,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        containerColor = AppColors.Surface,
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(title, fontWeight = FontWeight.Black, fontSize = 17.sp, color = AppColors.TextPrimary)
+                if (subtitle != null) {
+                    Text(subtitle, fontSize = 12.sp, color = AppColors.TextSecondary, lineHeight = 16.sp)
+                }
+            }
+        },
+        text = {
+            Column {
+                items.forEachIndexed { i, it ->
+                    if (i > 0) HorizontalDivider(color = AppColors.BorderLight)
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onDismiss(); it.onPick() }
+                            .padding(vertical = 10.dp, horizontal = 2.dp)
+                    ) {
+                        Text(it.title, fontSize = T.Body, fontWeight = FontWeight.Bold,
+                            color = if (it.danger) AppColors.WorkText else AppColors.TextPrimary)
+                        if (it.desc != null) {
+                            Text(it.desc, fontSize = T.Micro, color = AppColors.TextTertiary,
+                                lineHeight = 15.sp, modifier = Modifier.padding(top = 2.dp))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("關閉", color = AppColors.TextSecondary) } }
+    )
+}
+
 /** 卡片內兩列之間的分隔線；縮排讓它從文字起點開始，不要貼滿整張卡 */
 @Composable
 fun SettingsDivider() {
@@ -12659,7 +12719,7 @@ private val USER_GUIDE = listOf(
         "5", "標籤與系統通知",
         listOf(
             "聯絡人頁的標籤列會直接顯示每個標籤有幾位，點一下就只看那個標籤。「全部」不含系統通知。",
-            "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」，不列入排行與統計。Threads 與 IG 貼文下方的計數按鈕（「讚 92」「轉發 1.2萬」）也算在內。聯絡人頁的提醒卡可以逐筆確認：標為系統通知、刪除，或確認是真人後保留不再提醒。",
+            "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」，不列入排行與統計。Threads 與 IG 貼文下方的計數按鈕（「讚 92」「轉發 1.2萬」）也算在內。聯絡人頁的提醒卡可以逐筆確認：標為系統通知、刪除，或確認是真人後保留不再提醒。也可以到「設定 → 資料 → 整理雜訊」一次處理。",
             "LINE 的搜尋頁不會再被當成聊天室。那一頁最上面就是輸入框，你打的字以前會被當成最上方的標題抓走，變成一個叫「tw」之類的聯絡人。現在輸入框裡的字一律不當標題。",
             "IG 的限時動態介面（限時動態典藏、縮圖、發佈日期、已儲存截圖）與「[帳號] N 個新的讚」也不再被收成聯絡人。",
             "點進一則 Threads 或 IG 串文來看，不會被記成聊天室。那一頁有讚、留言、轉發整排按鈕，App 看到就知道這不是聊天室。私訊不受影響。",
@@ -13276,6 +13336,11 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showFeedback by remember { mutableStateOf(false) }
     if (showFeedback) FeedbackDialog { showFeedback = false }
     var showReleaseNotes by remember { mutableStateOf(false) }
+    // 四個「收起來的主題」：點一列進去再選要做什麼
+    var hubFeedback by remember { mutableStateOf(false) }
+    var hubTidy by remember { mutableStateOf(false) }
+    var hubClear by remember { mutableStateOf(false) }
+    var hubException by remember { mutableStateOf(false) }
     if (showReleaseNotes) ReleaseNotesDialog { showReleaseNotes = false }
     val cloudUri by viewModel.cloudBackupUri.collectAsState()
     val cloudLast by viewModel.cloudBackupLast.collectAsState()
@@ -13477,23 +13542,14 @@ fun SettingsView(viewModel: RelateViewModel) {
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }
                 }
                 SettingsDivider()
-                SettingsRow("意見回饋", "回報問題或數字不對") { showFeedback = true }
-                SettingsDivider()
                 /**
-                 * ⚠️ 許願走表單，不在 App 裡輸入。
-                 *    App 沒有網路權限，自己收的願望送不出去 ——
-                 *    以前那個輸入框只是把字存在本機、再開郵件 App 請使用者自己寄，
-                 *    有人寫了卻沒按傳送，那則願望就永遠卡在他手機裡。
-                 *    表單填完送出就直接進試算表，少一個會斷的環節。
-                 * ⚠️ 網址空著時整列不出現，不要放點了沒反應的按鈕。
+                 * ⚠️ 回報問題、許願、看許願板原本是三列。
+                 *    對使用者來說它們是同一件事（跟開發者說話），
+                 *    拆三列只是把設定頁撐長。收成一列，點進去再選。
+                 * ⚠️ 三條路的機制不同：回報走 Email、許願走表單、
+                 *    許願板是網頁。差別寫在對話框裡的說明，不要只給三個名字。
                  */
-                if (WISHLIST_FORM_URL.isNotBlank()) {
-                    SettingsRow("功能許願") { openUrl(context, WISHLIST_FORM_URL) }
-                    SettingsDivider()
-                }
-                if (WISHLIST_BOARD_URL.isNotBlank()) {
-                    SettingsRow("看大家的願望") { openUrl(context, WISHLIST_BOARD_URL) }
-                }
+                SettingsRow("意見與許願") { hubFeedback = true }
                 SettingsDivider()
                 SettingsRow(
                     "分享給朋友",
@@ -13521,9 +13577,40 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         // ── 偏好 ──
-        item { SettingsSection("偏好") }
+        /**
+         * ⚠️ 「外觀」（深淺模式）與「圖表與標籤配色」本來隔著四列，
+         *    中間夾著兩個通知開關。兩個講的是同一件事，放在一起才找得到。
+         *    順序是先深淺、後配色：深淺影響整個 App，配色只影響圖表。
+         */
+        item { SettingsSection("外觀") }
         item {
             SettingsCard {
+                // 外觀：跟隨系統／淺色／深色
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("外觀", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                        Text("底色與文字；圖表配色不受影響", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
+                    }
+                    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
+                        listOf("system" to "系統", "light" to "淺色", "dark" to "深色").forEach { (id, label) ->
+                            val on = themeMode == id
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                    .clickable { viewModel.setThemeMode(id) }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
+                                    color = if (on) Color.White else AppColors.TextSecondary,
+                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
+                            }
+                        }
+                    }
+                }
+                SettingsDivider()
                 // 設定頁上只放一列「現在是哪組」，挑色在彈窗裡做 —— 那裡才看得到實際套用的樣子
                 Row(
                     modifier = Modifier.fillMaxWidth()
@@ -13543,7 +13630,17 @@ fun SettingsView(viewModel: RelateViewModel) {
                     Text("›", fontSize = 17.sp, color = AppColors.TextTertiary,
                         maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 6.dp))
                 }
-                SettingsDivider()
+            }
+        }
+
+        /**
+         * ⚠️ 兩個通知開關收成一張卡。以前「每晚回顧通知」在上面、
+         *    「未分類提醒」在下面，中間還各自夾著別的設定，
+         *    使用者要關通知得在整頁裡找兩次。
+         */
+        item { SettingsSection("通知") }
+        item {
+            SettingsCard {
                 Row(
                     modifier = Modifier.fillMaxWidth()
                         .clickable { viewModel.setRecapEnabled(!recapEnabled) }
@@ -13590,33 +13687,12 @@ fun SettingsView(viewModel: RelateViewModel) {
                     }
                     Switch(checked = unclassifiedAlert, onCheckedChange = { viewModel.setUnclassifiedAlert(it) })
                 }
-                SettingsDivider()
-                // 外觀：跟隨系統／淺色／深色
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("外觀", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                        Text("底色與文字；圖表配色不受影響", fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp)
-                    }
-                    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
-                        listOf("system" to "系統", "light" to "淺色", "dark" to "深色").forEach { (id, label) ->
-                            val on = themeMode == id
-                            Box(
-                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                    .background(if (on) AppColors.BrandPrimary else Color.Transparent)
-                                    .clickable { viewModel.setThemeMode(id) }
-                                    .padding(horizontal = 10.dp, vertical = 7.dp)
-                            ) {
-                                Text(label, fontSize = T.Label, maxLines = 1, softWrap = false,
-                                    color = if (on) Color.White else AppColors.TextSecondary,
-                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal)
-                            }
-                        }
-                    }
-                }
-                SettingsDivider()
+            }
+        }
+
+        item { SettingsSection("偏好") }
+        item {
+            SettingsCard {
                 Row(
                     modifier = Modifier.fillMaxWidth()
                         .clickable { viewModel.setScreenshotMode(!shotMode) }
@@ -13683,7 +13759,13 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         // ── 備份 ──
-        item { SettingsSection("備份") }
+        /**
+         * ⚠️ 「備份」本來自己佔一個區段標題，底下只有一列。
+         *    併進「資料」區，少一個標題。備份本來就是資料的一部分，
+         *    而且它排在這一區的第一張卡、沒綁定時還是 accent 色，
+         *    不會因為少了標題就變得不顯眼。
+         */
+        item { SettingsSection("資料") }
         item {
             SettingsCard {
                 /**
@@ -13706,9 +13788,6 @@ fun SettingsView(viewModel: RelateViewModel) {
                 ) { showBackup = true }
             }
         }
-
-        // ── 資料 ──
-        item { SettingsSection("資料") }
 
         // 「上次發生錯誤」卡片已拿掉（v3.24）：一般使用者看不懂堆疊，
         // 那張紅卡只會讓人以為 App 壞了。錯誤仍然會記在內部，需要時再開回來。
@@ -13743,45 +13822,31 @@ fun SettingsView(viewModel: RelateViewModel) {
 
         item {
             SettingsCard {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("紀錄總數", fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                    Text("${records.size} 筆", fontSize = T.Body, fontWeight = FontWeight.Bold,
-                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
-                }
+                // ⚠️ 「紀錄總數 N 筆」原本自己佔一列，但它只是一個數字、
+                //    點了也沒事。收成「逐筆檢視紀錄」的副標，少一列也少一張卡。
+                // 兩個都是「掃雜訊」，收成一列；動到的資料不同，所以進去還是分開選
+                SettingsRow("整理雜訊") { hubTidy = true }
                 SettingsDivider()
-                SettingsRow("整理系統通知", "把讚、追蹤、推播歸到「系統通知」") { confirmAction = "retag" }
-                SettingsDivider()
-                SettingsRow("清掉常用詞裡的雜訊", "移除系統通知與人名碎片") { confirmAction = "purgeWords" }
-            }
-        }
-
-        item {
-            SettingsCard {
                 SettingsRow(
                     "最近刪除",
                     if (undoAvailable) "保留 7 天　·　有可復原的操作" else "保留 7 天，可還原"
                 ) { showTrash = true }
                 SettingsDivider()
-                SettingsRow("逐筆檢視紀錄") { showRecordManager = true }
-                if (blockedNow.isNotEmpty()) {
-                    SettingsDivider()
-                    SettingsRow("永不記錄名單", "${blockedNow.size} 位") { showBlocked = true }
-                }
-                if (keptNow.isNotEmpty()) {
-                    SettingsDivider()
-                    SettingsRow("已保留的來源", "${keptNow.size} 個，不再列入非真人提醒") { showKept = true }
-                }
+                SettingsRow("逐筆檢視紀錄", "${records.size} 筆") { showRecordManager = true }
+                /**
+                 * ⚠️ 這一列固定出現，不要只在名單非空時才顯示。
+                 *    以前兩個名單各自「有東西才出現」，設定頁的列數會跳來跳去 ——
+                 *    使用者記得「上次在這附近看過」卻找不到，比多一列還糟。
+                 */
                 SettingsDivider()
-                SettingsRow("清除資料", "今日／本週／指定日期／全部", danger = true) {
-                    setShowDataManager(true)
-                }
+                SettingsRow(
+                    "例外名單",
+                    "${blockedNow.size} 位永不記錄　·　${keptNow.size} 個已保留"
+                ) { hubException = true }
                 SettingsDivider()
-                SettingsRow("清除常用詞", "${wordFreqNow.size} 個詞全部歸零", danger = true) {
-                    confirmAction = "words"
-                }
+                // ⚠️ 兩個不可復原的刪除收成一個入口。危險操作集中在一處，
+                //    比散在設定頁兩個地方各掛一行紅字安全。
+                SettingsRow("清除資料", danger = true) { hubClear = true }
             }
         }
 
@@ -13928,6 +13993,66 @@ fun SettingsView(viewModel: RelateViewModel) {
      *    所有 launcher 與狀態都在 SettingsView 的作用域裡，
      *    所以直接寫在這裡，不另外拉成獨立 Composable 傳十個參數。
      */
+    if (hubFeedback) {
+        ChoiceDialog(
+            "意見與許願", "三條路的去處不一樣，挑一個",
+            listOf(
+                SettingsChoice("回報問題", "數字不對、記錯人、App 怪怪的。用你自己的郵件 App 寄給開發者。") { showFeedback = true },
+                SettingsChoice("許願新功能", "開一張表單，填完送出就直接進開發者的清單。") {
+                    openUrl(context, WISHLIST_FORM_URL)
+                },
+                SettingsChoice("看大家的願望", "公開的許願板，看別人許了什麼。") {
+                    openUrl(context, WISHLIST_BOARD_URL)
+                }
+            ).filter {
+                // 網址空著的那條路不要出現，不然點了沒反應
+                when (it.title) {
+                    "許願新功能" -> WISHLIST_FORM_URL.isNotBlank()
+                    "看大家的願望" -> WISHLIST_BOARD_URL.isNotBlank()
+                    else -> true
+                }
+            }
+        ) { hubFeedback = false }
+    }
+
+    if (hubTidy) {
+        ChoiceDialog(
+            "整理雜訊", "兩個動的是不同資料，分開做",
+            listOf(
+                SettingsChoice("整理系統通知", "把讚、追蹤、推播這類非真人來源歸到「系統通知」標籤。紀錄留著，只是不列入統計。") {
+                    confirmAction = "retag"
+                },
+                SettingsChoice("清掉常用詞裡的雜訊", "從詞頻統計裡移除系統通知的片語與人名碎片。可以先看清單再決定。") {
+                    confirmAction = "purgeWords"
+                }
+            )
+        ) { hubTidy = false }
+    }
+
+    if (hubException) {
+        ChoiceDialog(
+            "例外名單", "你對某些名字做過的決定",
+            listOf(
+                SettingsChoice("永不記錄名單", "${blockedNow.size} 位。這些名字之後不會再被記錄。") { showBlocked = true },
+                SettingsChoice("已保留的來源", "${keptNow.size} 個。規則判定是非真人，但你確認過是真人，所以不再提醒。") { showKept = true }
+            )
+        ) { hubException = false }
+    }
+
+    if (hubClear) {
+        ChoiceDialog(
+            "清除資料", "兩個都無法復原",
+            listOf(
+                SettingsChoice("互動紀錄", "可以只清今日／本週／指定日期，或全部。標籤、合併的帳號、改過的名稱都不會動。", danger = true) {
+                    setShowDataManager(true)
+                },
+                SettingsChoice("常用詞統計", "${wordFreqNow.size} 個詞全部歸零，重新開始累積。互動紀錄與訊息數不受影響。", danger = true) {
+                    confirmAction = "words"
+                }
+            )
+        ) { hubClear = false }
+    }
+
     if (showBackup) {
         Dialog(
             onDismissRequest = { showBackup = false },
@@ -14317,6 +14442,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.27" to listOf(
+        "設定頁大整理：相似的功能收成一列，點進去再選。列數少了三分之一。",
+        "偏好拆成「外觀」「通知」「偏好」三區，通知開關不用再整頁找兩次。",
+        "「永不記錄名單」與「已保留的來源」合併成「例外名單」，固定出現。"
+    ),
     "1.0.26" to listOf(
         "設定頁最下面的三個產品可以點了：壽星日開網站，Bandary 與 RelateStats 開 Play 商店。"
     ),
