@@ -5505,6 +5505,13 @@ class MainActivity : ComponentActivity() {
          *    與 safeDrawingPadding() 避開系統列的，那些已經寫在各頁了，
          *    不要為了這個改回 fitsSystemWindows。
          * ⚠️ 要在 setContent 之前呼叫。
+         * ⚠️ **androidx.activity 的版本會影響 Play 的警告。**
+         *    1.8.x 的 enableEdgeToEdge 內部是直接寫 window.statusBarColor／
+         *    navigationBarColor，那兩個在 Android 15 已淘汰 ——
+         *    所以就算這裡改用了 enableEdgeToEdge，Play 掃出來的還是
+         *    「使用已淘汰的無邊框 API」，警告不會消。
+         *    1.10.1 起改成在 API 35 以上走新的路徑，警告才會清掉。
+         *    **不要把 androidx.activity 降回去。**
          */
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.auto(
@@ -14300,6 +14307,9 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.25" to listOf(
+        "更新底層元件，修掉 Google Play 回報的三個技術問題。"
+    ),
     "1.0.24" to listOf(
         "點進串文看貼文不會再被記成聊天室。",
         "「@2131955775」這類資源代碼、「24分鐘」這類時間標籤不再被收成聯絡人。",

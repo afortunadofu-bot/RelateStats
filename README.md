@@ -39,6 +39,8 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **贊助連結不能跟任何功能掛勾**。`BUYMEACOFFEE_URL` 永遠只是一個外開連結：不解鎖功能、不去廣告、不加額度。Google Play 的付款政策只在「款項換到 App 內的東西」時才要求走 Play 帳務；一旦掛勾就變成繞過 Play 收費，會被下架。副標（「這個 App 不收費，咖啡純粹是心意」）要一直講清楚「付了也不會多拿到什麼」，但不要寫成免責聲明的語氣——在一個請人喝咖啡的按鈕上那樣很冷。
 - **發版流程**：要讓舊版的使用者**自動**收到更新提示，必須在發布時把 `inAppUpdatePriority` 設成 4 以上，而這個欄位**只能透過 Play Developer API（Edits）設定**，Play Console 網頁介面沒有。沒設就是 0，使用者不會被打擾（他們仍可自己到「關於 → 前往商店更新」）。另有一條退路：手上版本舊超過 `UPDATE_STALE_DAYS`（30）天也會提醒一次。
 - **`WHATS_NEW_IMPORTANT` 發版後要改回 `false`**。它控制「更新後跳不跳出這一版改了什麼」，每一版都跳的話使用者第三次就會閉著眼睛按掉，真正重要的那次也會被一起按掉。
+- **不要把 `androidx.activity` 降回 1.8.x**。1.8.x 的 `enableEdgeToEdge()` 內部直接寫 `window.statusBarColor` / `navigationBarColor`，那兩個在 Android 15 已淘汰 —— 所以就算程式改用了 `enableEdgeToEdge()`，Play 掃出來的還是「使用已淘汰的無邊框 API」。1.10.1 起才改走新路徑。
+- **`androidx.fragment` 的明確相依不能拿掉**。`app-update:2.1.0` 相依的是 `fragment:1.0.0`（2018 年），Play 會列進技術品質問題。那一行只是覆蓋版本，程式碼本身沒用到 fragment。
 - **升級 `com.google.android.play:app-update` 之後一定要重驗權限**。它現在不會帶進 `INTERNET`（只多一個自家的 signature 權限），但那是實測來的、不是保證。驗法：`gradlew processDebugMainManifest`，再 grep `app/build/intermediates/merged_manifest/debug/.../AndroidManifest.xml` 的 uses-permission。看到 `INTERNET` 就立刻退版。
 - **不要為了任何功能加 `INTERNET` 權限**。功能許願區要讓使用者互相看到並投票，做法是用瀏覽器開外部網頁（`WISHLIST_FORM_URL` / `WISHLIST_BOARD_URL`），App 本身不連線。加了 `INTERNET` 就要重寫隱私權政策、重填資料安全性申報、重報無障礙聲明、改商店文案，而且把願望搬進 App 內顯示會觸發 Play 的使用者自建內容政策（檢舉、封鎖、審核）。
 - **下鑽（點卡片看「是誰」）一律用 `getDrillLeaderboard()`**，不要直接呼叫 `getDynamicLeaderboard()`。全是通話的集合必須走 `getCallLeaderboard()`，否則未接來電的來電者（電話號碼、「未接來電」）會被「非真人」規則整筆濾掉，名單人數跟統計數字對不起來。概況頁與分析頁各寫一份就是這樣漏過兩次。
@@ -641,6 +643,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.0.25 | 2026-10-15 | build 103：升 androidx.activity/fragment，清掉 Play 的三則警告 |
 | v1.0.24 | 2026-10-13 | build 102：串文不再被記成聊天室、通話卡排版、「關於」三合一 |
 | v1.0.23 | 2026-10-12 | build 101：贊助那一列副標改成「咖啡是贊助作者」 |
 | v1.0.22 | 2026-10-12 | build 100：設定頁整理（關於去灰字、品牌區縮小、分區更清楚）、許願改直接開表單、備份改整頁 |

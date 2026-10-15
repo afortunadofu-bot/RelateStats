@@ -34,8 +34,8 @@ android {
          *    1.0.0 起為公開發行版；在那之前的 3.x 是上架前的開發版本，
          *    歷史保留在 docs/CHANGELOG.md，沒有刪掉。
          */
-        versionCode = 102
-        versionName = "1.0.24"
+        versionCode = 103
+        versionName = "1.0.25"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -90,6 +90,16 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    /**
+     * %s **強制把 fragment 拉到新版。**
+     *    `com.google.android.play:app-update:2.1.0` 相依的是
+     *    `androidx.fragment:fragment:1.0.0`（2018 年），
+     *    Play Console 會把它列進「下次發布版本前應處理的問題 → 技術品質」。
+     *    這一行只是用來覆蓋傳遞相依的版本，程式碼本身沒有用到 fragment。
+     *    升級 app-update 之後可以回來確認還需不需要。
+     */
+    implementation(libs.androidx.fragment)
+
     /**
      * Play 的「應用程式內更新」。
      *

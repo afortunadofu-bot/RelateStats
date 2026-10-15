@@ -1,5 +1,25 @@
 # 修復紀錄
 
+## v1.0.25 build 103（2026-10-15）— 清掉 Play 的三則警告
+
+Play Console 在 **101 (1.0.23)** 上同時列出三則，兩則是舊帳：
+
+| 警告 | 根因 | 修法 |
+|------|------|------|
+| 使用已淘汰的無邊框 API 或參數 | **1.0.8 明明已經改用 `enableEdgeToEdge()` 了，警告卻沒消。** 因為當時解析到的 `androidx.activity` 是 **1.8.2**，它的 `enableEdgeToEdge()` 內部就是直接寫 `window.statusBarColor` / `navigationBarColor` —— 淘汰的 API 還在 APK 裡，只是從我的程式碼搬進了函式庫。 | 升到 **1.10.1**（1.10 起在 API 35 以上改走新路徑）。⚠️ **不要降回 1.8.x**，警告會再長出來。 |
+| 可能不會向所有使用者顯示無邊框畫面 | 同上。 | 同上。 |
+| `androidx.fragment:fragment` 為過時版本（1.0.0） | `com.google.android.play:app-update:2.1.0` 傳遞相依到 2018 年的 `fragment:1.0.0`。 | 明確宣告 `androidx.fragment:fragment:1.8.5` 覆蓋版本。⚠️ 程式碼本身沒用到 fragment，那一行純粹是壓版本，不能因為「看起來沒用到」就刪掉。 |
+
+順手把 `core-ktx` 1.10.1 → 1.13.1、`lifecycle-runtime-ktx` 2.6.1 → 2.8.7
+（activity 1.10.1 的相依下限）。
+
+**已重驗權限**：release 合併後的 manifest 仍然只有
+`PACKAGE_USAGE_STATS`、`POST_NOTIFICATIONS`、`RECEIVE_BOOT_COMPLETED`
+與自家的 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`，**沒有 INTERNET**。
+
+⚠️ 這三則警告掛在 101 上，Play 不會因為上傳新版就把舊卡片抹掉 ——
+要確認修好了，看 103 上傳後**有沒有長出新的**同類警告。
+
 ## v1.0.24 build 102（2026-10-13）— 串文不再被記、通話卡排版、關於三合一
 
 | # | 症狀 | 根因 | 修法 |
