@@ -33,7 +33,7 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - 雲端備份週期由每晚回顧鬧鐘檢查，比對時容許 3 小時誤差（鬧鐘有一小時的窗），否則每天備份會常常變成隔天。
 - **頭貼一律由使用者自己挑**（`ActivityResultContracts.PickVisualMedia`，不需要任何權限）。不要為了「自動抓 Gmail 頭貼」去加 `INTERNET`（要連 Google 伺服器）或 `READ_CONTACTS`（讀裝置上的個人檔案照片）——後者尤其荒謬：一個主打「不讀你的聯絡人」的 App 去要聯絡人權限，商店文案會自相矛盾。
 - **相片挑選器給的 URI 只有當次授權**，挑完必須馬上把圖片複製進 `filesDir`，不能只存 URI。
-- **商店頁上線後，把 `IN_CLOSED_BETA` 改成 `false`**。封測期間「分享給朋友」分享的是報名表；商店上線後才換回 Play 連結。只有這一個開關，不要在別的地方再判斷一次。
+- **`IN_CLOSED_BETA` 已在 v1.1.1 關掉**（商店連結已公開）。要再開一輪封測就把它改回 `true`，「分享給朋友」會自動換回報名表。只有這一個開關，不要在別的地方再判斷一次。
 - **系統列不要用 `window.statusBarColor` / `navigationBarColor`**。Android 15 已淘汰，Play Console 會擋。無邊框一律走 `onCreate` 裡的 `enableEdgeToEdge()`；畫面內容靠 `Scaffold` 的 insets、`systemBarsPadding()`、`safeDrawingPadding()` 避開系統列。
 - **更新紀錄要同時更新兩份**：`docs/CHANGELOG.md`（症狀／根因／修法，給開發看）與 `RELEASE_NOTES`（「你會看到什麼不一樣」，給使用者看，顯示在設定頁「關於 → 更新紀錄」）。不要把前者貼到後者。
 - **贊助連結不能跟任何功能掛勾**。`BUYMEACOFFEE_URL` 永遠只是一個外開連結：不解鎖功能、不去廣告、不加額度。Google Play 的付款政策只在「款項換到 App 內的東西」時才要求走 Play 帳務；一旦掛勾就變成繞過 Play 收費，會被下架。副標（「這個 App 不收費，咖啡純粹是心意」）要一直講清楚「付了也不會多拿到什麼」，但不要寫成免責聲明的語氣——在一個請人喝咖啡的按鈕上那樣很冷。
@@ -648,6 +648,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.1.1 | 2026-10-20 | build 108：關掉封測模式，分享改給 Play 連結（帶 share campaign） |
 | v1.1.0 | 2026-10-20 | build 107：英文版第一期（語言切換、介面翻譯、英文偵測規則） |
 | v1.0.28 | 2026-10-20 | build 106：概況頁也能自訂區塊順序與隱藏 |
 | v1.0.27 | 2026-10-15 | build 105：設定頁大整理（八組合併、偏好拆成外觀／通知／偏好） |

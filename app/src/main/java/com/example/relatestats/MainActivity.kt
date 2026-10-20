@@ -13765,7 +13765,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                             "現在還在上架前的封閉測試，這是報名表：\n" + RELATESTATS_BETA_URL
                     else
                         "RelateStats：$PRODUCT_TAGLINE。\n" +
-                            "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + PLAY_STORE_URL
+                            "訊息、停留時間、每日報告一次看完，資料只存在自己的手機。\n" + RELATESTATS_SHARE_URL
                     runCatching {
                         context.startActivity(Intent.createChooser(
                             Intent(Intent.ACTION_SEND).apply {
@@ -14683,6 +14683,9 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.1" to listOf(
+        "「分享給朋友」改成分享 Play 商店連結（之前封測期間分享的是報名表）。"
+    ),
     "1.1.0" to listOf(
         "英文版第一步：設定頁有「語言」可以切成 English（或跟著系統）。",
         "目前翻好的是介面；使用說明與常見問題還是中文，下一版補。",
@@ -14865,6 +14868,24 @@ const val BANDARY_STORE_URL =
     "https://play.google.com/store/apps/details?id=com.bandary.app&referrer=" + UTM_FOOTER_ENC
 const val RELATESTATS_STORE_URL =
     "https://play.google.com/store/apps/details?id=com.relatestats.app&referrer=" + UTM_FOOTER_ENC
+/**
+ * 「分享給朋友」用的商店連結。
+ *
+ * ⚠️ campaign 用 `share` 不是 `footer` —— 這兩個位置的意義完全不同：
+ *    footer 是「在 App 裡逛到」，share 是「被朋友推薦」。
+ *    混成同一個 campaign 就分不出口碑帶來多少安裝，
+ *    而那通常是最值得知道的那個數字。
+ * ⚠️ referrer 整串要 URL-encode，沒編碼 Play 只會收到第一段。
+ */
+const val RELATESTATS_SHARE_URL =
+    "https://play.google.com/store/apps/details?id=com.relatestats.app&referrer=" +
+        "utm_source%3Drelatestats%26utm_medium%3Dapp%26utm_campaign%3Dshare"
+
+/**
+ * 封測報名表。
+ * ⚠️ `IN_CLOSED_BETA` 關掉之後這兩個常數就沒有地方在用了，
+ *    但先留著不要刪 —— 之後如果再開一輪封測，改一個布林值就回得去。
+ */
 const val RELATESTATS_BETA_URL = "https://forms.gle/6HT4LzRSsPA76b6s7"
 const val BANDARY_BETA_URL = "https://forms.gle/FhBJgWBWb72MCg5x5"
 
@@ -14877,7 +14898,7 @@ const val BANDARY_BETA_URL = "https://forms.gle/FhBJgWBWb72MCg5x5"
  * ⚠️ 商店頁上線後把這裡改成 false，分享就自動換回 Play 連結。
  *    只有這一個開關，不要在別的地方再判斷一次。
  */
-const val IN_CLOSED_BETA = true
+const val IN_CLOSED_BETA = false
 
 /** ⚠️ RelateStats **這個產品**的一句話，不是品牌 tagline（見 BRAND_HOUSE_TAGLINE）。 */
 const val PRODUCT_TAGLINE = "看見你把時間花在誰身上"
