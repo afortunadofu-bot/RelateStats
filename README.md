@@ -43,6 +43,8 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **`androidx.fragment` 的明確相依不能拿掉**。`app-update:2.1.0` 相依的是 `fragment:1.0.0`（2018 年），Play 會列進技術品質問題。那一行只是覆蓋版本，程式碼本身沒用到 fragment。
 - **升級 `com.google.android.play:app-update` 之後一定要重驗權限**。它現在不會帶進 `INTERNET`（只多一個自家的 signature 權限），但那是實測來的、不是保證。驗法：`gradlew processDebugMainManifest`，再 grep `app/build/intermediates/merged_manifest/debug/.../AndroidManifest.xml` 的 uses-permission。看到 `INTERNET` 就立刻退版。
 - **對外連結一律帶 UTM，而且轉換在目的地量、不在 App 裡量**。App 沒有網路權限，送不出任何事件，所以不可能在 App 內看到跨使用者的轉換率。Play 商店用 `&referrer=`（整串要 URL-encode），自家網站用 `?utm_source=`；`utm_campaign` 用**放置位置**命名（footer、about…）不是用產品名，同一個產品之後會出現在好幾個地方。
+- **新增介面文字一律寫成 `L.t("中文", "English")`**，不要只寫中文。中英並排在同一行，改文案時兩邊一定會一起看到，不會有「中文改了英文沒改」。
+- **偵測規則的中英兩套永遠同時生效**，不跟著語言設定走。很多人手機介面是英文、LINE 卻是中文，或反過來；照介面語言挑規則會漏掉一半。
 - **不要拿顯示字串做邏輯判斷**（`label == "未接"` 這種）。改文案或做英文版時，依賴它的行為會靜悄悄消失，而且編譯不會報錯。用旗標或 id。
 - **`appName == "電話"` 的「電話」不是顯示字串，是寫進 CSV 紀錄的資料值**。做英文版時絕對不能翻它——翻了使用者既有的通話紀錄會全部對不上。
 - **不要為了任何功能加 `INTERNET` 權限**。功能許願區要讓使用者互相看到並投票，做法是用瀏覽器開外部網頁（`WISHLIST_FORM_URL` / `WISHLIST_BOARD_URL`），App 本身不連線。加了 `INTERNET` 就要重寫隱私權政策、重填資料安全性申報、重報無障礙聲明、改商店文案，而且把願望搬進 App 內顯示會觸發 Play 的使用者自建內容政策（檢舉、封鎖、審核）。
@@ -646,6 +648,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.1.0 | 2026-10-20 | build 107：英文版第一期（語言切換、介面翻譯、英文偵測規則） |
 | v1.0.28 | 2026-10-20 | build 106：概況頁也能自訂區塊順序與隱藏 |
 | v1.0.27 | 2026-10-15 | build 105：設定頁大整理（八組合併、偏好拆成外觀／通知／偏好） |
 | v1.0.26 | 2026-10-15 | build 104：三個產品接上連結（帶 UTM，轉換在目的地量） |

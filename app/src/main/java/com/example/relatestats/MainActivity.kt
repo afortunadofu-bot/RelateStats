@@ -429,6 +429,24 @@ object AppColors {
 }
 
 /** 字級與間距代幣。儀錶板風格：小字、緊湊、階層靠字重與顏色區分而非放大字體。 */
+/**
+ * 介面文字。中英並排寫在同一行。
+ *
+ * ⚠️ 刻意**不用 strings.xml**。這個 App 是單一檔案的 Compose，
+ *    1,400 多條字串拆成資源 id 會變成「看程式時完全不知道這句在說什麼」，
+ *    而且字串裡大量用到 ${'$'}變數內插，搬進 XML 要全部改寫。
+ *    中英寫在一起，改文案時兩邊一定會一起看到，不會有「中文改了英文沒改」。
+ * ⚠️ lang 是 mutableStateOf 不是 StateFlow —— Compose 直接讀，
+ *    切語言時整個畫面會自己重組。
+ * ⚠️ 還沒翻的地方照樣顯示中文，不會變成空白或 key 名。
+ *    這一版先翻介面，長說明與 FAQ 下一期。
+ */
+object L {
+    val lang = androidx.compose.runtime.mutableStateOf("zh")
+    fun t(zh: String, en: String): String = if (lang.value == "en") en else zh
+    val isEn: Boolean get() = lang.value == "en"
+}
+
 object T {
     val Kpi = 22.sp        // KPI 主數字
     val KpiSm = 17.sp      // 次級數字
@@ -617,7 +635,48 @@ private val UI_LABEL_NAMES = setOf(
     "已儲存截圖", "儲存截圖", "搜尋結果", "最近搜尋", "搜尋訊息、聯絡人",
     // LINE 通話畫面上的按鈕，測試者回報被記成聯絡人
     "keep 筆記", "keep", "靜音", "擴音", "視訊通話", "語音通話", "結束通話", "切換鏡頭",
+    // 英文介面的按鈕與分頁名。⚠️ 跟中文那批一起生效，不看語言設定。
+    "keep note", "mute", "unmute", "speaker", "video call", "voice call", "end call",
+    "flip camera", "chats", "calls", "status", "communities", "updates", "new chat",
+    "camera", "gallery", "saved", "archived", "requests", "activity", "for you",
+    "following", "followers", "suggested", "see all", "view all", "share", "repost",
+    "add to story", "your story", "close friends", "screenshot saved",
     "facebook 應用程式", "instagram 應用程式", "訊息應用程式", "你的限時動態", "新增到限時動態"
+)
+
+/**
+ * 英文介面的非真人句型。
+ *
+ * ⚠️ 跟中文那套**同時生效**，不看使用者的語言設定。
+ *    很多人手機介面是英文、LINE 卻是中文，或反過來；
+ *    照介面語言挑規則會漏掉一半。兩套都跑的成本只是多幾條 Regex。
+ * ⚠️ 全部 IGNORE_CASE，而且盡量錨在開頭或要求數字 ——
+ *    英文單字比中文短很多，不設邊界的話
+ *    「Amy Liked」這種真人名字也會中。
+ * ⚠️ 這些是照各 App 英文介面的實際字串寫的，但**還沒在英文手機上實測過**。
+ *    漏掉或誤判要拿偵測記錄回來對，不要憑印象加。
+ */
+private val NON_PERSON_EN = listOf(
+    // 「3 new likes」「12 new followers」「5 messages」
+    Regex("^\\d+\\+?\\s*(new\\s+)?(likes?|followers?|comments?|messages?|notifications?|mentions?|requests?)\\b",
+        RegexOption.IGNORE_CASE),
+    // 「92 likes」「1.2K views」
+    Regex("^[\\d.,]+\\s*[kKmM]?\\s*(likes?|views?|comments?|reposts?|shares?)\\b", RegexOption.IGNORE_CASE),
+    // 計數按鈕：「Like 92」「Unlike 34」「Repost 5」
+    Regex("^(un)?(like|comment|reply|repost|quote|share|view)d?\\s*[\\d.,]+\\s*[kKmM]?$", RegexOption.IGNORE_CASE),
+    // 動態牆推播的固定句型
+    Regex("(liked your|started following you|followed you|mentioned you|replied to your|" +
+        "tagged you|sent you a|shared a|posted a|is live|went live|suggested for you|" +
+        "double tap to|tap to see|added to (their|his|her) story)", RegexOption.IGNORE_CASE),
+    // 限時動態／連續短片的介面字
+    Regex("(story|stories|reels?|highlights?)\\s*(thumbnail|archive|tray)?\\s*$", RegexOption.IGNORE_CASE),
+    // 「2 minutes ago」「3h」這種相對時間
+    Regex("^\\d+\\s*(s|m|h|d|w|y|sec|min|hour|day|week|month|year)s?(\\s+ago)?$", RegexOption.IGNORE_CASE),
+    // 無障礙節點的角色描述：「Search button」「Back, button」
+    Regex("[,\\s](button|tab|switch|checkbox)$", RegexOption.IGNORE_CASE),
+    // 機構／官方：跟中文那條同一個理由，判錯只是歸到「系統通知」標籤
+    Regex("(verification code|one-?time password|otp|your order|receipt|invoice|" +
+        "security alert|official account|no-?reply)", RegexOption.IGNORE_CASE)
 )
 
 private val NON_PERSON_EXTRA = listOf(
@@ -690,6 +749,8 @@ fun isNonPersonContact(name: String): Boolean {
             n.lowercase() in UI_LABEL_NAMES -> true
             NON_PERSON_PATTERNS.any { it.containsMatchIn(n) } -> true
             NON_PERSON_EXTRA.any { it.containsMatchIn(n) } -> true
+            // ⚠️ 英文規則永遠一起跑，不看介面語言設定
+            NON_PERSON_EN.any { it.containsMatchIn(n) } -> true
             else -> looksLikeSentence(n)
         }
     }
@@ -708,6 +769,7 @@ fun junkReason(name: String): String {
     if (n.lowercase() in UI_LABEL_NAMES) return "這是 App 介面上的字，不是聊天室"
     if (NON_PERSON_PATTERNS.any { it.containsMatchIn(n) }) return "名稱符合系統通知格式（讚／追蹤／貼文／推播）"
     if (NON_PERSON_EXTRA.any { it.containsMatchIn(n) }) return "名稱是數字型標籤（讚數、觀看次數等）"
+    if (NON_PERSON_EN.any { it.containsMatchIn(n) }) return "名稱符合英文介面的系統通知格式"
     if (looksLikeSentence(n)) return "讀起來像貼文內文，不像名字（太長、有句號或整句都是口語）"
     return "手動標記"
 }
@@ -1190,6 +1252,32 @@ object DataRepository {
     var weekStartDay = MutableStateFlow(Calendar.MONDAY)
     val chartPaletteId = MutableStateFlow(CHART_PALETTES[0].id)
     /** 外觀：system／light／dark */
+    /**
+     * 介面語言："system"／"zh"／"en"。
+     *
+     * ⚠️ 這是**介面語言**，跟偵測規則無關。
+     *    偵測規則（NON_PERSON_PATTERNS、UI_LABEL_NAMES）中英兩套永遠同時生效，
+     *    不跟著這個設定走 —— 很多人手機介面是英文、LINE 卻是中文，
+     *    或反過來。照介面語言挑規則會漏掉一半。
+     * ⚠️ 存的是 "system" 時才跟著系統跑；使用者明確選過就固定住，
+     *    不要因為他換了系統語言就偷偷改掉他的選擇。
+     */
+    val language = MutableStateFlow("system")
+
+    fun setLanguage(mode: String) {
+        language.value = mode
+        prefs?.edit()?.putString("ui_language", mode)?.apply()
+        L.lang.value = resolveLanguage(mode)
+    }
+
+    fun resolveLanguage(mode: String): String = when (mode) {
+        "zh", "en" -> mode
+        // ⚠️ 只認 zh 開頭當中文。zh-TW／zh-HK／zh-CN 都回 "zh"，
+        //    其餘（含完全沒設定）一律英文 —— 看不懂中文的人至少看得懂英文，
+        //    反過來則不成立。
+        else -> if (java.util.Locale.getDefault().language.startsWith("zh")) "zh" else "en"
+    }
+
     val themeMode = MutableStateFlow("system")
 
     fun setThemeMode(mode: String) {
@@ -1501,6 +1589,8 @@ object DataRepository {
         loadGroupState()
         loadPermDeclines()
         prefs?.getString("theme_mode", "system")?.let { themeMode.value = it }
+        prefs?.getString("ui_language", "system")?.let { language.value = it }
+        L.lang.value = resolveLanguage(language.value)
         val appContext = context.applicationContext
         ioScope.launch {
             runOneTimeCleanupIfNeeded(appContext)
@@ -4276,6 +4366,8 @@ class RelateViewModel : ViewModel() {
     fun setRecapTime(h: Int, m: Int) = DataRepository.setRecapTime(h, m)
     val themeMode = DataRepository.themeMode
     fun setThemeMode(m: String) = DataRepository.setThemeMode(m)
+    val language = DataRepository.language
+    fun setLanguage(m: String) = DataRepository.setLanguage(m)
     val pendingRecap = DataRepository.pendingRecap
     val pendingClassify = DataRepository.pendingClassify
     val unclassifiedAlertEnabled = DataRepository.unclassifiedAlertEnabled
@@ -6230,11 +6322,11 @@ fun MainAppContent(viewModel: RelateViewModel) {
             Column {
             HorizontalDivider(color = AppColors.BorderLight)
             NavigationBar(containerColor = AppColors.Surface, tonalElevation = 0.dp) {
-                NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, "概況") }, label = { Text("概況", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "leaderboard", onClick = { setActiveTab("leaderboard") }, icon = { Icon(Icons.AutoMirrored.Rounded.List, "排行") }, label = { Text("排行", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "insights", onClick = { setActiveTab("insights") }, icon = { Icon(Icons.Rounded.Star, "分析") }, label = { Text("分析", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "contacts", onClick = { setActiveTab("contacts") }, icon = { Icon(Icons.Rounded.Person, "聯絡人") }, label = { Text("聯絡人", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
-                NavigationBarItem(selected = activeTab == "settings", onClick = { setActiveTab("settings") }, icon = { Icon(Icons.Rounded.Settings, "設定") }, label = { Text("設定", fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "overview", onClick = { setActiveTab("overview") }, icon = { Icon(Icons.Rounded.Home, L.t("概況", "Overview")) }, label = { Text(L.t("概況", "Overview"), fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "leaderboard", onClick = { setActiveTab("leaderboard") }, icon = { Icon(Icons.AutoMirrored.Rounded.List, L.t("排行", "Ranking")) }, label = { Text(L.t("排行", "Ranking"), fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "insights", onClick = { setActiveTab("insights") }, icon = { Icon(Icons.Rounded.Star, L.t("分析", "Insights")) }, label = { Text(L.t("分析", "Insights"), fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "contacts", onClick = { setActiveTab("contacts") }, icon = { Icon(Icons.Rounded.Person, L.t("聯絡人", "Contacts")) }, label = { Text(L.t("聯絡人", "Contacts"), fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
+                NavigationBarItem(selected = activeTab == "settings", onClick = { setActiveTab("settings") }, icon = { Icon(Icons.Rounded.Settings, L.t("設定", "Settings")) }, label = { Text(L.t("設定", "Settings"), fontSize = 10.sp, maxLines = 1, softWrap = false) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = AppColors.ActiveBlue, selectedTextColor = AppColors.ActiveBlue))
             }
             }
         }
@@ -6468,10 +6560,10 @@ fun TimeFilterSelector(
         ) {
         Row(modifier = Modifier.weight(1f).background(AppColors.Surface, RoundedCornerShape(10.dp)).border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp)).padding(3.dp)) {
             val types = listOf(
-                FilterType.SPECIFIC_DAY to "單日",
-                FilterType.WEEK to "單週",
-                FilterType.RANGE to "區間",
-                FilterType.ALL to "全部"
+                FilterType.SPECIFIC_DAY to L.t("單日", "Day"),
+                FilterType.WEEK to L.t("單週", "Week"),
+                FilterType.RANGE to L.t("區間", "Range"),
+                FilterType.ALL to L.t("全部", "All")
             )
             types.forEach { (type, label) ->
                 val isSelected = currentFilter.type == type
@@ -6577,7 +6669,7 @@ fun TimeFilterSelector(
                 //    只在「不在今天／本週」時出現，平常不佔位置。
                 if (!onCurrent) {
                     Text(
-                        if (currentFilter.type == FilterType.SPECIFIC_DAY) "今天" else "本週",
+                        if (currentFilter.type == FilterType.SPECIFIC_DAY) L.t("今天", "Today") else L.t("本週", "This week"),
                         fontSize = T.Micro, fontWeight = FontWeight.Bold, color = AppColors.OnBrand,
                         maxLines = 1, softWrap = false,
                         modifier = Modifier.padding(end = 4.dp)
@@ -13532,6 +13624,7 @@ fun SettingsView(viewModel: RelateViewModel) {
     val shotMode by viewModel.screenshotMode.collectAsState()
     val permDeclines by DataRepository.permDeclines.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
+    val uiLanguage by viewModel.language.collectAsState()
     val keptNow by viewModel.junkIgnored.collectAsState()
     // 每次進設定頁重讀一次；統計出錯時 lastErrorTag 會變動，跟著重讀
     val errTag by viewModel.lastErrorTag.collectAsState()
@@ -13629,14 +13722,14 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
 
         // ── 服務狀態：這是全 App 最重要的一張卡，關掉就什麼都不會記錄 ──
-        item { SettingsSection("服務") }
+        item { SettingsSection(L.t("服務", "Services")) }
         item {
             SettingsCard {
-                PermissionRow("通知存取", "計算訊息數與常用詞", hasNotif, declined = (permDeclines["notif"] ?: 0) >= 2) { disclosureKind = "notif" }
+                PermissionRow(L.t("通知存取", "Notification access"), L.t("計算訊息數與常用詞", "Counts messages and common words"), hasNotif, declined = (permDeclines["notif"] ?: 0) >= 2) { disclosureKind = "notif" }
                 SettingsDivider()
-                PermissionRow("無障礙服務", "計算聊天室停留時間", hasAccel, declined = (permDeclines["access"] ?: 0) >= 2) { disclosureKind = "access" }
+                PermissionRow(L.t("無障礙服務", "Accessibility service"), L.t("計算聊天室停留時間", "Measures time spent in chats"), hasAccel, declined = (permDeclines["access"] ?: 0) >= 2) { disclosureKind = "access" }
                 SettingsDivider()
-                PermissionRow("使用紀錄存取", "計算手機總用量佔比", hasUsageStats, declined = (permDeclines["usage"] ?: 0) >= 2) { disclosureKind = "usage" }
+                PermissionRow(L.t("使用紀錄存取", "Usage access"), L.t("計算手機總用量佔比", "Shows your share of total screen time"), hasUsageStats, declined = (permDeclines["usage"] ?: 0) >= 2) { disclosureKind = "usage" }
                 if (!hasUsageStats) {
                     Text(
                         "找不到本 App 的話，到系統「應用程式」裡點右上角「允許受限制的設定」",
@@ -13645,9 +13738,9 @@ fun SettingsView(viewModel: RelateViewModel) {
                     )
                 }
                 SettingsDivider()
-                SettingsRow("使用說明", "常見問題與運作原理") { setShowGuideDialog(true) }
+                SettingsRow(L.t("使用說明", "User guide"), L.t("常見問題與運作原理", "FAQ and how it works")) { setShowGuideDialog(true) }
                 SettingsDivider()
-                SettingsRow("隱私權政策", "讀取哪些資料、存在哪裡") {
+                SettingsRow(L.t("隱私權政策", "Privacy policy"), L.t("讀取哪些資料、存在哪裡", "What is read, and where it is kept")) {
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }
                 }
                 SettingsDivider()
@@ -13658,10 +13751,10 @@ fun SettingsView(viewModel: RelateViewModel) {
                  * ⚠️ 三條路的機制不同：回報走 Email、許願走表單、
                  *    許願板是網頁。差別寫在對話框裡的說明，不要只給三個名字。
                  */
-                SettingsRow("意見與許願") { hubFeedback = true }
+                SettingsRow(L.t("意見與許願", "Feedback & wishes")) { hubFeedback = true }
                 SettingsDivider()
                 SettingsRow(
-                    "分享給朋友",
+                    L.t("分享給朋友", "Share with a friend"),
                     if (IN_CLOSED_BETA) "封測期間分享的是報名表" else "把 RelateStats 傳給朋友"
                 ) {
                     // ⚠️ 封測期間分享報名表，不是 Play 連結（見 IN_CLOSED_BETA）
@@ -13691,9 +13784,46 @@ fun SettingsView(viewModel: RelateViewModel) {
          *    中間夾著兩個通知開關。兩個講的是同一件事，放在一起才找得到。
          *    順序是先深淺、後配色：深淺影響整個 App，配色只影響圖表。
          */
-        item { SettingsSection("外觀") }
+        item { SettingsSection(L.t("外觀", "Appearance")) }
         item {
             SettingsCard {
+                /**
+                 * 介面語言。
+                 * ⚠️ 只翻介面，長說明與 FAQ 這一版還是中文 ——
+                 *    副標要講明白，不然英文使用者點進說明看到整片中文會以為壞了。
+                 * ⚠️ 偵測規則（哪些名字不是真人）中英兩套永遠同時生效，
+                 *    不跟著這個設定走。很多人手機介面英文、LINE 卻是中文。
+                 */
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(L.t("語言", "Language"), fontSize = T.Body, fontWeight = FontWeight.Bold,
+                            color = AppColors.TextPrimary)
+                        Text(
+                            L.t("使用說明與常見問題目前仍是中文", "Guide and FAQ are still in Chinese"),
+                            fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 14.sp
+                        )
+                    }
+                    Row(modifier = Modifier.background(AppColors.Background, RoundedCornerShape(8.dp)).padding(2.dp)) {
+                        listOf("system" to L.t("系統", "Auto"), "zh" to "中文", "en" to "EN").forEach { (id, label) ->
+                            val on = uiLanguage == id
+                            Box(
+                                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                    .background(if (on) AppColors.BrandPrimary else Color.Transparent)
+                                    .clickable { viewModel.setLanguage(id) }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Text(label, fontSize = T.Label,
+                                    color = if (on) Color.White else AppColors.TextSecondary,
+                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+                SettingsDivider()
                 // 外觀：跟隨系統／淺色／深色
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
@@ -13747,7 +13877,7 @@ fun SettingsView(viewModel: RelateViewModel) {
          *    「未分類提醒」在下面，中間還各自夾著別的設定，
          *    使用者要關通知得在整頁裡找兩次。
          */
-        item { SettingsSection("通知") }
+        item { SettingsSection(L.t("通知", "Notifications")) }
         item {
             SettingsCard {
                 Row(
@@ -13799,7 +13929,7 @@ fun SettingsView(viewModel: RelateViewModel) {
             }
         }
 
-        item { SettingsSection("偏好") }
+        item { SettingsSection(L.t("偏好", "Preferences")) }
         item {
             SettingsCard {
                 Row(
@@ -13874,7 +14004,7 @@ fun SettingsView(viewModel: RelateViewModel) {
          *    而且它排在這一區的第一張卡、沒綁定時還是 accent 色，
          *    不會因為少了標題就變得不顯眼。
          */
-        item { SettingsSection("資料") }
+        item { SettingsSection(L.t("資料", "Data")) }
         item {
             SettingsCard {
                 /**
@@ -13887,8 +14017,8 @@ fun SettingsView(viewModel: RelateViewModel) {
                  *    縮成一行之後更要讓它看起來需要被處理。
                  */
                 SettingsRow(
-                    "備份與還原",
-                    if (cloudUri == null) "尚未綁定雲端，換機會整包不見"
+                    L.t("備份與還原", "Backup & restore"),
+                    if (cloudUri == null) L.t("尚未綁定雲端，換機會整包不見", "No cloud backup — everything is lost when you switch phones")
                     else "雲端已綁定 · " + (
                         if (cloudLast > 0) "上次 " + SimpleDateFormat("M/d HH:mm", Locale.TAIWAN).format(Date(cloudLast))
                         else "尚未備份"
@@ -13934,14 +14064,14 @@ fun SettingsView(viewModel: RelateViewModel) {
                 // ⚠️ 「紀錄總數 N 筆」原本自己佔一列，但它只是一個數字、
                 //    點了也沒事。收成「逐筆檢視紀錄」的副標，少一列也少一張卡。
                 // 兩個都是「掃雜訊」，收成一列；動到的資料不同，所以進去還是分開選
-                SettingsRow("整理雜訊") { hubTidy = true }
+                SettingsRow(L.t("整理雜訊", "Clean up noise")) { hubTidy = true }
                 SettingsDivider()
                 SettingsRow(
-                    "最近刪除",
+                    L.t("最近刪除", "Recently deleted"),
                     if (undoAvailable) "保留 7 天　·　有可復原的操作" else "保留 7 天，可還原"
                 ) { showTrash = true }
                 SettingsDivider()
-                SettingsRow("逐筆檢視紀錄", "${records.size} 筆") { showRecordManager = true }
+                SettingsRow(L.t("逐筆檢視紀錄", "Browse records"), "${records.size}" + L.t(" 筆", " records")) { showRecordManager = true }
                 /**
                  * ⚠️ 這一列固定出現，不要只在名單非空時才顯示。
                  *    以前兩個名單各自「有東西才出現」，設定頁的列數會跳來跳去 ——
@@ -13949,18 +14079,19 @@ fun SettingsView(viewModel: RelateViewModel) {
                  */
                 SettingsDivider()
                 SettingsRow(
-                    "例外名單",
-                    "${blockedNow.size} 位永不記錄　·　${keptNow.size} 個已保留"
+                    L.t("例外名單", "Exceptions"),
+                    if (L.isEn) "${blockedNow.size} never recorded　·　${keptNow.size} kept"
+                    else "${blockedNow.size} 位永不記錄　·　${keptNow.size} 個已保留"
                 ) { hubException = true }
                 SettingsDivider()
                 // ⚠️ 兩個不可復原的刪除收成一個入口。危險操作集中在一處，
                 //    比散在設定頁兩個地方各掛一行紅字安全。
-                SettingsRow("清除資料", danger = true) { hubClear = true }
+                SettingsRow(L.t("清除資料", "Erase data"), danger = true) { hubClear = true }
             }
         }
 
         // ── 關於 ──
-        item { SettingsSection("關於") }
+        item { SettingsSection(L.t("關於", "About")) }
         item {
             SettingsCard {
                 /**
@@ -13969,9 +14100,9 @@ fun SettingsView(viewModel: RelateViewModel) {
                  *    「前往商店更新」與「複製裝置資訊」兩個動作。
                  *    設定頁的列數愈少愈好找，同一主題拆三列只是把頁面撐長。
                  */
-                SettingsRow("版本 v$APP_VERSION") { showReleaseNotes = true }
+                SettingsRow(L.t("版本", "Version") + " v" + APP_VERSION) { showReleaseNotes = true }
                 SettingsDivider()
-                SettingsRow("聯絡我們") { contactDeveloper(context) }
+                SettingsRow(L.t("聯絡我們", "Contact us")) { contactDeveloper(context) }
                 SettingsDivider()
                 /**
                  * ⚠️ **這一列的副標不能拿掉。**
@@ -13980,7 +14111,8 @@ fun SettingsView(viewModel: RelateViewModel) {
                  *    「繞過帳務的付費功能」而下架。
                  *    這是整個「關於」區唯一留著副標的一列，不是漏改的。
                  */
-                SettingsRow("請我喝杯咖啡", "這個 App 不收費，咖啡是贊助作者") {
+                SettingsRow(L.t("請我喝杯咖啡", "Buy me a coffee"),
+                    L.t("這個 App 不收費，咖啡是贊助作者", "This app is free. A coffee just supports the author.")) {
                     openUrl(context, BUYMEACOFFEE_URL)
                 }
                 SettingsDivider()
@@ -14551,6 +14683,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.0" to listOf(
+        "英文版第一步：設定頁有「語言」可以切成 English（或跟著系統）。",
+        "目前翻好的是介面；使用說明與常見問題還是中文，下一版補。",
+        "英文介面的 LINE／IG 雜訊（N likes、Story、Keep Note…）也會被擋掉了。"
+    ),
     "1.0.28" to listOf(
         "概況頁也能自訂了：日期列右邊的「☰ 排序」可以調整區塊順序、把用不到的藏起來。"
     ),
