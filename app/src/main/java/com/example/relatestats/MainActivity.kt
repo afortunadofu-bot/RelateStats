@@ -615,6 +615,8 @@ private val UI_LABEL_NAMES = setOf(
     "讚", "已讚", "按讚", "轉發", "引用", "轉發貼文", "like", "likes", "repost", "quote",
     "收回讚", "取消讚", "取消追蹤", "取消轉發", "unlike", "unfollow",
     "已儲存截圖", "儲存截圖", "搜尋結果", "最近搜尋", "搜尋訊息、聯絡人",
+    // LINE 通話畫面上的按鈕，測試者回報被記成聯絡人
+    "keep 筆記", "keep", "靜音", "擴音", "視訊通話", "語音通話", "結束通話", "切換鏡頭",
     "facebook 應用程式", "instagram 應用程式", "訊息應用程式", "你的限時動態", "新增到限時動態"
 )
 
@@ -1074,6 +1076,25 @@ class Sec(val id: String, val label: String, val body: @Composable () -> Unit)
  *    但使用者還是應該能先幫它排好位置。
  *    新增區塊時這裡要一起加，順序即預設順序。
  */
+/**
+ * 概況頁可排序／可隱藏的區塊。
+ *
+ * %s id 一律加 `ov_` 前綴。順序與隱藏是**兩頁共用同一份存檔**，
+ *    id 撞到的話，在分析頁隱藏一個區塊會連帶把概況頁的也藏起來。
+ * %s 服務提醒、日期列、未分類提示不在這份清單裡：
+ *    前兩個是導覽，第三個是待辦。把待辦藏起來等於讓人忘記做。
+ */
+val OVERVIEW_SECTIONS: List<Pair<String, String>> = listOf(
+    "ov_kpi" to "重點數字",
+    "ov_apps" to "平台分佈",
+    "ov_cats" to "標籤分佈",
+    "ov_top" to "互動對象 Top 5",
+    "ov_msgtime" to "訊息 vs 停留",
+    "ov_group" to "個人 vs 群組",
+    "ov_lengths" to "訊息長度分佈",
+    "ov_calls" to "通話統計"
+)
+
 val INSIGHT_SECTIONS: List<Pair<String, String>> = listOf(
     "delta" to "與上期比較",
     "trend" to "逐日趨勢",
@@ -2372,8 +2393,14 @@ object DataRepository {
     private val _hiddenSections = MutableStateFlow<Set<String>>(emptySet())
     val hiddenSections: StateFlow<Set<String>> = _hiddenSections
 
+    /**
+     * %s 存的是**兩頁共用**的一份順序，所以要合併不能整個蓋掉。
+     *    概況頁送進來的只有 ov_ 開頭那幾個；直接覆蓋的話，
+     *    分析頁排好的順序會在使用者動概況頁時被清光。
+     *    各頁讀取時本來就會用自己的 id 過濾，混在一起不影響顯示。
+     */
     fun setSectionOrder(ids: List<String>) {
-        _sectionOrder.value = ids
+        _sectionOrder.value = ids + _sectionOrder.value.filter { it !in ids }
         saveData(immediate = true)
     }
 
@@ -8399,6 +8426,33 @@ fun OverviewView(viewModel: RelateViewModel) {
     val filter by viewModel.timeFilter.collectAsState()
     val weekStartDay by viewModel.weekStartDay.collectAsState()
     val context = LocalContext.current
+    val secOrder by viewModel.sectionOrder.collectAsState()
+    val secHidden by viewModel.hiddenSections.collectAsState()
+    var showSectionEditor by remember { mutableStateOf(false) }
+    // 依存檔順序排好的完整區塊清單；沒排到的接在後面
+    val ovMeta = remember(secOrder) {
+        val byId = OVERVIEW_SECTIONS.associateBy { it.first }
+        secOrder.mapNotNull { byId[it] } + OVERVIEW_SECTIONS.filter { it.first !in secOrder }
+    }
+
+    if (showSectionEditor) {
+        SectionOrderDialog(
+            sections = ovMeta,
+            hidden = secHidden,
+            onMove = { id, delta ->
+                val cur = ovMeta.map { it.first }.toMutableList()
+                val i = cur.indexOf(id)
+                val j = i + delta
+                if (i >= 0 && j in cur.indices) {
+                    cur[i] = cur[j].also { cur[j] = cur[i] }
+                    viewModel.setSectionOrder(cur)
+                }
+            },
+            onToggle = { viewModel.toggleSectionHidden(it) },
+            onReset = { viewModel.resetSections() },
+            onDismiss = { showSectionEditor = false }
+        )
+    }
 
     // 全部統計一次算完並丟到背景執行緒。
     // 舊版在 composition 期間同步跑多次全表掃描，資料量大時會直接凍住畫面。
@@ -8486,7 +8540,26 @@ fun OverviewView(viewModel: RelateViewModel) {
         verticalArrangement = Arrangement.spacedBy(D.Gap)
     ) {
         item { ServiceAlertBanner() }
-        stickyHeader { StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) }
+        // ⚠️ 排序入口掛在日期列右邊，不要自己站一列 ——
+        //    整列只有右邊一顆按鈕的話，白白吃掉一個列高。做法與分析頁一致。
+        stickyHeader {
+            StickyDateBar(filter, viewModel::setTimeFilter, weekStartDay) {
+                Row(
+                    modifier = Modifier.fillMaxHeight()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(AppColors.Surface)
+                        .border(1.dp, AppColors.BorderLight, RoundedCornerShape(10.dp))
+                        .clickable { showSectionEditor = true }
+                        .padding(horizontal = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("\u2630", fontSize = T.Label, color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text("排序", fontSize = T.Label, fontWeight = FontWeight.Bold,
+                        color = AppColors.TextSecondary, maxLines = 1, softWrap = false)
+                }
+            }
+        }
         // 兩頁的分工要寫出來：使用者問過「洞察跟總覽的用意差在哪」
         item {
 
@@ -8562,8 +8635,18 @@ fun OverviewView(viewModel: RelateViewModel) {
             }
         }
 
+        /**
+         * ⚠️ 下面這些區塊不直接 item{} 出去，而是先收集成清單，
+         *    再依使用者存的順序輸出、跳過被隱藏的 —— 跟分析頁同一套。
+         *    收集在前、輸出在後，都在同一個 content lambda 裡，所以順序是對的；
+         *    容器宣告在 lambda 內，每次重組都是新的，不會累加。
+         * ⚠️ 服務提醒、日期列、未分類提示**不列入**可隱藏的區塊：
+         *    前兩個是導覽，第三個是待辦。把待辦藏起來等於讓人忘記做。
+         */
+        val sections = ArrayList<Sec>()
+
         // ── KPI 兩列四格 ──
-        item {
+        sections.add(Sec("ov_kpi", "重點數字") {
             Column(verticalArrangement = Arrangement.spacedBy(D.Gap)) {
                 // IntrinsicSize.Min：先量兩格各自需要的高度，取較高者當整列高度。
                 // 這樣字體放大時整列一起長高，既不裁字也不會兩格高低不齊。
@@ -8588,11 +8671,11 @@ fun OverviewView(viewModel: RelateViewModel) {
                     }
                 }
             }
-        }
+        })
 
         // ── 平台分佈（表格） ──
         if (appStats.isNotEmpty()) {
-            item {
+            sections.add(Sec("ov_apps", "平台分佈") {
                 // 預設看訊息數：進到聊天室閱讀時不會有通知，兩個指標是互補的，
                 // 但訊息數涵蓋面較廣（不需要開啟無障礙服務），當預設值比較不會是空的。
                 val (mode, setMode) = remember { mutableStateOf("NOTIF") }
@@ -8642,12 +8725,12 @@ fun OverviewView(viewModel: RelateViewModel) {
                         )
                     }
                 }
-            }
+            })
         }
 
         // ── 標籤分佈（表格，取代原本的橫向卡片） ──
         if (catStats.isNotEmpty()) {
-            item {
+            sections.add(Sec("ov_cats", "標籤分佈") {
                 // ⚠️ 三個模式共用一個字串，不要用 boolean —— 加第三個選項時 boolean 會整段要重寫。
                 var catMode by rememberSaveable { mutableStateOf("M") }
                 var catPie by rememberSaveable { mutableStateOf(true) }
@@ -8718,13 +8801,13 @@ fun OverviewView(viewModel: RelateViewModel) {
                         )
                     }
                 }
-            }
+            })
         }
 
 
         // ── 互動對象 Top 5（直接放總覽，不用切到排行） ──
         if (leaderboard.isNotEmpty()) {
-            item {
+            sections.add(Sec("ov_top", "互動對象 Top 5") {
                 Panel {
                     SectionHead("互動對象 Top 5") {
                         Text("點名字看完整分析", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
@@ -8748,18 +8831,24 @@ fun OverviewView(viewModel: RelateViewModel) {
                         )
                     }
                 }
-            }
+            })
         }
 
         // ── 構成：這段期間裡誰／什麼佔多少 ──
-        item { MsgVsTimeCard(bundle.extras.weekdayMsgs + bundle.extras.weekendMsgs, bundle.extras.openedChats, overviewDrill) }
-        item { GroupSplitCard(bundle.split, overviewDrill) }
+        sections.add(Sec("ov_msgtime", "訊息 vs 停留") { MsgVsTimeCard(bundle.extras.weekdayMsgs + bundle.extras.weekendMsgs, bundle.extras.openedChats, overviewDrill) })
+        sections.add(Sec("ov_group", "個人 vs 群組") { GroupSplitCard(bundle.split, overviewDrill) })
         if (bundle.lengths.isNotEmpty()) {
-            item { LengthsCard(bundle.lengths, bundle.extras.avgWordsPerMsg, overviewDrill) }
+            sections.add(Sec("ov_lengths", "訊息長度分佈") { LengthsCard(bundle.lengths, bundle.extras.avgWordsPerMsg, overviewDrill) })
         }
         if (bundle.calls.total > 0) {
-            item { CallsCard(bundle.calls, overviewDrill) }
+            sections.add(Sec("ov_calls", "通話統計") { CallsCard(bundle.calls, overviewDrill) })
         }
+
+        // 依存檔順序排；沒排到的（新版新增的區塊）接在後面
+        val ovById = sections.associateBy { it.id }
+        val ovOrdered = secOrder.mapNotNull { ovById[it] } + sections.filter { it.id !in secOrder }
+        ovOrdered.filter { it.id !in secHidden }.forEach { sc -> item(key = sc.id) { sc.body() } }
+
 
     }
         ScrollTopButton(listState)
@@ -8998,7 +9087,17 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
  * @param label  畫面上那顆小標籤要寫什麼（「全期間」「本週」…）
  * @param note   資料不完整時要講的話；null 表示這個區間的資料是完整的
  */
-class WordScope(val words: Map<String, Int>, val label: String, val note: String?)
+/**
+ * ⚠️ `allTime` 是旗標，不要拿 `label == "全期間"` 來判斷。
+ *    理由同 Seg：改文案或翻譯的時候，那段「發話者是全期間累計」的提醒
+ *    會靜悄悄消失，而且編譯不會報錯。
+ */
+class WordScope(
+    val words: Map<String, Int>,
+    val label: String,
+    val note: String?,
+    val allTime: Boolean = false
+)
 
 /**
  * 把逐日詞頻在選取區間內加總。
@@ -9016,7 +9115,7 @@ fun scopeWords(
     range: Pair<Long, Long>?,
     rangeLabel: String
 ): WordScope {
-    if (range == null) return WordScope(all, "全期間", null)
+    if (range == null) return WordScope(all, "全期間", null, allTime = true)
     val from = DataRepository.epochDayOf(range.first)
     val to = DataRepository.epochDayOf(range.second)
     val sum = HashMap<String, Int>()
@@ -9260,7 +9359,7 @@ fun TopWordsCard(scope: WordScope, wordSenders: Map<String, Map<String, Int>> = 
                     //    這一段不會，兩邊對不起來是正常的 —— 所以要標出來，不要讓使用者自己猜。
                     if (senders.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(6.dp))
-                        if (scope.label != "全期間") {
+                        if (!scope.allTime) {
                             Text("以下發話者是全期間累計，不跟著上面的日期篩選",
                                 fontSize = T.Micro, color = AppColors.TextTertiary,
                                 modifier = Modifier.padding(bottom = 3.dp))
@@ -12221,7 +12320,16 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
      *    「接通」只是總數扣掉未接，「對方打來」又包含未接 —— 同一件事講三遍、佔掉半個螢幕，
      *    使用者還會以為「接通＝對方打來」。
      */
-    data class Seg(val label: String, val n: Int, val color: Color, val title: String, val pred: (InteractionRecord) -> Boolean)
+    /**
+     * ⚠️ `isMissed` 是旗標，不要拿 `label == "未接"` 來判斷。
+     *    顯示字串隨時會被改文案或翻譯，一改那個百分比就靜悄悄不見了，
+     *    而且不會有任何編譯錯誤。
+     */
+    data class Seg(
+        val label: String, val n: Int, val color: Color, val title: String,
+        val isMissed: Boolean = false,
+        val pred: (InteractionRecord) -> Boolean
+    )
     val segs = listOf(
         // ⚠️ coerceAtLeast(0)：incoming 已經含未接，相減理論上不會是負的，
         //    但只要有一筆未接被標成「我打出去」就會變負數，四段加總就對不上比例條。
@@ -12229,7 +12337,7 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
             isCallRec(r) && !r.isMissedCall && r.callDirection == 1
         },
         Seg("我打出去", calls.outgoing, pal.at(1), "我打電話給誰") { r -> isCallRec(r) && r.callDirection == 2 },
-        Seg("未接", calls.missed, AppColors.WorkText, "未接來電是誰打的") { r -> r.isMissedCall },
+        Seg("未接", calls.missed, AppColors.WorkText, "未接來電是誰打的", isMissed = true) { r -> r.isMissedCall },
         Seg("分不出方向", calls.unknownDir, AppColors.BorderStrong, "分不出方向的通話") { r ->
             isCallRec(r) && !r.isMissedCall && r.callDirection == 0
         }
@@ -12305,7 +12413,7 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
                             Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 2.dp)) {
                                 Text(sg.n.toString(), fontSize = T.KpiSm, fontWeight = FontWeight.Black,
                                     color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
-                                if (sg.label == "未接" && calls.total > 0) {
+                                if (sg.isMissed && calls.total > 0) {
                                     Text(" " + calls.missRate + "%", fontSize = T.Micro,
                                         color = AppColors.TextTertiary, maxLines = 1, softWrap = false,
                                         modifier = Modifier.padding(bottom = 2.dp))
@@ -12744,6 +12852,7 @@ private val USER_GUIDE = listOf(
         listOf(
             "圖表上的長條、格子、圓餅扇形，點一下或長按都會顯示那一格的數字；圓餅長按可以看是哪些人。",
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
+            "概況頁日期列右邊的「☰ 排序」可以調整每個區塊的上下順序，也可以把用不到的藏起來。分析頁也有一個，兩頁各自獨立。藏起來的只是不顯示，資料都還在，按「回到預設」可以全部還原。",
             "設定頁最下面的品牌區，「壽星日 · Bandary · RelateStats」三個都可以點，會用瀏覽器打開各自的頁面（壽星日是網站，另外兩個是 Play 商店）。",
             "設定頁最下面的「關於」有三列：「版本」點進去是更新紀錄，裡面還有「前往商店更新」（開 Play 商店，App 沒有網路權限、沒辦法自己查有沒有新版）與「複製裝置資訊」（回報問題時直接貼上就好）；另外兩列是「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁。",
             "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。想隨時看有沒有新版，到「設定 → 關於 → 前往商店更新」。",
@@ -14442,6 +14551,9 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.0.28" to listOf(
+        "概況頁也能自訂了：日期列右邊的「☰ 排序」可以調整區塊順序、把用不到的藏起來。"
+    ),
     "1.0.27" to listOf(
         "設定頁大整理：相似的功能收成一列，點進去再選。列數少了三分之一。",
         "偏好拆成「外觀」「通知」「偏好」三區，通知開關不用再整頁找兩次。",
