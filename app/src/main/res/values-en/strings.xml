@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  系統語言是英文時使用。
+
+  ⚠️ accessibility_desc 會顯示在系統的無障礙設定頁，**Google 審核也會看**。
+     內容必須跟 App 內的權限揭露、隱私權政策、商店說明一致 ——
+     四個地方有一個對不上就可能被退件。改中文版時這裡一定要一起改。
+  ⚠️ App 名稱不翻：RelateStats 是產品名。
+-->
+<resources>
+    <string name="accessibility_desc">RelateStats is not an accessibility aid. When enabled, it reads the chat title shown at the top of the screen while you use LINE, Messenger, Instagram, WhatsApp, Telegram, Threads or the phone app, in order to measure how long you spend in each conversation. It does not store message content, and it never taps, types or acts on your behalf. The data stays on this phone; the app has no internet permission and cannot upload anything.</string>
+    <string name="notif_service_label">RelateStats notification listener</string>
+    <string name="accessibility_service_label">RelateStats chat-time monitor</string>
+</resources>

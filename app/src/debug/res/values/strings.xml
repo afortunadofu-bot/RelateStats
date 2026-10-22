@@ -1,4 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ⚠️ 開發版專用：服務名稱加「（開發版）」。
+     無障礙清單裡兩個版本會並列，開錯的話正式版不會記錄任何停留時間。
+     這份只在 debug 變體生效，不會進正式包。
+-->
 <resources>
-    <!-- 開發版：名稱加註，跟從 Play 裝的測試版分得出來 -->
-    <string name="app_name">RelateStats 開發版</string>
+    <string name="notif_service_label">RelateStats 通知監聽（開發版）</string>
+    <string name="accessibility_service_label">RelateStats 停留時間監測（開發版）</string>
 </resources>

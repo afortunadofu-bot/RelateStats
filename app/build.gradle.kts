@@ -34,8 +34,8 @@ android {
          *    1.0.0 起為公開發行版；在那之前的 3.x 是上架前的開發版本，
          *    歷史保留在 docs/CHANGELOG.md，沒有刪掉。
          */
-        versionCode = 108
-        versionName = "1.1.1"
+        versionCode = 109
+        versionName = "1.1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -61,10 +61,8 @@ android {
             //    系統的無障礙清單裡會出現兩個一模一樣的
             //    「RelateStats 停留時間監測」，使用者根本看不出該開哪一個，
             //    開錯的那個不會讓正式版記到任何資料。
-            manifestPlaceholders["labelSuffix"] = "（開發版）"
         }
         release {
-            manifestPlaceholders["labelSuffix"] = ""
             if (keystoreProps.containsKey("storeFile")) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
