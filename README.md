@@ -43,6 +43,9 @@ Android 社交數據記錄 App。不 root、不碰任何資料庫，只靠 **通
 - **`androidx.fragment` 的明確相依不能拿掉**。`app-update:2.1.0` 相依的是 `fragment:1.0.0`（2018 年），Play 會列進技術品質問題。那一行只是覆蓋版本，程式碼本身沒用到 fragment。
 - **升級 `com.google.android.play:app-update` 之後一定要重驗權限**。它現在不會帶進 `INTERNET`（只多一個自家的 signature 權限），但那是實測來的、不是保證。驗法：`gradlew processDebugMainManifest`，再 grep `app/build/intermediates/merged_manifest/debug/.../AndroidManifest.xml` 的 uses-permission。看到 `INTERNET` 就立刻退版。
 - **對外連結一律帶 UTM，而且轉換在目的地量、不在 App 裡量**。App 沒有網路權限，送不出任何事件，所以不可能在 App 內看到跨使用者的轉換率。Play 商店用 `&referrer=`（整串要 URL-encode），自家網站用 `?utm_source=`；`utm_campaign` 用**放置位置**命名（footer、about…）不是用產品名，同一個產品之後會出現在好幾個地方。
+- **發新版時 `RELEASE_NOTES` 與 `RELEASE_NOTES_EN` 兩份都要加**。只加中文的話，英文使用者的「這一版改了什麼」會缺一版。`USER_GUIDE` / `USER_GUIDE_EN`、`USER_FAQ` / `USER_FAQ_EN` 同理，而且章節編號與順序必須一致（目錄是用 `no` 當 key 的）。
+- **語言相關的清單一律用 `get()` 不要用 `val`**。`L.lang` 是執行期可變的 Compose state，`val` 或 `by lazy` 會定在第一次讀到的語言，切語言不會變。
+- **內建標籤只在顯示時翻**（`ContactCategory.displayLabel`），不要改建構子裡的 `label`：那個值會被寫進 `all_categories` 存檔，改常數蓋不過存檔，而且會讓「使用者改過的名字」跟內建預設分不出來。
 - **新增介面文字一律寫成 `L.t("中文", "English")`**，不要只寫中文。中英並排在同一行，改文案時兩邊一定會一起看到，不會有「中文改了英文沒改」。
 - **偵測規則的中英兩套永遠同時生效**，不跟著語言設定走。很多人手機介面是英文、LINE 卻是中文，或反過來；照介面語言挑規則會漏掉一半。
 - **不要拿顯示字串做邏輯判斷**（`label == "未接"` 這種）。改文案或做英文版時，依賴它的行為會靜悄悄消失，而且編譯不會報錯。用旗標或 id。
@@ -648,6 +651,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 版本 | 日期 | 重點 |
 |---|---|---|
+| v1.1.2 | 2026-10-28 | build 109：英文版完成（介面、說明、FAQ、通知、系統層、截圖模式） |
 | v1.1.1 | 2026-10-20 | build 108：關掉封測模式，分享改給 Play 連結（帶 share campaign） |
 | v1.1.0 | 2026-10-20 | build 107：英文版第一期（語言切換、介面翻譯、英文偵測規則） |
 | v1.0.28 | 2026-10-20 | build 106：概況頁也能自訂區塊順序與隱藏 |
