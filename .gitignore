@@ -21,3 +21,10 @@ keystore.properties
 *.keystore
 # Android Studio 精靈產出的簽署版 AAB／APK，不進版控
 /app/release/
+
+# repo 已公開（2026-10-30），預防性擋掉常見的祕密檔
+# 目前這些檔都不存在，純粹是防手滑
+google-services.json
+.env
+.env.*
+secrets.properties
