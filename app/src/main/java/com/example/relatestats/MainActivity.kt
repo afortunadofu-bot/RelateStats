@@ -569,6 +569,17 @@ private val NON_PERSON_PATTERNS = listOf(
     Regex("^\\d+\\+?\\s*(位|個|則)?\\s*新?(的)?(讚|追蹤者|粉絲|留言|通知|互動|訊息邀請)"),
     Regex("(的串文|的貼文|的限時動態|的近況|開始追蹤你|追蹤了你|正在直播|開始直播|標註了你|提到了你|對你的貼文|新增了|優惠|折扣|限時搶|活動通知|官方帳號)"),
     Regex("^(LINE TODAY|LINE 貼文串|Instagram|Threads|Facebook|Messenger)$", RegexOption.IGNORE_CASE),
+    /**
+     * LINE 的官方服務帳號：LINE 禮物、LINE 購物、LINE Pay、LINE VOOM…
+     *
+     * ⚠️ 這些是服務推播，不是跟你聊天的人。
+     *    舊規則只比對得到完全相等的「LINE TODAY」，
+     *    「LINE 禮物」、「LINE 禮物 小幫手」這種都漏掉了。
+     * ⚠️ 鎖在開頭的 LINE 加服務名，不要單拿「禮物」當關鍵字 ——
+     *    「交換禮物」、「生日禮物小組」這種群組是真的。
+     */
+    Regex("^LINE\\s*(禮物|購物|旅遊|音樂|貼圖|漫畫|錢包|Pay|Points|VOOM|GIFT|MUSIC|SPOT|TAXI|Bank|官方|客服)",
+        RegexOption.IGNORE_CASE),
     // ⚠️ 以下是社群「動態牆推播」的固定句型。它們會被當成聯絡人名稱收進來，
     //    一週就累積上百個，使用者得手動一個個勾起來刪。
     //    這些規則只把它們歸到「系統通知」標籤，不刪資料，判錯了隨時改得回來。
@@ -582,6 +593,10 @@ private val NON_PERSON_PATTERNS = listOf(
     Regex("^\\d{1,2}[月/]\\d{1,2}日?$"),
     // 「主功能表, 1 則未讀聊天訊息」這種介面摘要
     Regex("(未讀聊天訊息|主功能表)"),
+    // 「第238章 报平安」——閱讀類 App 或分享出來的章節標題，不是聊天室
+    // ⚠️ 要求「第 + 數字 + 章/話/回/集」整組出現，
+    //    「第一次見面」「第三者」這種不會中。
+    Regex("^第\\s*[\\d一二三四五六七八九十百千]+\\s*[章話回集節]"),
     // 「分享 611」這種介面字加數字
     Regex("^分享\\s*\\d+$"),
     // 「讚 92」「讚 49950」「留言 8」「轉發 1.2萬」—— Threads／IG 貼文下方的計數按鈕。
@@ -643,6 +658,7 @@ private val UI_LABEL_NAMES = setOf(
     // ⚠️ 只放「不可能有人叫這個名字」的字。像「回覆」「社群」這種兩字詞很安全，
     //    但不要放「小明」「阿姨」這類可能是暱稱的字。
     "回覆", "社群", "返回首頁", "關閉瀏覽器", "功能表", "相片預覽", "洞察報告",
+    "追蹤", "追蹤中", "已追蹤", "粉絲", "動態", "訊息",
     // IG／Threads 動態牆的介面字，實際被收成「聯絡人」過
     "追蹤對象和粉絲", "自訂動態消息", "動態消息", "主功能表", "來自 threads", "來自 instagram",
     "更多選項", "上一頁", "下一頁", "開啟", "展開", "收合", "選取", "全選",
@@ -1237,16 +1253,42 @@ data class CategoryStat(
 )
 data class TimeOfDayStat(val period: String, val percentage: Float, val color: Color, val explicitTimeRange: String)
 
+/**
+ * 時段與星期的顯示名稱。
+ *
+ * ⚠️ 原始值保持中文，因為它同時是**比對用的 key**：
+ *    下鑽時用 "早晨" 去決定要篩哪幾個小時，
+ *    星期則是用索引排的。把資料本身翻成英文，比對會整個失效。
+ *    所以只在印出來的時候換。
+ */
+fun periodLabel(zh: String): String = when (zh) {
+    "早晨" -> L.t("早晨", "Morning")
+    "下午" -> L.t("下午", "Afternoon")
+    "夜晚" -> L.t("夜晚", "Evening")
+    else -> zh
+}
+
+fun weekdayLabel(zh: String): String = when (zh) {
+    "日" -> L.t("日", "Sun")
+    "一" -> L.t("一", "Mon")
+    "二" -> L.t("二", "Tue")
+    "三" -> L.t("三", "Wed")
+    "四" -> L.t("四", "Thu")
+    "五" -> L.t("五", "Fri")
+    "六" -> L.t("六", "Sat")
+    else -> zh
+}
+
 data class SocialPersona(val title: String, val description: String, val emoji: String) {
     companion object {
         val ALL_TYPES = listOf(
-            SocialPersona(L.t("與世無爭", "Off the grid"), L.t("保留了能量給自己，享受遠離喧囂的寧靜。\\n(無任何互動紀錄)", "You kept your energy for yourself and enjoyed the quiet.\\n(No activity recorded)"), "🍃"),
-            SocialPersona(L.t("靜默傾聽者", "Silent listener"), L.t("花了不少時間在對話中，或許正反覆閱讀或默默陪伴。\\n(有較長停留時間但無訊息)", "You spend real time in conversations — rereading, or simply being there.\\n(Long stays, no messages)"), "🦉"),
-            SocialPersona(L.t("潛水觀察員", "Quiet observer"), L.t("快速滑過對話不留痕跡，偶爾看看大家在聊什麼。\\n(極短暫停留且無訊息)", "You skim through chats without leaving a trace, checking in now and then.\\n(Very brief stays, no messages)"), "🤿"),
-            SocialPersona(L.t("深度交流家", "Deep talker"), L.t("傾向與他人進行深度的文字或語音交流，而非敷衍回覆。\\n(平均每則訊息停留時間極長)", "You tend towards long, real exchanges rather than quick replies.\\n(Very high time spent per message)"), "☕"),
-            SocialPersona(L.t("訊息機關槍", "Rapid-fire texter"), L.t("訊息來得快回得也快！總能迅速處理大量對話，不拖泥帶水。\\n(短時間內接收高頻率訊息)", "Messages come fast and go fast. You clear a lot of conversations without dawdling.\\n(High message frequency in short bursts)"), "⚡"),
-            SocialPersona(L.t("守護型陪伴者", "Steady companion"), L.t("回話不多，但總是長時間開著對話框陪伴對方。\\n(極長總停留時間但訊息量稀少)", "You don't reply much, but you keep the chat open and stay present.\\n(Very long total time, few messages)"), "🛡️"),
-            SocialPersona(L.t("平衡社交者", "Balanced socialiser"), L.t("社交節奏拿捏得恰到好處，不冷落他人也不過度消耗自己。\\n(適度的停留時間與互動比例)", "You pace your social life well — no one is neglected, and you don't burn out.\\n(Balanced time and activity)"), "⚖️")
+            SocialPersona(L.t("與世無爭", "Off the grid"), L.t("保留了能量給自己，享受遠離喧囂的寧靜。\n(無任何互動紀錄)", "You kept your energy for yourself and enjoyed the quiet.\n(No activity recorded)"), "🍃"),
+            SocialPersona(L.t("靜默傾聽者", "Silent listener"), L.t("花了不少時間在對話中，或許正反覆閱讀或默默陪伴。\n(有較長停留時間但無訊息)", "You spend real time in conversations — rereading, or simply being there.\n(Long stays, no messages)"), "🦉"),
+            SocialPersona(L.t("潛水觀察員", "Quiet observer"), L.t("快速滑過對話不留痕跡，偶爾看看大家在聊什麼。\n(極短暫停留且無訊息)", "You skim through chats without leaving a trace, checking in now and then.\n(Very brief stays, no messages)"), "🤿"),
+            SocialPersona(L.t("深度交流家", "Deep talker"), L.t("傾向與他人進行深度的文字或語音交流，而非敷衍回覆。\n(平均每則訊息停留時間極長)", "You tend towards long, real exchanges rather than quick replies.\n(Very high time spent per message)"), "☕"),
+            SocialPersona(L.t("訊息機關槍", "Rapid-fire texter"), L.t("訊息來得快回得也快！總能迅速處理大量對話，不拖泥帶水。\n(短時間內接收高頻率訊息)", "Messages come fast and go fast. You clear a lot of conversations without dawdling.\n(High message frequency in short bursts)"), "⚡"),
+            SocialPersona(L.t("守護型陪伴者", "Steady companion"), L.t("回話不多，但總是長時間開著對話框陪伴對方。\n(極長總停留時間但訊息量稀少)", "You don't reply much, but you keep the chat open and stay present.\n(Very long total time, few messages)"), "🛡️"),
+            SocialPersona(L.t("平衡社交者", "Balanced socialiser"), L.t("社交節奏拿捏得恰到好處，不冷落他人也不過度消耗自己。\n(適度的停留時間與互動比例)", "You pace your social life well — no one is neglected, and you don't burn out.\n(Balanced time and activity)"), "⚖️")
         )
     }
 }
@@ -3377,9 +3419,9 @@ object DailyRecap {
             .setContentTitle(if (L.isEn) "$n contacts are still unsorted" else "有 $n 位聯絡人還沒分類")
             .setContentText(L.t("分好之後才看得出時間花在哪種關係上", "Only once they're sorted can you see where your time goes"))
             .setStyle(Notification.BigTextStyle().bigText(
-                L.t("目前有 $n 位常聊的人還掛在「未分類」。\\n\\n", "$n of the people you talk to regularly are still Unsorted.\\n\\n") +
+                L.t("目前有 $n 位常聊的人還掛在「未分類」。\n\n", "$n of the people you talk to regularly are still Unsorted.\n\n") +
                     L.t("分類之後，概況頁的「關係分布」才看得出你的時間是給了伴侶、家人、朋友還是工作 —— ", "Once they're tagged, the relationship breakdown on the Overview page can show whether your time went to a partner, family, friends or work — ") +
-                    L.t("全部掛在未分類的話，那張圖只會告訴你「都花在未分類身上」。\\n\\n", "Leave everyone Unsorted and the chart can only tell you your time went to Unsorted.\\n\\n") +
+                    L.t("全部掛在未分類的話，那張圖只會告訴你「都花在未分類身上」。\n\n", "Leave everyone Unsorted and the chart can only tell you your time went to Unsorted.\n\n") +
                     L.t("點這裡會一位一位問，每位只要點一下標籤，分到一半關掉也沒關係。", "This asks about one person at a time — just tap a tag. You can stop halfway without losing anything.")
             ))
             .setContentIntent(open)
@@ -3411,7 +3453,7 @@ object DailyRecap {
             .setContentTitle(L.t("停留時間沒有在記錄", "Chat time is not being recorded"))
             .setContentText(L.t("無障礙服務被關掉了，點這裡重新開啟", "The accessibility service was turned off — tap to re-enable"))
             .setStyle(Notification.BigTextStyle().bigText(
-                L.t("「停留時間偵測」目前是關閉的，這段期間不會累積任何停留時間。\\n", "Chat-time detection is currently off, so no time is being recorded in this period.\\n") +
+                L.t("「停留時間偵測」目前是關閉的，這段期間不會累積任何停留時間。\n", "Chat-time detection is currently off, so no time is being recorded in this period.\n") +
                     L.t("Android 在每次重新安裝 App 後都會自動停用它。", "Android disables it every time the app is reinstalled.")
             ))
             .setContentIntent(open)
@@ -3953,7 +3995,8 @@ class ChatTrackerService : AccessibilityService() {
         val root = rootInActiveWindow ?: return
         val hit = scanScreen(root)
 
-        val name = hit.title?.trim()
+        // ⚠️ 先剪掉通話計時器再判斷，否則同一通電話的每一秒都是新聯絡人
+        val name = hit.title?.let { stripCallTimer(it) }?.trim()
 
         // 採信條件（任一成立）：
         //  1. 標題來自已知的 view id —— 高信賴，直接採信
@@ -4086,7 +4129,27 @@ class ChatTrackerService : AccessibilityService() {
         return ScanResult(title, hasEdit, title != null && title == byId, feedSignals.size >= 2)
     }
 
-    /** 排除時鐘、純數字、單一符號等明顯不是聊天室名稱的文字 */
+    /**
+ * 通話畫面標題上的計時器：「笨・25:46」「Amy · 12:14」。
+ *
+ * ⚠️ IG／Messenger 通話時，畫面頂端是「對方名字＋已通話時間」，
+ *    而那個秒數**每秒都在跳**。不處理的話，一通五分鐘的電話會長出
+ *    三百個聯絡人（笨・25:41、笨・25:42、笨・25:43…），
+ *    而且每一個都只有一兩秒的停留，統計整個被稀釋。
+ * ⚠️ 做法是把計時器剪掉、保留名字，不是整筆丟掉 ——
+ *    那是一通真的通話，停留時間應該算在那個人身上。
+ * ⚠️ 只剪**結尾**的計時器。中間有時間的（「晚上8:30開會」）不動。
+ */
+private val CALL_TIMER_SUFFIX = Regex("\\s*[\u30fb\u00b7\u2022\\-]?\\s*\\d{1,3}:\\d{2}(:\\d{2})?\\s*$")
+
+fun stripCallTimer(text: String): String {
+    val cut = CALL_TIMER_SUFFIX.replace(text, "").trim()
+    // ⚠️ 剪完變空的（整個標題就是一個時間）就維持原樣，
+    //    讓後面的規則去判斷，不要在這裡無聲吃掉。
+    return if (cut.isEmpty()) text else cut
+}
+
+/** 排除時鐘、純數字、單一符號等明顯不是聊天室名稱的文字 */
     /**
      * 聊天室標題長什麼樣子。
      *
@@ -4552,6 +4615,8 @@ class RelateViewModel : ViewModel() {
         }
         val total = filtered.size.toFloat()
         return listOf(
+            // ⚠️ label 同時是**比對用的 key**（下鑽時用 "早晨" 去判斷時段），
+            //    所以這裡保持中文，顯示時才翻。改成英文會讓下鑽整個失效。
             TimeOfDayStat("早晨", morning / total, Color(0xFFFCD34D), "05:00 - 11:59"),
             TimeOfDayStat("下午", afternoon / total, Color(0xFF60A5FA), "12:00 - 17:59"),
             TimeOfDayStat("夜晚", night / total, Color(0xFF818CF8), "18:00 - 04:59")
@@ -6121,7 +6186,7 @@ fun DemoDashboardScreen(onClose: () -> Unit) {
                             Text("☕", fontSize = 28.sp, modifier = Modifier.padding(end=8.dp))
                             Text(L.t("深度交流家", "Deep talker"), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Black)
                         }
-                        Text(L.t("傾向與他人進行深度的文字或語音交流，而非敷衍回覆。\\n(平均每則訊息停留時間極長)", "You tend towards long, real exchanges rather than quick replies.\\n(Very high time spent per message)"), color = Color.White.copy(alpha=0.9f), fontSize = 13.sp, modifier = Modifier.padding(top=8.dp), lineHeight = 18.sp)
+                        Text(L.t("傾向與他人進行深度的文字或語音交流，而非敷衍回覆。\n(平均每則訊息停留時間極長)", "You tend towards long, real exchanges rather than quick replies.\n(Very high time spent per message)"), color = Color.White.copy(alpha=0.9f), fontSize = 13.sp, modifier = Modifier.padding(top=8.dp), lineHeight = 18.sp)
                     }
                 }
             }
@@ -6446,7 +6511,7 @@ fun MinimalCalendar(selectedTime: Long, onDateSelected: (Long) -> Unit, weekStar
     val daysInMonth = firstDayCal.getActualMaximum(Calendar.DAY_OF_MONTH)
 
     val allWeekdays = listOf("日", "一", "二", "三", "四", "五", "六")
-    val weekdays = List(7) { allWeekdays[(safeStart - 1 + it) % 7] }
+    val weekdays = List(7) { weekdayLabel(allWeekdays[(safeStart - 1 + it) % 7]) }
 
     /**
      * 這個月哪幾天有紀錄。
@@ -8011,8 +8076,16 @@ fun ContributionGrid(data: List<ContribDay>, weekStartDay: Int = Calendar.MONDAY
         Spacer(modifier = Modifier.height(6.dp))
         // 圖例那一行本來右邊是空的 —— 把「一欄＝一週」塞在左邊，
         // 不用另外開一行小字就能講清楚橫軸是什麼。
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        /**
+         * ⚠️ 軸說明與色階圖例分兩行，不要並排。
+         *    以前是 SpaceBetween 的一列，兩邊都 maxLines=1 + softWrap=false；
+         *    中文剛好塞得下，英文長了一截就直接疊在一起 ——
+         *    畫面上會看到「0–23hlow ████ high (p」這種黏成一團的字。
+         *    分兩行在兩種語言下都安全，也不用為了排版去縮寫英文。
+         */
+        Column(modifier = Modifier.fillMaxWidth()) {
             Text(L.t("每一欄＝一週", "Each column = one week"), fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+            Spacer(modifier = Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
             Text(L.t("少", "low"), fontSize = T.Micro, color = AppColors.TextTertiary)
             Spacer(modifier = Modifier.width(4.dp))
@@ -8124,9 +8197,9 @@ fun InsightsView(viewModel: RelateViewModel) {
             wordFreq, wordDays, wordSince,
             viewModel.rangeOf(filter, weekStartDay),
             when (filter.type) {
-                FilterType.SPECIFIC_DAY -> "這一天"
-                FilterType.WEEK -> "這一週"
-                FilterType.RANGE -> "這段期間"
+                FilterType.SPECIFIC_DAY -> L.t("這一天", "This day")
+                FilterType.WEEK -> L.t("這一週", "This week")
+                FilterType.RANGE -> L.t("這段期間", "This range")
                 FilterType.ALL -> "全期間"
             }
         )
@@ -8328,10 +8401,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                     SectionHead(L.t("哪幾天在聊", "Days you chat")) {
                         InfoDot(
                             L.t("哪幾天在聊", "Days you chat"),
-                            L.t("一格＝一天。橫向由左到右**一欄就是一週**，縱向由上到下是星期幾。\\n", "One cell is one day. Each column left to right is a week; rows top to bottom are the days of the week.\\n") +
-                                L.t("顏色越深表示那天互動越多，點任一格會顯示當天的實際次數與聊天人數。\\n\\n", "Darker means more activity that day. Tap any cell for the actual count and how many people.\\n\\n") +
-                                L.t("跟「幾點在聊」的差別：\\n", "How this differs from Hours you chat:\\n") +
-                                L.t("這張看的是**日曆** —— 最近幾個月裡，哪幾天熱、哪幾天整片空白。\\n", "This one is a calendar: over the last few months, which days were busy and which were empty.\\n") +
+                            L.t("一格＝一天。橫向由左到右**一欄就是一週**，縱向由上到下是星期幾。\n", "One cell is one day. Each column left to right is a week; rows top to bottom are the days of the week.\n") +
+                                L.t("顏色越深表示那天互動越多，點任一格會顯示當天的實際次數與聊天人數。\n\n", "Darker means more activity that day. Tap any cell for the actual count and how many people.\n\n") +
+                                L.t("跟「幾點在聊」的差別：\n", "How this differs from Hours you chat:\n") +
+                                L.t("這張看的是**日曆** —— 最近幾個月裡，哪幾天熱、哪幾天整片空白。\n", "This one is a calendar: over the last few months, which days were busy and which were empty.\n") +
                                 "那張看的是**時鐘** —— 一天二十四小時裡，哪幾個鐘頭熱。\n\n" +
                                 "整片偏白代表那段時間幾乎沒在用通訊軟體，或服務被關掉沒記錄到。"
                         )
@@ -8364,10 +8437,10 @@ fun InsightsView(viewModel: RelateViewModel) {
                     SectionHead(L.t("社交集中度", "Social concentration")) {
                         InfoDot(
                             L.t("社交集中度怎麼看", "Reading social concentration"),
-                            L.t("集中指數用的是吉尼係數（Gini），衡量你的互動「有多不平均」。\\n\\n", "The concentration score is a Gini coefficient: how unevenly your attention is spread.\\n\\n") +
-                                L.t("0 = 每個人分到的注意力完全一樣；100 = 全部集中在一個人身上。\\n\\n", "0 means everyone gets exactly the same attention; 100 means it all goes to one person.\\n\\n") +
-                                L.t("一般人大約落在 50-70：有幾個很常聯絡的人，其餘偶爾往來。\\n", "Most people land between 50 and 70: a few you talk to constantly, the rest now and then.\\n") +
-                                L.t("數字偏高不代表不好，只代表你的社交圈很集中。\\n\\n", "A high number isn't bad — it just means your circle is concentrated.\\n\\n") +
+                            L.t("集中指數用的是吉尼係數（Gini），衡量你的互動「有多不平均」。\n\n", "The concentration score is a Gini coefficient: how unevenly your attention is spread.\n\n") +
+                                L.t("0 = 每個人分到的注意力完全一樣；100 = 全部集中在一個人身上。\n\n", "0 means everyone gets exactly the same attention; 100 means it all goes to one person.\n\n") +
+                                L.t("一般人大約落在 50-70：有幾個很常聯絡的人，其餘偶爾往來。\n", "Most people land between 50 and 70: a few you talk to constantly, the rest now and then.\n") +
+                                L.t("數字偏高不代表不好，只代表你的社交圈很集中。\n\n", "A high number isn't bad — it just means your circle is concentrated.\n\n") +
                                 "第一名／前三名佔比則是直接看他們吃掉多少比例。"
                         )
                     }
@@ -8406,8 +8479,8 @@ fun InsightsView(viewModel: RelateViewModel) {
                     SectionHead(L.t("深夜社交指數", "Late-night index")) {
                         InfoDot(
                             L.t("深夜社交指數怎麼看", "Reading the late-night index"),
-                            L.t("統計 23:00-05:00 之間的互動佔全部的比例。\\n\\n", "The share of all your activity that happens between 11 PM and 5 AM.\\n\\n") +
-                                L.t("比例高代表你的社交重心在深夜；這通常也跟睡眠時間有關。\\n", "A high share means your social life sits late at night, which usually says something about your sleep too.\\n") +
+                            L.t("統計 23:00-05:00 之間的互動佔全部的比例。\n\n", "The share of all your activity that happens between 11 PM and 5 AM.\n\n") +
+                                L.t("比例高代表你的社交重心在深夜；這通常也跟睡眠時間有關。\n", "A high share means your social life sits late at night, which usually says something about your sleep too.\n") +
                                 L.t("這個數字沒有好壞，只是讓你看見自己的作息樣貌。", "There is no good or bad score here — it just shows you your own rhythm.")
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -8477,7 +8550,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                     SectionHead(L.t("社交人格", "Your social type")) {
                         InfoDot(
                             L.t("社交人格怎麼判定", "How your type is decided"),
-                            L.t("依據本期的四個比例算出來：訊息量、停留時間、平均訊息長度、對象集中程度。\\n\\n", "Worked out from four ratios in this period: message volume, time in chat, average message length, and how concentrated your contacts are.\\n\\n") +
+                            L.t("依據本期的四個比例算出來：訊息量、停留時間、平均訊息長度、對象集中程度。\n\n", "Worked out from four ratios in this period: message volume, time in chat, average message length, and how concentrated your contacts are.\n\n") +
                                 L.t("換一個日期範圍就可能換一個人格 —— 它描述的是「你在這段期間的樣子」，不是固定標籤。", "A different date range can give a different type — it describes how you were in that period, not a permanent label.")
                         )
                     }
@@ -8510,7 +8583,7 @@ fun InsightsView(viewModel: RelateViewModel) {
                             Spacer(modifier = Modifier.width(4.dp))
                             InfoDot(
                                 L.t("怎麼算「新出現」", "What counts as new"),
-                                L.t("本期第一次出現在紀錄裡的人。\\n\\n", "People who appear in your records for the first time this period.\\n\\n") +
+                                L.t("本期第一次出現在紀錄裡的人。\n\n", "People who appear in your records for the first time this period.\n\n") +
                                     L.t("判斷「新不新」必須回頭看完整歷史 —— 一個人是不是本期才第一次出現，", "Deciding what is new means looking at the whole history — whether someone really appears for the first time this period ") +
                                     "只有看過去所有紀錄才知道；但列出來的範圍跟著上方的日期走。"
                             )
@@ -9113,9 +9186,9 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
             InfoDot(
                 L.t("幾點在聊", "Hours you chat"),
                 L.t("一格＝某個星期幾的某一個小時。橫向是一天二十四小時（最左 0 點、最右 23 點），", "One cell is one hour on one weekday. Columns run across the 24 hours of a day (0 at the left, 23 at the right), ") +
-                    L.t("縱向是星期幾，顏色越深表示那個時段互動越多。\\n", "Rows are weekdays; darker means more activity in that hour.\\n") +
-                    L.t("點任一格會顯示該時段的實際次數。\\n\\n", "Tap any cell to see the actual count for that hour.\\n\\n") +
-                    L.t("跟「哪幾天在聊」的差別：\\n", "How this differs from Days you chat:\\n") +
+                    L.t("縱向是星期幾，顏色越深表示那個時段互動越多。\n", "Rows are weekdays; darker means more activity in that hour.\n") +
+                    L.t("點任一格會顯示該時段的實際次數。\n\n", "Tap any cell to see the actual count for that hour.\n\n") +
+                    L.t("跟「哪幾天在聊」的差別：\n", "How this differs from Days you chat:\n") +
                     "那張看的是**日曆** —— 最近幾個月裡哪幾天熱。\n" +
                     "這張看的是**時鐘** —— 不管哪一天，一天當中哪幾個鐘頭熱。"
             )
@@ -9226,8 +9299,16 @@ fun WeekHourHeatmapCard(grid: Array<IntArray>, weekStartDay: Int = Calendar.MOND
             }
             // 色階圖例：跟「哪幾天在聊」那張同一個寫法，兩張圖才讀得起來像同一套
             Spacer(modifier = Modifier.height(6.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(L.t("左邊是星期　·　橫向是 0–23 時", "Rows are weekdays　·　columns are 0–23h"), fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+            /**
+             * ⚠️ 軸說明與色階圖例分兩行，不要並排。
+             *    以前是 SpaceBetween 的一列，兩邊都 maxLines=1 + softWrap=false；
+             *    中文剛好塞得下，英文長了一截就直接疊在一起 ——
+             *    畫面上會看到「0–23hlow ████ high (p」這種黏成一團的字。
+             *    分兩行在兩種語言下都安全，也不用為了排版去縮寫英文。
+             */
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(L.t("左邊是星期　·　橫向是 0–23 時", "Rows are weekdays　·　columns are hours 0–23"), fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                Spacer(modifier = Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(L.t("少", "low"), fontSize = T.Micro, color = AppColors.TextTertiary)
                     Spacer(modifier = Modifier.width(4.dp))
@@ -10448,8 +10529,8 @@ fun JunkReviewDialog(
                     }
                 }
                 Text(
-                    L.t("標為系統通知：紀錄留著但統計不算，也不會再出現在清單上。\\n", "Mark as system notice: the records stay but leave the statistics, and they drop off this list.\\n") +
-                        L.t("直接刪除：對方下次推播還是會重建。\\n", "Just deleting them won't help — the next push recreates them.\\n") +
+                    L.t("標為系統通知：紀錄留著但統計不算，也不會再出現在清單上。\n", "Mark as system notice: the records stay but leave the statistics, and they drop off this list.\n") +
+                        L.t("直接刪除：對方下次推播還是會重建。\n", "Just deleting them won't help — the next push recreates them.\n") +
                         L.t("取消勾選的會被記成真人，之後不再列入提醒。", "Unticked ones are treated as people and won't be flagged again."),
                     fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
                     modifier = Modifier.padding(top = 8.dp)
@@ -11137,7 +11218,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         ConfirmDialog(
             title = L.t("刪除並封鎖 ${names.size} 位", "Delete and block ${names.size}"),
             message = L.t("會刪除這些對象目前的新紀錄，並把名字加入永不記錄名單 —— ", "This deletes their current records and adds the names to the never-record list — ") +
-                L.t("之後對方再傳訊息也不會被記下來。\\n\\n刪掉的紀錄會進「最近刪除」保留 7 天；", "Future messages from them won't be recorded either.\\n\\nDeleted records sit in Recently deleted for 7 days; ") +
+                L.t("之後對方再傳訊息也不會被記下來。\n\n刪掉的紀錄會進「最近刪除」保留 7 天；", "Future messages from them won't be recorded either.\n\nDeleted records sit in Recently deleted for 7 days; ") +
                 L.t("封鎖可在「設定 → 永不記錄名單」解除。", "You can unblock them under Settings → Exceptions."),
             details = names,
             confirmLabel = L.t("刪除並封鎖", "Delete and block"),
@@ -11156,7 +11237,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
         ConfirmDialog(
             title = L.t("刪除並封鎖", "Delete and block"),
             message = L.t("會刪除「$name」目前的 $count 筆新紀錄，並把這個名字加入永不記錄名單 —— ", "This deletes the $count current records for \"$name\" and adds the name to the never-record list — ") +
-                L.t("之後對方再傳訊息也不會被記下來。\\n\\n刪掉的紀錄會進「最近刪除」保留 7 天；", "Future messages from them won't be recorded either.\\n\\nDeleted records sit in Recently deleted for 7 days; ") +
+                L.t("之後對方再傳訊息也不會被記下來。\n\n刪掉的紀錄會進「最近刪除」保留 7 天；", "Future messages from them won't be recorded either.\n\nDeleted records sit in Recently deleted for 7 days; ") +
                 L.t("封鎖可在「設定 → 永不記錄名單」解除。", "You can unblock them under Settings → Exceptions."),
             confirmLabel = L.t("刪除並封鎖", "Delete and block"),
             onConfirm = {
@@ -11256,7 +11337,7 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
             text = {
                 Column {
                     Text(
-                        L.t("只改這個 App 裡的顯示名稱，不會動到 LINE / IG 上的名稱。\\n", "This only changes the display name inside this app — never the name on LINE or Instagram.\\n") +
+                        L.t("只改這個 App 裡的顯示名稱，不會動到 LINE / IG 上的名稱。\n", "This only changes the display name inside this app — never the name on LINE or Instagram.\n") +
                             L.t("原本的所有紀錄會一起掛到新名稱底下。", "All existing records move under the new name."),
                         fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp
                     )
@@ -11948,7 +12029,7 @@ fun RecordManagerDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         ConfirmDialog(
             title = L.t("刪除 ${selected.size} 筆紀錄？", "Delete ${selected.size} records?"),
             message = L.t("這些紀錄會從統計中移除。", "These records will be removed from the statistics.") +
-                L.t("\\n刪掉之後可以到「設定 → 最近刪除」復原。", "\\nAfter deleting you can restore them under Settings → Recently deleted."),
+                L.t("\n刪掉之後可以到「設定 → 最近刪除」復原。", "\nAfter deleting you can restore them under Settings → Recently deleted."),
             details = byName,
             confirmLabel = L.t("刪除 ${selected.size} 筆", "Delete ${selected.size}"),
             onConfirm = {
@@ -12668,7 +12749,7 @@ fun MsgVsTimeCard(msgs: Int, opened: Int, drill: (String, (InteractionRecord) ->
             InfoDot(
                 L.t("訊息 vs 停留", "Messages vs time"),
                 L.t("兩者是互補的：訊息只有在你「沒開著聊天室」時才會跳通知，", "The two complement each other: messages are only notified while the chat is closed, ") +
-                    L.t("而停留時間只有在你「主動打開聊天室」時才會累積。\\n\\n加起來才是完整的注意力。", "while time in chat only grows when you open a chat yourself.\\n\\nAdd them together for the whole picture.")
+                    L.t("而停留時間只有在你「主動打開聊天室」時才會累積。\n\n加起來才是完整的注意力。", "while time in chat only grows when you open a chat yourself.\n\nAdd them together for the whole picture.")
             )
         }
         Row(modifier = Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -12699,8 +12780,8 @@ fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRe
                     modifier = Modifier.weight(st.percentage.coerceAtLeast(0.02f)).fillMaxHeight()
                         .background(AppColors.Chart.at(i))
                         .combinedClickable(
-                            onClick = { drill("$name 活躍對象", periodPredicate(name)) },
-                            onLongClick = { drill("$name 活躍對象", periodPredicate(name)) }
+                            onClick = { drill(periodLabel(name) + L.t(" 活躍對象", " contacts"), periodPredicate(name)) },
+                            onLongClick = { drill(periodLabel(name) + L.t(" 活躍對象", " contacts"), periodPredicate(name)) }
                         )
                 )
             }
@@ -12713,13 +12794,13 @@ fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRe
                     modifier = Modifier.weight(1f)
                         .clip(RoundedCornerShape(8.dp))
                         .background(AppColors.SurfaceAlt)
-                        .clickable { drill("$name 活躍對象", periodPredicate(name)) }
+                        .clickable { drill(periodLabel(name) + L.t(" 活躍對象", " contacts"), periodPredicate(name)) }
                         .padding(horizontal = 8.dp, vertical = 7.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(AppColors.Chart.at(i)))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(name, fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
+                        Text(periodLabel(name), fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
                     }
                     Text("${(st.percentage * 100).toInt()}%", fontSize = T.KpiSm, fontWeight = FontWeight.Black,
                         color = AppColors.TextPrimary, maxLines = 1, softWrap = false)
@@ -12735,9 +12816,11 @@ fun TimeOfDayCard(timeStats: List<TimeOfDayStat>, drill: (String, (InteractionRe
  * 資料層一律以週日為索引 0，只有顯示時旋轉，這樣改設定不用重算任何統計。
  */
 fun rotatedWeekLabels(weekStartDay: Int): List<String> {
+    // ⚠️ 基底維持中文，只有最後輸出時才換成顯示用的字 ——
+    //    旋轉用的是索引，翻了基底不影響邏輯，但保持中文比較好對照資料層。
     val base = listOf("日", "一", "二", "三", "四", "五", "六")
     val offset = (weekStartDay - Calendar.SUNDAY + 7) % 7
-    return (0..6).map { base[(it + offset) % 7] }
+    return (0..6).map { weekdayLabel(base[(it + offset) % 7]) }
 }
 
 /** 平台名縮寫：清單列的空間有限，Instagram/Messenger 全名會把名字擠掉 */
@@ -14816,7 +14899,7 @@ fun SettingsView(viewModel: RelateViewModel) {
             ConfirmDialog(
                 title = L.t("整理系統通知", "Sort system notices"),
                 message = if (targets.isEmpty()) L.t("目前沒有需要歸類的項目。", "Nothing needs sorting right now.")
-                else L.t("以下 ${targets.size} 個聯絡人會被歸類到「系統通知」標籤，排行榜將不再顯示。\\n互動紀錄不會刪除，之後仍可自行改回其他標籤。", "These ${targets.size} contacts will be filed under the System notice tag and will no longer appear in the rankings.\\nTheir records are not deleted, and you can retag them at any time."),
+                else L.t("以下 ${targets.size} 個聯絡人會被歸類到「系統通知」標籤，排行榜將不再顯示。\n互動紀錄不會刪除，之後仍可自行改回其他標籤。", "These ${targets.size} contacts will be filed under the System notice tag and will no longer appear in the rankings.\nTheir records are not deleted, and you can retag them at any time."),
                 details = targets,
                 confirmLabel = if (targets.isEmpty()) L.t("知道了", "Got it") else L.t("歸類 ${targets.size} 個", "Sort ${targets.size}"),
                 onConfirm = {
@@ -14842,7 +14925,7 @@ fun SettingsView(viewModel: RelateViewModel) {
         }
         "words" -> ConfirmDialog(
             title = L.t("清除常用詞統計", "Clear word counts"),
-            message = L.t("會刪除目前累積的 ${wordFreqNow.size} 個詞的統計資料，總覽頁的「常用詞」會歸零重新累積。\\n互動紀錄與訊息數不受影響，此操作無法復原。", "This clears the counts for all ${wordFreqNow.size} words, and Common words starts again from zero.\\nRecords and message counts are unaffected. This cannot be undone."),
+            message = L.t("會刪除目前累積的 ${wordFreqNow.size} 個詞的統計資料，總覽頁的「常用詞」會歸零重新累積。\n互動紀錄與訊息數不受影響，此操作無法復原。", "This clears the counts for all ${wordFreqNow.size} words, and Common words starts again from zero.\nRecords and message counts are unaffected. This cannot be undone."),
             confirmLabel = L.t("清除", "Erase"),
             onConfirm = {
                 viewModel.clearWordFreq()
@@ -14853,7 +14936,7 @@ fun SettingsView(viewModel: RelateViewModel) {
         )
         "abnormal" -> ConfirmDialog(
             title = L.t("清理異常紀錄", "Clean up bad records"),
-            message = L.t("會刪除 $abnormalCount 筆停留時間超過 30 分鐘上限的紀錄，這些是舊版計時錯誤的產物。\\n訊息紀錄不受影響，刪除後可在下方「復原」。", "This deletes $abnormalCount records whose chat time exceeds the 30-minute cap — leftovers from an old timing bug.\\nMessage records are unaffected, and Undo below can bring them back."),
+            message = L.t("會刪除 $abnormalCount 筆停留時間超過 30 分鐘上限的紀錄，這些是舊版計時錯誤的產物。\n訊息紀錄不受影響，刪除後可在下方「復原」。", "This deletes $abnormalCount records whose chat time exceeds the 30-minute cap — leftovers from an old timing bug.\nMessage records are unaffected, and Undo below can bring them back."),
             confirmLabel = L.t("清理 $abnormalCount 筆", "Clean up $abnormalCount"),
             onConfirm = {
                 val removed = viewModel.removeAbnormalRecords()
@@ -14968,6 +15051,12 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.3" to listOf(
+        "修正：IG／Messenger 通話時，同一通電話會被記成好幾十個聯絡人（名字後面的秒數每跳一次就多一個）。",
+        "修正：說明文字裡的換行變成字面的「\\n」兩個字。",
+        "英文版補完：時段、星期、常用詞的區間標籤，圖表圖例不再擠在一起。",
+        "LINE 禮物、LINE 購物、LINE Pay 這類官方服務帳號不再被收成聯絡人。"
+    ),
     "1.1.2" to listOf(
         "英文版完成：介面、使用說明、常見問題、通知與截圖模式都翻好了。",
         "切換在「設定 → 外觀 → 語言」（也可以跟著系統）。",
@@ -15086,6 +15175,12 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.3" to listOf(
+        "Fixed: an IG or Messenger call was recorded as dozens of contacts — the timer after the name ticked and each tick made a new one.",
+        "Fixed: line breaks in explanatory text showed up as a literal \"\\n\".",
+        "English version finished off: time-of-day, weekday and word-range labels, and chart legends no longer collide.",
+        "LINE's official service accounts (LINE Gift, LINE Shopping, LINE Pay…) are no longer collected as contacts."
+    ),
     "1.1.2" to listOf(
         "The English version is complete: interface, user guide, FAQ, notifications and screenshot mode.",
         "Switch it under Settings → Appearance → Language (or leave it on Auto).",
