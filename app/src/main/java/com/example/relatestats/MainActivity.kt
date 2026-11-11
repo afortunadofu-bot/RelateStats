@@ -735,6 +735,42 @@ private val FEED_ACTION_LABELS = setOf(
     "like", "likes", "comment", "comments", "repost", "quote", "share"
 )
 
+/**
+ * 個人主頁上的操作鈕。
+ *
+ * ⚠️ 點開某個人的個人檔案（LINE 的個人主頁、IG 的 profile），
+ *    畫面正中央就是**那個人的名字**，而且常常掛在標題用的 view id 上 ——
+ *    採信條件第 1 條直接通過，於是「看了某人的主頁 30 秒」
+ *    被記成「跟他聊了 30 秒」。那是看，不是聊。
+ * ⚠️ 用操作鈕判斷：主頁一定有「聊天／通話／視訊通話」或
+ *    「加入好友／封鎖／分享／檢舉」這幾顆，聊天室裡沒有。
+ */
+private val PROFILE_ACTION_LABELS = setOf(
+    "聊天", "通話", "視訊通話", "語音通話", "加入好友", "加好友", "封鎖", "檢舉",
+    "分享該帳號", "設為最愛", "編輯名稱", "追蹤中", "傳訊息", "發訊息",
+    "message", "follow", "following", "unfollow", "block", "report",
+    "add friend", "video call", "voice call", "audio call", "profile",
+    "共同好友", "追蹤者", "追蹤中的帳號", "mutual", "followers", "following"
+)
+
+/**
+ * 通話畫面上的控制鈕。
+ *
+ * ⚠️ 通話的秒數是**從通知拿的**（通話中那則常駐通知出現到消失），
+ *    已經是一筆完整的通話紀錄。無障礙服務如果又把通話畫面
+ *    當成聊天室記一次停留時間，同一通會被算兩次 ——
+ *    一次在「通話統計」、一次在「停留時間」。
+ * ⚠️ 1.1.3 的 stripCallTimer() 只解決了「每秒一個新聯絡人」，
+ *    沒解決重複計算。這裡直接否決整個畫面。
+ *    計時器那段還是留著，當作抓不到控制鈕時的退路。
+ */
+private val CALL_SCREEN_LABELS = setOf(
+    "靜音", "取消靜音", "擴音", "外放", "翻轉鏡頭", "切換鏡頭", "結束通話", "挂斷",
+    "關閉視訊", "開啟視訊", "通話中", "正在通話", "呼叫中", "連線中",
+    "mute", "unmute", "speaker", "flip camera", "switch camera", "end call",
+    "hang up", "turn off video", "turn on video", "calling", "connecting", "ringing"
+)
+
 /** 「讚 92」這種帶數字的計數鈕 */
 private val FEED_COUNT_BUTTON = Regex("^(讚|留言|轉發|分享|瀏覽)\\s*[\\d.,]+")
 
@@ -4020,7 +4056,18 @@ class ChatTrackerService : AccessibilityService() {
          *    只靠 stable 擋不住，所以把 feedLike 提成**硬性否決**。
          *    IG／Threads 的私訊頁不會同時出現兩種以上的動態操作鈕，不受影響。
          */
-        val trustworthy = !hit.feedLike &&
+        /**
+         * ⚠️ 三種畫面一律否決，連 view id 抓到的標題也不採信：
+         *      動態牆／串文 —— 在看貼文，不是在聊天
+         *      個人主頁     —— 在看人，不是在聊天
+         *      通話畫面     —— 秒數已經從通知拿到了，再記一次會雙重計算
+         *    這三種的標題都剛好是「一個真人的名字」，
+         *    所以**不可能**靠名字的規則擋掉，只能看畫面長相。
+         * ⚠️ 手機原生電話（appName == "電話"）不受 callLike 影響：
+         *    它本來就沒有聊天室可記，整個流程只走通知。
+         */
+        val blockedScreen = hit.feedLike || hit.profileLike || hit.callLike
+        val trustworthy = !blockedScreen &&
             (hit.fromViewId || appName == "電話" || hit.hasEditText || stable)
         val valid = !name.isNullOrEmpty() && name.length <= 60 && name !in ignoreTitles && trustworthy
         lastCandidate = name
@@ -4029,7 +4076,10 @@ class ChatTrackerService : AccessibilityService() {
             missStreak++
             DataRepository.logDetect(
                 "$appName 未採用 · 標題=${name ?: "(抓不到)"} · viewId=${hit.fromViewId} · " +
-                    "輸入框=${hit.hasEditText}" + if (hit.feedLike) " · 動態牆" else ""
+                    "輸入框=${hit.hasEditText}" +
+                    (if (hit.feedLike) " · 動態牆" else "") +
+                    (if (hit.profileLike) " · 個人主頁" else "") +
+                    (if (hit.callLike) " · 通話畫面" else "")
             )
             if (missStreak >= MISS_TOLERANCE) pauseTracking()
             return
@@ -4044,7 +4094,11 @@ class ChatTrackerService : AccessibilityService() {
     private class ScanResult(
         val title: String?, val hasEditText: Boolean, val fromViewId: Boolean,
         /** 畫面上有動態牆那排操作鈕（讚／留言／轉發…）＝這不是聊天室 */
-        val feedLike: Boolean
+        val feedLike: Boolean,
+        /** 個人主頁（聊天／通話／加好友／封鎖…）＝在看人，不是在聊 */
+        val profileLike: Boolean,
+        /** 通話畫面（靜音／擴音／結束通話…）＝秒數已經從通知拿到了 */
+        val callLike: Boolean
     )
 
     /**
@@ -4069,6 +4123,8 @@ class ChatTrackerService : AccessibilityService() {
         //    用畫面長相判斷，不是用名字猜 —— 名字猜一定會誤殺真的群組。
         //    收集到兩種以上才算數，單一個「分享」可能只是選單項目。
         val feedSignals = HashSet<String>()
+        val profileSignals = HashSet<String>()
+        val callSignals = HashSet<String>()
 
         val bounds = Rect()
         // ⚠️ 必須用 BFS（removeFirst）。標題列在節點樹的淺層，訊息列表則又深又寬；
@@ -4100,6 +4156,8 @@ class ChatTrackerService : AccessibilityService() {
             if (!editable && !text.isNullOrBlank() && text.length <= 12) {
                 val low = text.lowercase()
                 if (low in FEED_ACTION_LABELS) feedSignals.add(low)
+                if (low in PROFILE_ACTION_LABELS) profileSignals.add(low)
+                if (low in CALL_SCREEN_LABELS) callSignals.add(low)
                 // 「讚 92」這種帶數字的計數鈕，算同一種訊號
                 FEED_COUNT_BUTTON.find(text)?.let { feedSignals.add(it.groupValues[1]) }
             }
@@ -4126,7 +4184,15 @@ class ChatTrackerService : AccessibilityService() {
         // ⚠️ 最後再擋一次：標題是從別的節點抓到、但內容跟輸入框一樣時
         //    （搜尋頁常常把查詢字串同時放在標題列），一樣不採信。
         val title = (byId ?: fallback)?.takeIf { it !in editTexts }
-        return ScanResult(title, hasEdit, title != null && title == byId, feedSignals.size >= 2)
+        /**
+         * ⚠️ 三種畫面都要**兩個以上**的訊號才算數。
+         *    只憑一顆「分享」或一顆「通話」會誤判 ——
+         *    聊天室的選單裡也有分享，長按訊息也會跳出來。
+         */
+        return ScanResult(
+            title, hasEdit, title != null && title == byId,
+            feedSignals.size >= 2, profileSignals.size >= 2, callSignals.size >= 2
+        )
     }
 
     /**
@@ -13079,6 +13145,8 @@ val USER_GUIDE = listOf(
             "讚、追蹤者、推播這類非真人來源會被歸到「系統通知」，不列入排行與統計。Threads 與 IG 貼文下方的計數按鈕（「讚 92」「轉發 1.2萬」）也算在內。聯絡人頁的提醒卡可以逐筆確認：標為系統通知、刪除，或確認是真人後保留不再提醒。也可以到「設定 → 資料 → 整理雜訊」一次處理。",
             "LINE 的搜尋頁不會再被當成聊天室。那一頁最上面就是輸入框，你打的字以前會被當成最上方的標題抓走，變成一個叫「tw」之類的聯絡人。現在輸入框裡的字一律不當標題。",
             "IG 的限時動態介面（限時動態典藏、縮圖、發佈日期、已儲存截圖）與「[帳號] N 個新的讚」也不再被收成聯絡人。",
+            "看某個人的個人主頁（LINE 的個人主頁、IG 的 profile）不會被記成聊天室。那一頁有「聊天⼏通話⼏加好友⼏封鎖」這些按鈕，App 看到就知道你是在看人，不是在聊天。",
+            "通話畫面也不會被記成聊天室。通話的秒數是從「通話中」那則通知拿的，已經是一筆完整的通話紀錄；再把通話畫面當成聊天室記一次停留時間，同一通會被算兩次。",
             "點進一則 Threads 或 IG 串文來看，不會被記成聊天室。那一頁有讚、留言、轉發整排按鈕，App 看到就知道這不是聊天室。私訊不受影響。",
             "滑動態牆時不會再把貼文內文記成聊天室：畫面上同時出現讚、留言、轉發那排按鈕時，App 就知道這是動態牆而不是聊天室，私訊不受影響。另外名字讀起來像一整句話（很長、有句號、整句都是口語）也會被歸到「系統通知」，判錯的話在提醒卡選「確認是真人」就會放它一馬。",
             "刪除這類來源沒有用——對方下次推播就會重建。刪除聯絡人時可以勾「同時加入永不記錄名單」，之後就不會再記下來。",
@@ -15051,6 +15119,10 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.4" to listOf(
+        "看別人的個人主頁、或在通話畫面，不會再被記成聊天室。",
+        "通話的秒數本來就從通知拿，不會再跟停留時間重複計算。"
+    ),
     "1.1.3" to listOf(
         "修正：IG／Messenger 通話時，同一通電話會被記成好幾十個聯絡人（名字後面的秒數每跳一次就多一個）。",
         "修正：說明文字裡的換行變成字面的「\\n」兩個字。",
@@ -15175,6 +15247,10 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.4" to listOf(
+        "Viewing someone's profile, or being on a call, is no longer recorded as a chat.",
+        "Call duration already comes from the notification, so it no longer double-counts against time in chat."
+    ),
     "1.1.3" to listOf(
         "Fixed: an IG or Messenger call was recorded as dozens of contacts — the timer after the name ticked and each tick made a new one.",
         "Fixed: line breaks in explanatory text showed up as a literal \"\\n\".",
