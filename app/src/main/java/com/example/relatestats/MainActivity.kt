@@ -1616,6 +1616,25 @@ object DataRepository {
     }
 
     /**
+     * Play 回報的「商店上架的版本號」。0 = 已經是最新，或還沒問到。
+     *
+     * ⚠️ 存下來是為了**下次開 App 立刻看得到**。
+     *    不存的話每次冷啟動都要等 Play 回答，那幾百毫秒裡設定頁上
+     *    什麼提示都沒有，使用者以為沒有新版。
+     * ⚠️ 讀回來時要跟目前版本比一次：更新完之後這個值還留在 prefs 裡，
+     *    不比就會一直顯示「有新版」，提醒變成狼來了。
+     */
+    private val _storeVersionCode = MutableStateFlow(0)
+    val storeVersionCode: StateFlow<Int> = _storeVersionCode.asStateFlow()
+
+    fun setStoreVersion(code: Int) {
+        val v = if (code > BuildConfig.VERSION_CODE) code else 0
+        if (_storeVersionCode.value == v) return
+        _storeVersionCode.value = v
+        prefs?.edit()?.putInt("store_version_code", v)?.apply()
+    }
+
+    /**
      * 這個新版號提醒過了沒。
      * ⚠️ 同一版只提醒一次 —— 按過「稍後」就不要再追著問，
      *    那比不提醒更讓人想關掉整個 App 的通知。
@@ -1742,6 +1761,10 @@ object DataRepository {
         _aliases.value = runCatching { parsePairs(p.getStringSet("aliases", emptySet())) }.getOrDefault(emptyMap())
         _blockedNames.value = runCatching { p.getStringSet("blocked_names", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
         _junkIgnored.value = runCatching { p.getStringSet("junk_ignored", emptySet())?.toSet() ?: emptySet() }.getOrDefault(emptySet())
+        // 更新完之後這個值還是舊的，一定要跟目前版本比，不然會一直說「有新版」
+        _storeVersionCode.value = runCatching {
+            p.getInt("store_version_code", 0).takeIf { it > BuildConfig.VERSION_CODE } ?: 0
+        }.getOrDefault(0)
         _sectionOrder.value = runCatching {
             p.getString("section_order", "")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
         }.getOrDefault(emptyList())
@@ -9521,6 +9544,28 @@ fun dayLabel(epochDay: Int): String {
 }
 
 /**
+ * 全 App 共用的 AppUpdateManager。
+ *
+ * ⚠️ **不能每個地方各自 new 一個。**「下載完成」是註冊在某一個實例上的
+ *    回呼。手動按的那顆「檢查更新」如果自己建一個 manager 去啟動下載，
+ *    下載完根本沒人收到事件，使用者永遠等不到「重新啟動」那張提示 ——
+ *    看起來就是「按了更新，然後什麼都沒發生」。
+ * ⚠️ 拿 applicationContext：這個物件活得比任何 Activity 久，
+ *    抓著 Activity 會漏掉整個畫面。
+ */
+object PlayUpdate {
+    @Volatile
+    private var instance: com.google.android.play.core.appupdate.AppUpdateManager? = null
+
+    fun of(context: Context): com.google.android.play.core.appupdate.AppUpdateManager? {
+        instance?.let { return it }
+        val made = runCatching { AppUpdateManagerFactory.create(context.applicationContext) }.getOrNull()
+        if (made != null) instance = made
+        return made
+    }
+}
+
+/**
  * Play 的「應用程式內更新」。
  *
  * ⚠️ 這**不會讓 App 自己連網**。它是透過 IPC 去問手機上已安裝的 Play 商店 App，
@@ -9545,7 +9590,7 @@ fun InAppUpdateWatcher() {
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { }
-    val manager = remember { runCatching { AppUpdateManagerFactory.create(activity) }.getOrNull() }
+    val manager = remember { PlayUpdate.of(activity) }
 
     DisposableEffect(manager) {
         val m = manager
@@ -9565,6 +9610,17 @@ fun InAppUpdateWatcher() {
                     downloaded = true
                     return@addOnSuccessListener
                 }
+                /**
+                 * ⚠️ 查詢結果**不管要不要打斷人都要記下來**。
+                 *    這一行以前擺在節流與各種 return 的後面，所以安靜的那些版本
+                 *    App 自己其實知道有新版，卻沒有任何地方講出來 ——
+                 *    使用者只能靠運氣發現。現在記進 storeVersionCode，
+                 *    設定頁的「版本」那一列會安靜地掛一句提醒。
+                 */
+                DataRepository.setStoreVersion(
+                    if (info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE)
+                        info.availableVersionCode() else 0
+                )
                 if (!DataRepository.updateCheckDue()) return@addOnSuccessListener
                 if (info.updateAvailability() != UpdateAvailability.UPDATE_AVAILABLE) return@addOnSuccessListener
                 if (!info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)) return@addOnSuccessListener
@@ -9618,6 +9674,96 @@ fun InAppUpdateWatcher() {
             }
         )
     }
+}
+
+/**
+ * 「檢查更新」。按下去真的去問 Play，然後把答案講出來。
+ *
+ * ⚠️ 以前這顆叫「前往商店更新」，只是開商店頁面 —— 當時的註解寫
+ *    「App 沒有網路權限，查不到有沒有新版」，**那是寫錯的**。
+ *    AppUpdateManager 是透過 IPC 問手機上的 Play 商店 App，
+ *    查詢與下載都由 Play 商店做，所以查得到版本號，
+ *    而且**不需要 INTERNET 權限**（InAppUpdateWatcher 一直都是這樣用的）。
+ * ⚠️ 有新版時直接走 FLEXIBLE 流程在 App 內下載，不要把人丟去商店 ——
+ *    丟去商店等於要他自己找按鈕，而且回來時 App 已經被殺掉。
+ * ⚠️ 問不到就退回開商店頁面。開發版、手動安裝的 APK、沒有 Play 服務的
+ *    機器一律問不到，這時候「開商店」才是唯一還能走的路。
+ */
+@Composable
+fun UpdateCheckAction() {
+    val context = LocalContext.current
+    // 0 閒置　1 查詢中　2 有新版　3 已是最新　4 問不到
+    var phase by remember { mutableStateOf(0) }
+    var storeCode by remember { mutableStateOf(0) }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { }
+
+    fun check() {
+        val m = PlayUpdate.of(context)
+        if (m == null) { phase = 4; return }
+        phase = 1
+        runCatching {
+            m.appUpdateInfo
+                .addOnSuccessListener { info ->
+                    val has = info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE
+                    DataRepository.setStoreVersion(if (has) info.availableVersionCode() else 0)
+                    DataRepository.markUpdateChecked()
+                    storeCode = info.availableVersionCode()
+                    phase = if (has) 2 else 3
+                }
+                // 開發版會回 ERROR_APP_NOT_OWNED，這不是錯誤，是「這支不是從 Play 裝的」
+                .addOnFailureListener { phase = 4 }
+        }.onFailure { phase = 4 }
+    }
+
+    fun startUpdate() {
+        val m = PlayUpdate.of(context)
+        val activity = context as? android.app.Activity
+        if (m == null || activity == null) { openPlayStore(context); return }
+        runCatching {
+            m.appUpdateInfo.addOnSuccessListener { info ->
+                val ok = info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE &&
+                    info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)
+                if (!ok) { openPlayStore(context); return@addOnSuccessListener }
+                runCatching {
+                    m.startUpdateFlowForResult(
+                        info, launcher,
+                        AppUpdateOptions.newBuilder(AppUpdateType.FLEXIBLE).build()
+                    )
+                }.onFailure { openPlayStore(context) }
+            }.addOnFailureListener { openPlayStore(context) }
+        }.onFailure { openPlayStore(context) }
+    }
+
+    val label = when (phase) {
+        1 -> L.t("查詢中…", "Checking…")
+        2 -> L.t("立即更新", "Update now")
+        3 -> L.t("已是最新版", "You're up to date")
+        4 -> L.t("前往商店", "Open Play Store")
+        else -> L.t("檢查更新", "Check for updates")
+    }
+    // 已是最新時不該長得像一顆等著被按的主要按鈕
+    val filled = phase != 3
+    Text(
+        label, fontSize = T.Label, fontWeight = FontWeight.Bold,
+        color = if (filled) AppColors.OnAccent else AppColors.TextSecondary,
+        maxLines = 1, softWrap = false,
+        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+            .then(
+                if (filled) Modifier.background(if (phase == 2) AppColors.BrandPrimary else AppColors.ActiveBlue)
+                else Modifier.border(1.dp, AppColors.BorderLight, RoundedCornerShape(8.dp))
+            )
+            .clickable(enabled = phase != 1) {
+                when (phase) {
+                    2 -> startUpdate()
+                    3 -> phase = 0          // 再按一次重新查
+                    4 -> openPlayStore(context)
+                    else -> check()
+                }
+            }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    )
 }
 
 /**
@@ -11649,6 +11795,7 @@ fun ContactAccountsDialog(
 fun ReleaseNotesDialog(onDismiss: () -> Unit) {
     val current = BuildConfig.VERSION_NAME
     val context = LocalContext.current
+    val storeCode by DataRepository.storeVersionCode.collectAsState()
     AlertDialog(
         containerColor = AppColors.Surface,
         onDismissRequest = onDismiss,
@@ -11659,19 +11806,17 @@ fun ReleaseNotesDialog(onDismiss: () -> Unit) {
                 /**
                  * ⚠️ 這兩個動作本來各是設定頁的一列。
                  *    它們跟版本號講的是同一件事，收進來少兩列。
-                 * ⚠️ 「前往商店更新」不要叫「檢查更新」——
-                 *    App 沒有網路權限，查不到有沒有新版，只是開商店。
                  */
+                if (storeCode > 0) {
+                    Text(L.t("商店上已經有新版 ($storeCode)", "A newer build ($storeCode) is live on the Play Store"),
+                        fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppColors.BrandPrimary,
+                        modifier = Modifier.padding(top = 2.dp))
+                }
                 Row(
                     modifier = Modifier.padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(L.t("前往商店更新", "Update on Play Store"), fontSize = T.Label, fontWeight = FontWeight.Bold,
-                        color = AppColors.OnAccent, maxLines = 1, softWrap = false,
-                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                            .background(AppColors.ActiveBlue)
-                            .clickable { openPlayStore(context) }
-                            .padding(horizontal = 10.dp, vertical = 6.dp))
+                    UpdateCheckAction()
                     Text(L.t("複製裝置資訊", "Copy device info"), fontSize = T.Label, fontWeight = FontWeight.Bold,
                         color = AppColors.ActiveBlue, maxLines = 1, softWrap = false,
                         modifier = Modifier.clip(RoundedCornerShape(8.dp))
@@ -13263,8 +13408,8 @@ val USER_GUIDE = listOf(
             "「設定 → 偏好 → 外觀」可以選跟隨系統、淺色或深色；深色只改底色與文字，圖表配色不受影響。",
             "概況頁日期列右邊的「☰ 排序」可以調整每個區塊的上下順序，也可以把用不到的藏起來。分析頁也有一個，兩頁各自獨立。藏起來的只是不顯示，資料都還在，按「回到預設」可以全部還原。",
             "設定頁最下面的品牌區，「壽星日 · Bandary · RelateStats」三個都可以點，會用瀏覽器打開各自的頁面（壽星日是網站，另外兩個是 Play 商店）。",
-            "設定頁最下面的「關於」有三列：「版本」點進去是更新紀錄，裡面還有「前往商店更新」（開 Play 商店，App 沒有網路權限、沒辦法自己查有沒有新版）與「複製裝置資訊」（回報問題時直接貼上就好）；另外兩列是「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁。",
-            "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。想隨時看有沒有新版，到「設定 → 關於 → 前往商店更新」。",
+            "設定頁最下面的「關於」有三列：「版本」點進去是更新紀錄，裡面還有「檢查更新」（去問 Play 商店有沒有新版，有的話直接在 App 裡背景下載）與「複製裝置資訊」（回報問題時直接貼上就好）；另外兩列是「聯絡我們」開郵件 App、「請我喝杯咖啡」開贊助頁。商店上有新版時，「版本」那一列自己會掛一句提醒。",
+            "平常有新版不會打擾你。只有重要更新、或你手上這版已經舊超過一個月，才會跳出 Google Play 的更新提示；同一個新版只提醒一次，按了「稍後」就不會再問。商店上有新版時，「設定 → 關於 → 版本」那一列會自己掛一句提醒，不會彈窗打斷你。想自己確認就點進去按「檢查更新」——按下去會真的去問 Play 商店，然後告訴你是「已是最新版」還是「有 vX 可以更新」；按更新是在 App 裡背景下載，下載完才問你要不要重啟。",
             "跳出提示後是背景下載，下載期間 App 照常可以用，載完才問你要不要重啟安裝。⚠️ 這是問手機上的 Play 商店 App，不是 RelateStats 自己連網 —— 它沒有網路權限。只有從 Play 商店安裝的版本才會有這個提示。",
             "更新完也不會每次都跳說明，只有改動比較大的版本才會。每一版改了什麼都在「設定 → 關於 → 更新紀錄」。",
             "「關於 → 請我喝杯咖啡」會開贊助頁，那杯咖啡是贊助作者。這個 App 不收費，也沒有任何付費功能，請不請都一樣好用。",
@@ -13395,8 +13540,8 @@ val USER_GUIDE_EN = listOf(
             "Settings → Appearance lets you follow the system, or force light or dark. Dark mode only changes the background and text — chart colours are unaffected.",
             "☰ Arrange, to the right of the date bar on the Overview page, reorders the sections and hides the ones you never look at. The Insights page has its own. Hidden sections are only hidden — the data is still there, and Reset brings them all back.",
             "In the brand block at the bottom of Settings, 壽星日 · Bandary · RelateStats are all tappable and open in your browser (the first is a website, the other two are Play Store pages).",
-            "About, at the very bottom of Settings, has three rows. Version opens the release notes, which also hold Update on Play Store (the app has no internet permission, so it cannot check for new versions itself) and Copy device info (paste it straight into a bug report). The other two are Contact us, which opens your mail app, and Buy me a coffee.",
-            "A new version will not normally interrupt you. The Google Play update prompt only appears for important updates, or when the version you have is more than a month old; each new version is only offered once, and tapping Later ends it. To check whenever you like, use Settings → About → Update on Play Store.",
+            "About, at the very bottom of Settings, has three rows. Version opens the release notes, which also hold Check for updates (it asks the Play Store, and downloads in the background inside the app if there is one) and Copy device info (paste it straight into a bug report). The other two are Contact us, which opens your mail app, and Buy me a coffee. When a newer version is live, the Version row says so on its own.",
+            "A new version will not normally interrupt you. The Google Play update prompt only appears for important updates, or when the version you have is more than a month old; each new version is only offered once, and tapping Later ends it. When one is live, the Settings → About → Version row quietly says so — no dialog. Tap it and Check for updates asks the Play Store and tells you either that you are up to date or that vX is available; updating downloads in the background and only then asks whether to restart.",
             "After the prompt the download happens in the background, the app keeps working, and you are only asked about restarting once it is ready. ⚠️  That asks the Play Store app on your phone — RelateStats is not going online, it has no internet permission. Only copies installed from the Play Store see this prompt.",
             "Nor does every update pop up a summary; only the larger ones do. What changed in each version is always in Settings → About → Version & updates.",
             "About → Buy me a coffee opens a sponsorship page; the coffee supports the author. This app is free and has no paid features — it works exactly the same whether you buy one or not.",
@@ -14062,6 +14207,8 @@ fun SettingsView(viewModel: RelateViewModel) {
     var showFeedback by remember { mutableStateOf(false) }
     if (showFeedback) FeedbackDialog { showFeedback = false }
     var showReleaseNotes by remember { mutableStateOf(false) }
+    // Play 回報的商店版本號。有新版時「版本」那一列會自己長出一句提醒
+    val storeVer by DataRepository.storeVersionCode.collectAsState()
     // 四個「收起來的主題」：點一列進去再選要做什麼
     var hubFeedback by remember { mutableStateOf(false) }
     var hubTidy by remember { mutableStateOf(false) }
@@ -14625,7 +14772,17 @@ fun SettingsView(viewModel: RelateViewModel) {
                  *    「前往商店更新」與「複製裝置資訊」兩個動作。
                  *    設定頁的列數愈少愈好找，同一主題拆三列只是把頁面撐長。
                  */
-                SettingsRow(L.t("版本", "Version") + " v" + APP_VERSION) { showReleaseNotes = true }
+                /**
+                 * ⚠️ 有新版**不彈對話框**，只在這一列掛一句副標。
+                 *    每次有新版都彈一次，三次之後使用者就是閉著眼睛按掉，
+                 *    真正重要的那次也一起被按掉。安靜但看得到才是對的。
+                 */
+                SettingsRow(
+                    L.t("版本", "Version") + " v" + APP_VERSION,
+                    if (storeVer > 0) L.t("商店上有新版 ($storeVer)，點進去可以更新", "A newer build ($storeVer) is available — tap to update")
+                    else null,
+                    accent = storeVer > 0
+                ) { showReleaseNotes = true }
                 SettingsDivider()
                 SettingsRow(L.t("聯絡我們", "Contact us")) { contactDeveloper(context) }
                 SettingsDivider()
@@ -15212,6 +15369,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.6" to listOf(
+        "「設定 → 關於 → 版本」裡多了「檢查更新」—— 按下去會真的去問 Play 商店，告訴你是已經最新還是有新版可以更新。",
+        "商店上有新版時，「版本」那一列會自己掛一句提醒，不會彈窗打斷你。",
+        "按更新是在 App 裡背景下載，下載完才問你要不要重新啟動。"
+    ),
     "1.1.5" to listOf(
         "永不記錄名單改成比對「名字長相」，名字裡的數字當通配 —— 封掉「收回讚 34」就連「收回讚 35」一起封，同一種東西不用封第二次。",
         "封鎖現在對通知、通話、停留時間四條路都有效，不會再從無障礙服務長回來。"
@@ -15344,6 +15506,11 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.6" to listOf(
+        "Settings → About → Version now has Check for updates — it really does ask the Play Store and tells you whether you are up to date or a newer build is available.",
+        "When a newer build is live, the Version row quietly says so. No dialog.",
+        "Updating downloads in the background inside the app, and only then asks whether to restart."
+    ),
     "1.1.5" to listOf(
         "The never-record list now matches the shape of a name, with digits as wildcards — block \"34 likes\" and \"35 likes\" goes with it. No more blocking the same thing twice.",
         "A block now applies to notifications, calls and time in chat alike, so nothing grows back through the accessibility service."
