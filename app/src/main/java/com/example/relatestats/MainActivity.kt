@@ -2140,6 +2140,15 @@ object DataRepository {
     fun addInteraction(incoming: InteractionRecord) {
         // 服務可能先於 Activity 啟動，prefs 未就緒時不能靜靜丟資料
         if (prefs == null) return
+        /**
+         * ⚠️ 永不記錄要擋在這裡，不是掛在其中一條路上。
+         *    通知訊息、通話中通知結束、通話通知、無障礙停留時間 ——
+         *    四條路都從這個漏斗進來，之前只有「通知訊息」那一條有檢查，
+         *    所以封完的東西照樣從其他三條長回來。
+         * ⚠️ 連合併後的名字一起比：帳號 A 被併進已封鎖的 B，A 也不記。
+         */
+        val unifiedIn = _aliases.value[incoming.rawSenderName] ?: incoming.rawSenderName
+        if (isBlocked(incoming.rawSenderName) || isBlocked(unifiedIn)) return
         val record = resolveGroup(incoming)
 
         _interactions.update { list ->
@@ -2629,7 +2638,68 @@ object DataRepository {
     private val _blockedNames = MutableStateFlow<Set<String>>(emptySet())
     val blockedNames: StateFlow<Set<String>> = _blockedNames
 
-    fun isBlocked(name: String): Boolean = name.trim() in _blockedNames.value
+    /** 半形與全形數字連成一段 */
+    private val DIGIT_RUN = Regex("[0-9\uff10-\uff19]+")
+
+    /**
+     * 永不記錄名單的比對鍵。
+     *
+     * ⚠️ 以前是**整串字一模一樣**才算封鎖。所以封掉「收回讚 34」之後，
+     *    下一則「收回讚 35」照樣被記進來 —— 同一個東西要封幾十次。
+     * ⚠️ 解法：名字裡的數字一律當通配，數字以外的骨架必須完全相同。
+     *    「笨・12:03」會連「笨・13:40」一起擋掉，但不會擋到「笨」。
+     * ⚠️ 整串沒有一個文字（純數字、純符號）時**不做通配** ——
+     *    電話號碼就是這種，封掉一支不能變成封掉所有號碼。
+     */
+    fun blockKey(name: String): String {
+        val flat = name.trim().replace(Regex("\\s+"), " ").lowercase()
+        if (flat.none { it.isLetter() }) return flat
+        return DIGIT_RUN.replace(flat, "#")
+    }
+
+    /** 名單上要給使用者看的樣子：「收回讚 #」。沒有通配效果時回 null */
+    fun blockPattern(name: String): String? {
+        val flat = name.trim().replace(Regex("\\s+"), " ")
+        if (!DIGIT_RUN.containsMatchIn(flat) || flat.none { it.isLetter() }) return null
+        return DIGIT_RUN.replace(flat, "#")
+    }
+
+    // 比對鍵算過就快取。整組一起換（單一個 reference 的寫入是原子的），
+    // 通知服務與 UI 兩條執行緒讀到的永遠是配對正確的一組。
+    @Volatile
+    private var blockKeyCache: Pair<Set<String>, Set<String>> = emptySet<String>() to emptySet()
+
+    private fun blockKeySet(): Set<String> {
+        val src = _blockedNames.value
+        val cached = blockKeyCache
+        if (cached.first === src) return cached.second
+        val built = src.mapTo(HashSet<String>()) { blockKey(it) }
+        blockKeyCache = src to built
+        return built
+    }
+
+    fun isBlocked(name: String): Boolean {
+        if (_blockedNames.value.isEmpty()) return false
+        val k = blockKey(name)
+        return k.isNotEmpty() && k in blockKeySet()
+    }
+
+    /**
+     * 跟這些名字「同一種」的現有對象（只差數字的那些）。
+     * 封鎖前先算出來攤在確認框上，使用者才知道這一按會掃掉幾個。
+     */
+    fun sameKindNames(seeds: Collection<String>): List<String> {
+        if (seeds.isEmpty()) return emptyList()
+        val keys = seeds.mapTo(HashSet<String>()) { blockKey(it) }
+        val seen = HashSet<String>(seeds)
+        val out = ArrayList<String>()
+        _interactions.value.forEach { r ->
+            val nm = _aliases.value[r.rawSenderName] ?: r.rawSenderName
+            if (nm in seen) return@forEach
+            if (blockKey(nm) in keys) { seen.add(nm); out.add(nm) }
+        }
+        return out.sorted()
+    }
 
     fun blockName(name: String) {
         if (screenshotGuard()) return
@@ -5702,6 +5772,7 @@ class RelateViewModel : ViewModel() {
     fun resetSections() = DataRepository.resetSections()
     fun resurrectedNames() = DataRepository.resurrectedNames()
     fun blockName(n: String) = DataRepository.blockName(n)
+    fun sameKindNames(n: Collection<String>) = DataRepository.sameKindNames(n)
     fun forgetDeleted(n: String) = DataRepository.forgetDeleted(n)
     fun unblockName(n: String) = DataRepository.unblockName(n)
     fun listTrash() = DataRepository.listTrash().let { list ->
@@ -11281,15 +11352,20 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     }
 
     pendingBlockMany?.let { names ->
+        // 名字裡的數字是通配，所以要先算出「只差數字」的那些並攤在框上
+        val sameKindMany = remember(names) { viewModel.sameKindNames(names) }
         ConfirmDialog(
             title = L.t("刪除並封鎖 ${names.size} 位", "Delete and block ${names.size}"),
             message = L.t("會刪除這些對象目前的新紀錄，並把名字加入永不記錄名單 —— ", "This deletes their current records and adds the names to the never-record list — ") +
                 L.t("之後對方再傳訊息也不會被記下來。\n\n刪掉的紀錄會進「最近刪除」保留 7 天；", "Future messages from them won't be recorded either.\n\nDeleted records sit in Recently deleted for 7 days; ") +
-                L.t("封鎖可在「設定 → 永不記錄名單」解除。", "You can unblock them under Settings → Exceptions."),
-            details = names,
+                L.t("封鎖可在「設定 → 永不記錄名單」解除。", "You can unblock them under Settings → Exceptions.") +
+                if (sameKindMany.isEmpty()) "" else L.t(
+                    "\n\n名字裡的數字每次都不一樣，所以數字以外完全相同的還有 ${sameKindMany.size} 個，也一起刪：",
+                    "\n\nDigits in these names change every time, so ${sameKindMany.size} more with the same shape will be deleted too:"),
+            details = names + sameKindMany,
             confirmLabel = L.t("刪除並封鎖", "Delete and block"),
             onConfirm = {
-                viewModel.deleteContacts(names.toSet())
+                viewModel.deleteContacts((names + sameKindMany).toSet())
                 names.forEach { viewModel.blockName(it) }
                 resurrected = viewModel.resurrectedNames()
                 Toast.makeText(context, L.t("已刪除並封鎖 ${names.size} 位", "${names.size} deleted and blocked"), Toast.LENGTH_SHORT).show()
@@ -11300,14 +11376,19 @@ fun ContactsCategoryView(viewModel: RelateViewModel) {
     }
 
     pendingBlock?.let { (name, count) ->
+        val sameKind = remember(name) { viewModel.sameKindNames(listOf(name)) }
         ConfirmDialog(
             title = L.t("刪除並封鎖", "Delete and block"),
             message = L.t("會刪除「$name」目前的 $count 筆新紀錄，並把這個名字加入永不記錄名單 —— ", "This deletes the $count current records for \"$name\" and adds the name to the never-record list — ") +
                 L.t("之後對方再傳訊息也不會被記下來。\n\n刪掉的紀錄會進「最近刪除」保留 7 天；", "Future messages from them won't be recorded either.\n\nDeleted records sit in Recently deleted for 7 days; ") +
-                L.t("封鎖可在「設定 → 永不記錄名單」解除。", "You can unblock them under Settings → Exceptions."),
+                L.t("封鎖可在「設定 → 永不記錄名單」解除。", "You can unblock them under Settings → Exceptions.") +
+                if (sameKind.isEmpty()) "" else L.t(
+                    "\n\n名字裡的數字每次都不一樣，所以數字以外完全相同的還有 ${sameKind.size} 個，也一起刪：",
+                    "\n\nDigits in this name change every time, so ${sameKind.size} more with the same shape will be deleted too:"),
+            details = sameKind,
             confirmLabel = L.t("刪除並封鎖", "Delete and block"),
             onConfirm = {
-                viewModel.deleteContacts(setOf(name))
+                viewModel.deleteContacts(setOf(name) + sameKind)
                 viewModel.blockName(name)
                 resurrected = viewModel.resurrectedNames()
                 Toast.makeText(context, L.t("已刪除並封鎖「$name」", "\"$name\" deleted and blocked"), Toast.LENGTH_SHORT).show()
@@ -12345,7 +12426,8 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
         title = {
             Column {
                 Text(L.t("永不記錄名單", "Never-record list"), fontWeight = FontWeight.Bold, fontSize = T.Title, color = AppColors.TextPrimary)
-                Text(L.t("這些對象的通知會被直接忽略，不產生任何紀錄", "Notifications from these are ignored entirely — nothing is recorded"),
+                Text(L.t("通知、通話、停留時間都不會記。名字裡的數字當通配",
+                    "Notifications, calls and time in chat are all ignored. Digits in a name are wildcards"),
                     fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 16.sp)
             }
         },
@@ -12359,8 +12441,17 @@ fun BlockedNamesDialog(viewModel: RelateViewModel, onDismiss: () -> Unit) {
                             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(name, fontSize = T.Body, color = AppColors.TextPrimary,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            // 封鎖是模式比對，不是整串字 ——
+                            // 擋到的範圍一定要看得到，封錯了才有得救
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(name, fontSize = T.Body, color = AppColors.TextPrimary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                DataRepository.blockPattern(name)?.let { pat ->
+                                    Text(L.t("數字不同的也擋：$pat", "Any digits also blocked: $pat"),
+                                        fontSize = T.Micro, color = AppColors.TextTertiary,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
                             Box(
                                 modifier = Modifier.clip(RoundedCornerShape(8.dp))
                                     .background(AppColors.Background)
@@ -13150,6 +13241,7 @@ val USER_GUIDE = listOf(
             "點進一則 Threads 或 IG 串文來看，不會被記成聊天室。那一頁有讚、留言、轉發整排按鈕，App 看到就知道這不是聊天室。私訊不受影響。",
             "滑動態牆時不會再把貼文內文記成聊天室：畫面上同時出現讚、留言、轉發那排按鈕時，App 就知道這是動態牆而不是聊天室，私訊不受影響。另外名字讀起來像一整句話（很長、有句號、整句都是口語）也會被歸到「系統通知」，判錯的話在提醒卡選「確認是真人」就會放它一馬。",
             "刪除這類來源沒有用——對方下次推播就會重建。刪除聯絡人時可以勾「同時加入永不記錄名單」，之後就不會再記下來。",
+            "永不記錄是比對「名字長相」，不是比整串字：名字裡的數字當通配。封掉「收回讚 34」就連「收回讚 35」一起封，不用同一種東西封幾十次。數字以外必須完全相同，所以「笨・12:03」不會擋到「笨」；純數字的電話號碼也不做通配。",
             "「未分類」是虛線框，代表還沒分；分好類之後圖表才看得出你的時間花在哪種關係上。"
         )
     ),
@@ -13281,6 +13373,7 @@ val USER_GUIDE_EN = listOf(
             "Opening a Threads or Instagram post to read it is not recorded as a chat. That screen has a row of like, comment and repost buttons, which is how the app knows. Direct messages are unaffected.",
             "Scrolling a feed no longer turns post text into a contact: when like, comment and repost buttons appear together, the app knows it is a feed rather than a chat. Separately, a name that reads like a whole sentence (long, with full stops, entirely conversational) is filed under System notice; if that is wrong, choose Confirm it's a person on the notice card and it is left alone.",
             "Deleting these sources does not help — the next push recreates them. When deleting a contact you can tick Also add to the never-record list, and they will not be recorded again.",
+            "The never-record list matches the shape of a name, not the exact string: digits are wildcards. Block \"34 likes\" and \"35 likes\" goes with it, so you never have to block the same thing twice. Everything other than the digits must match exactly, so \"Sam · 12:03\" will not catch \"Sam\" — and a phone number, being all digits, is matched exactly.",
             "Unsorted is the dashed outline: not filed yet. Only once contacts are tagged does the chart show which kind of relationship your time goes to."
         )
     ),
@@ -15119,6 +15212,10 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.5" to listOf(
+        "永不記錄名單改成比對「名字長相」，名字裡的數字當通配 —— 封掉「收回讚 34」就連「收回讚 35」一起封，同一種東西不用封第二次。",
+        "封鎖現在對通知、通話、停留時間四條路都有效，不會再從無障礙服務長回來。"
+    ),
     "1.1.4" to listOf(
         "看別人的個人主頁、或在通話畫面，不會再被記成聊天室。",
         "通話的秒數本來就從通知拿，不會再跟停留時間重複計算。"
@@ -15247,6 +15344,10 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.5" to listOf(
+        "The never-record list now matches the shape of a name, with digits as wildcards — block \"34 likes\" and \"35 likes\" goes with it. No more blocking the same thing twice.",
+        "A block now applies to notifications, calls and time in chat alike, so nothing grows back through the accessibility service."
+    ),
     "1.1.4" to listOf(
         "Viewing someone's profile, or being on a call, is no longer recorded as a chat.",
         "Call duration already comes from the notification, so it no longer double-counts against time in chat."
