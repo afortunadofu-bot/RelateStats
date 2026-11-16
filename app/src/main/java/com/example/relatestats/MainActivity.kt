@@ -3663,6 +3663,20 @@ class RelateNotificationService : NotificationListenerService() {
     /** 對象 → 最近一次靠「通知移除」算出通話的時間，用來避免跟「通話結束」通知重複計算 */
     private val recentEndedCalls = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /**
+     * 通知監聽服務從什麼時候開始連著。
+     *
+     * ⚠️ ringingCalls 是**記憶體裡**的表，服務被系統殺掉重啟就空了。
+     *    「沒看到鈴響」只有在我們一直看著的時候才算證據；服務剛連上的
+     *    那幾分鐘裡沒看到鈴響，可能只是因為鈴響的時候我們還不在。
+     *    那種情況寧可說「分不出方向」，也不要把對方打來的算成我打出去的。
+     */
+    @Volatile
+    private var listenerSince = 0L
+    private val WATCH_WARMUP_MS = 5 * 60_000L
+    private fun hasBeenWatching(): Boolean =
+        listenerSince > 0L && System.currentTimeMillis() - listenerSince > WATCH_WARMUP_MS
+
     // 去重：LINE / IG 會為同一則訊息重複 post
     private val lastHandledLoaded = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -3674,8 +3688,24 @@ class RelateNotificationService : NotificationListenerService() {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?) = size > 300
     }
 
-    override fun onCreate() { super.onCreate(); DataRepository.init(applicationContext) }
-    override fun onListenerConnected() { super.onListenerConnected(); DataRepository.init(applicationContext) }
+    override fun onCreate() {
+        super.onCreate()
+        DataRepository.init(applicationContext)
+        if (listenerSince == 0L) listenerSince = System.currentTimeMillis()
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        DataRepository.init(applicationContext)
+        // 斷線重連＝鈴響可能發生在我們不在的時候，計時重算
+        listenerSince = System.currentTimeMillis()
+        ringingCalls.clear()
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        listenerSince = 0L
+    }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         try {
@@ -3800,9 +3830,23 @@ class RelateNotificationService : NotificationListenerService() {
                     isGroup = false,
                     isMissedCall = callInfo.first,
                     isCall = true,
-                    // 未接一定是對方打來；已接的結束通知看不出方向，除非剛剛有鈴響過
-                    callDirection = if (callInfo.first) 1
-                    else ringingCalls[cleanName]?.takeIf { System.currentTimeMillis() - it < 300_000L }?.let { 1 } ?: 0
+                    /**
+                     * ⚠️ 這裡以前是「沒鈴響過就寫 0（分不出方向）」，
+                     *    但隔壁那條路（常駐通知出現→消失）用的是**同一個證據**，
+                     *    結論卻是 2：對方打來一定先跳鈴響通知，我自己撥出去只有通話中。
+                     *    同樣的線索給出兩種答案，所以凡是沒走到常駐通知那條路的
+                     *    撥出電話，全部掉進「分不出方向」—— 使用者看到的就是
+                     *    「我打出去 0 通，分不出方向 2 通」。
+                     * ⚠️ 但「沒看到鈴響」只有在我們**一直看著**的時候才算證據。
+                     *    服務剛重啟（ringingCalls 是空的）就不能這樣推，
+                     *    那時候寧可承認分不出方向，也不要把對方打來的算成我打的。
+                     */
+                    callDirection = when {
+                        callInfo.first -> 1
+                        ringingCalls[cleanName]?.let { System.currentTimeMillis() - it < 300_000L } == true -> 1
+                        hasBeenWatching() -> 2
+                        else -> 0
+                    }
                 )
             )
             return
@@ -12982,7 +13026,9 @@ fun CallsCard(calls: CallSummary, drill: (String, (InteractionRecord) -> Boolean
                 modifier = Modifier.padding(top = 8.dp))
         }
         if (calls.unknownDir > 0) {
-            Text(L.t("「分不出方向」多半是 v3.31 以前的紀錄，或通話結束的通知沒寫是誰打的。", "\"Direction unknown\" is usually a pre-v3.31 record, or the end-of-call notification didn't say who called."),
+            // ⚠️ 不要寫版本號。更新紀錄最早只列到 1.0.3，使用者查不到 v3.31 是什麼。
+            Text(L.t("「分不出方向」是更早以前、還不會分方向的舊紀錄，或通話發生時通知服務剛好在重啟，沒看到是誰先響的。",
+                "\"Direction unknown\" means an old record from before the app could tell, or the notification service happened to be restarting when the call came in."),
                 fontSize = T.Micro, color = AppColors.TextTertiary, lineHeight = 15.sp,
                 modifier = Modifier.padding(top = 8.dp))
         }
@@ -13640,8 +13686,9 @@ val USER_FAQ = listOf(
         "到總覽的「通話統計」，點「對方打來」或「未接」，會列出這段期間打給你的人與通數；" +
         "點「我打出去」則是你主動打給誰。要看每一通的時間，到「設定 → 逐筆檢視紀錄」。",
     "為什麼只看得到別人打給我的電話？" to
-        "舊版只認得未接來電的通知，所以自己打出去的不會被記錄。v3.31 起，只要通話中會掛常駐通知（LINE、Messenger 與手機原生電話都會），" +
-        "打出去的也會記下來，通話統計裡可以看到「對方打來」與「我打出去」各幾通。更新前的舊紀錄補不回來，會算在「分不出方向」。",
+        "很舊的版本只認得未接來電的通知，所以自己打出去的不會被記錄。現在只要通話中會掛常駐通知（LINE、Messenger 與手機原生電話都會），" +
+        "打出去的也會記下來，通話統計裡可以看到「對方打來」與「我打出去」各幾通。判斷方式是：對方打來一定先跳一則鈴響通知，我自己撥出去只有「通話中」。" +
+        "舊紀錄補不回來，會算在「分不出方向」；另外通話當下如果通知服務剛好在重啟，沒看到誰先響，那一通也會算在那裡。",
     "LINE 群組被當成個人了？" to
         "LINE 的群組通知常常沒有帶群組標記，App 會用「對話名稱跟發言人不同」「名稱後面有人數」來判斷，還是可能漏掉。" +
         "長按那個聯絡人 →「改成群組聊天室」即可，之後這個名稱的所有紀錄都算群組；判斷錯成群組的也能用同一處改回個人。",
@@ -13706,9 +13753,10 @@ val USER_FAQ_EN = listOf(
         "On the Overview page, open Calls and tap Incoming or Missed to list who called you and how often; " +
         "Outgoing shows who you called. For the time of each individual call, use Settings → Browse records.",
     "Why do I only see calls other people made to me?" to
-        "Older versions only recognised missed-call notifications, so outgoing calls were never recorded. Since v3.31, any call that posts an ongoing notification " +
+        "Much older versions only recognised missed-call notifications, so outgoing calls were never recorded. Now any call that posts an ongoing notification " +
         "(LINE, Messenger and the phone's own dialler all do) is recorded in both directions, and Calls shows how many were incoming and how many outgoing. " +
-        "Records from before the update cannot be recovered and are counted as direction unknown.",
+        "The tell is that an incoming call always posts a ringing notification first, while a call you place only ever shows \"on a call\". " +
+        "Old records cannot be recovered and count as direction unknown, as does any call that happened while the notification service was restarting.",
     "A LINE group is being treated as one person." to
         "LINE group notifications often carry no group marker, so the app guesses from \"the conversation name differs from the speaker\" and \"the name has a member count after it\" — " +
         "which can still miss. Long-press that contact → Change to group chat, and every record under that name counts as a group from then on. The same place changes it back.",
@@ -15369,6 +15417,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.7" to listOf(
+        "自己撥出去的通話不會再被歸到「分不出方向」。判斷方式跟原本一樣：對方打來一定先跳鈴響通知，我撥出去只有「通話中」——只是這個判斷以前漏了一條路沒套上。",
+        "通話當下如果通知服務剛好在重啟，那一通還是會算「分不出方向」。沒看到誰先響的時候，寧可說不知道。",
+        "舊的「分不出方向」紀錄補不回來。"
+    ),
     "1.1.6" to listOf(
         "「設定 → 關於 → 版本」裡多了「檢查更新」—— 按下去會真的去問 Play 商店，告訴你是已經最新還是有新版可以更新。",
         "商店上有新版時，「版本」那一列會自己掛一句提醒，不會彈窗打斷你。",
@@ -15506,6 +15559,11 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.7" to listOf(
+        "Calls you place are no longer filed under Direction unknown. The tell is the same as before — an incoming call rings first, a call you place never does — it just was not applied on one of the two code paths.",
+        "A call that happens while the notification service is restarting still counts as Direction unknown. If we did not see who rang first, we say so.",
+        "Existing Direction unknown records cannot be recovered."
+    ),
     "1.1.6" to listOf(
         "Settings → About → Version now has Check for updates — it really does ask the Play Store and tells you whether you are up to date or a newer build is available.",
         "When a newer build is live, the Version row quietly says so. No dialog.",
