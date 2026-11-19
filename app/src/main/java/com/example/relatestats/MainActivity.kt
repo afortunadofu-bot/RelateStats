@@ -1456,6 +1456,8 @@ object DataRepository {
      * 本機許願清單：自己許過什麼願、什麼時候許的（時間, 內容）。
      * ⚠️ 只存在這支手機。App 沒有網路權限，不可能把願望傳出去 ——
      *    要讓別人看到只能靠使用者自己按「寄出」或開外部許願板。
+     *    （但存在 RelateStatsData.xml 裡，會跟著 Android 系統層級的自動備份
+     *    進到使用者自己的 Google 帳號。那是 OS 做的，不是 App 傳的。）
      * ⚠️ 存一整串字串而不是 StringSet：StringSet 沒有順序，
      *    許願清單要照時間由新到舊排。欄位用 \u001E、筆數用 \u001D 分隔，
      *    使用者打得出來的字元不會撞到。
@@ -13481,8 +13483,9 @@ val USER_GUIDE = listOf(
         listOf(
             "「設定 → 清除資料」只會刪互動紀錄（訊息、停留、通話），標籤、合併的帳號、改過的名稱、常用詞都不會動。刪之前會列出清單讓你逐人取消。",
             "刪掉的紀錄會進「最近刪除」保留 7 天，可以搜尋、整批還原，或只還原其中一個人。",
-            "所有資料只存在這支手機。到「設定 → 備份 → 備份與還原」點進去，按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
+            "互動紀錄只存在這支手機。到「設定 → 備份 → 備份與還原」點進去，按「☁ 綁定 Google 雲端硬碟」，在儲存位置選雲端硬碟（手機有多個 Google 帳號時，左側每一個「雲端硬碟」下面寫著帳號）。綁定後可以看到備份存在哪裡、哪個帳號（抓不到時可以按「標註帳號」自己填）、上次備份時間，按「開啟備份檔」會直接用雲端硬碟打開，並把自動備份調成每天、每 3 天、每週或不自動；隨時也可以按「立即備份」。",
             "換機時，在新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔即可。沒綁定的話，換機前請手動「存成檔案」。",
+            "另外有一層你沒按過的備份：Android 系統本身會把這支 App 的設定、關係標籤、合併的帳號、永不記錄名單與常用詞，同步到你自己的 Google 帳號，換機或重裝時這些會自己回來。互動紀錄不在裡面——那要靠上面那份備份檔。不想要的話，到手機的「設定 → Google → 備份」關掉；那是系統層級的開關，會連其他 App 的備份一起關。",
             "還原會跟目前的紀錄合併：備份裡的紀錄加回來，這支手機上備份之後才記到的新紀錄也會保留，重複的只算一次。",
             "開啟通知存取、無障礙服務、使用紀錄存取之前，App 會先說明讀取哪些資料。完整內容見「設定 → 隱私權政策」。",
             "不想開某個權限也沒關係，App 照樣能用，只是少了那部分數據。在說明畫面按兩次以上「不同意」，提醒就會收成一行小字。"
@@ -13613,8 +13616,9 @@ val USER_GUIDE_EN = listOf(
         listOf(
             "Settings → Erase data only removes records (messages, time, calls). Tags, merged accounts, renamed contacts and common words are untouched. Before anything is deleted you get a list and can untick people one by one.",
             "Deleted records go to Recently deleted for 7 days, where you can search them, restore everything, or restore just one person.",
-            "All your data lives on this phone. Go to Settings → Data → Backup & restore, tap ☁ Link Google Drive and choose Drive as the location (with several Google accounts on the phone, each Drive entry on the left shows its account underneath). Once linked you can see where the backup is, which account holds it (tap Set account to note it yourself if it cannot be detected), and when it last ran; Open backup file opens it in Drive, and the schedule can be daily, every 3 days, weekly or off. Back up now works at any time.",
+            "Records live on this phone only. Go to Settings → Data → Backup & restore, tap ☁ Link Google Drive and choose Drive as the location (with several Google accounts on the phone, each Drive entry on the left shows its account underneath). Once linked you can see where the backup is, which account holds it (tap Set account to note it yourself if it cannot be detected), and when it last ran; Open backup file opens it in Drive, and the schedule can be daily, every 3 days, weekly or off. Back up now works at any time.",
             "Moving to a new phone: install the app, tap Restore from file and pick that backup from Drive. If you never linked Drive, use Save to file before you switch.",
+            "There is one more layer you never switched on: Android itself syncs this app's settings, relationship tags, merged accounts, never-record list and common words to your own Google account, so they come back on their own after a new phone or a reinstall. Records are not included — those travel in the backup file above. To stop it, turn off Settings → Google → Backup on your phone; it is a system-wide switch, so your other apps go with it.",
             "Restoring merges with what is already here: records from the backup come back, anything recorded on this phone since the backup is kept, and duplicates are only counted once.",
             "Before notification access, the accessibility service or usage access is turned on, the app explains what it reads. The full text is under Settings → Privacy policy.",
             "You do not have to grant any of them — the app still works, you just lose that data. Decline twice on the explanation screen and the reminder shrinks to one line of small text."
@@ -13639,7 +13643,7 @@ val USER_FAQ = listOf(
         "而且最多一天一次；分掉幾個人讓數量低於 20，它自己就不會再來。分類只影響「關係分布」那類依標籤拆開的統計，不分也不會少記任何資料。",
     "許願區的願望會自動傳出去嗎？" to
         "不會。App 沒有網路權限，不可能自己把任何東西傳出去。按「寄出」是開你自己的郵件 App、內容也看得到，" +
-        "要不要真的寄出去由你決定。願望清單只存在這支手機。",
+        "要不要真的寄出去由你決定。願望清單只留在這支手機，和你自己帳號裡的系統備份。",
     "可以在 App 裡按一下就同意權限嗎？" to
         "不行。通知存取與無障礙服務是 Android 的特殊權限，規定只能在系統設定裡由你親手打開，" +
         "沒有任何方式可以讓 App 自己要到。App 能做的是把你送到正確的那一頁，並把要按的步驟列出來。",
@@ -13666,7 +13670,8 @@ val USER_FAQ = listOf(
         "新手機裝好 App 後按「從檔案還原」，到雲端硬碟選那份備份檔。沒綁定的話，換機前請手動「存成檔案」。",
     "App 會把我的資料傳出去嗎？" to
         "不會。App 沒有網路權限，無法把任何資料傳出手機，開發者也看不到。" +
-        "唯一的例外是你自己綁定的雲端備份：備份檔由 Google 雲端硬碟 App 上傳到你自己的雲端硬碟。",
+        "會離開手機的只有兩種備份，而且都是送到你自己的 Google 帳號：一個是你自己綁定的雲端備份，備份檔由 Google 雲端硬碟 App 上傳；" +
+        "另一個是 Android 系統自己做的備份，會同步設定、關係標籤、合併的帳號與常用詞，互動紀錄不在裡面，可以在手機的「設定 → Google → 備份」關掉。",
     "常用詞為什麼看不到是誰傳的？" to
         "發話者是 v3.20 之後才開始記錄的。之前累積的詞沒有這份資料，新收到的訊息才會有。",
     "怎麼知道是誰打給我的？" to
@@ -13733,7 +13738,8 @@ val USER_FAQ_EN = listOf(
         "On the new phone, install the app and tap Restore from file, then pick that backup in Drive. Without a link, use Save to file before you switch.",
     "Does the app send my data anywhere?" to
         "No. It has no internet permission, so nothing can leave the phone and the developer cannot see any of it. " +
-        "The one exception is a cloud backup you set up yourself: the Google Drive app uploads that file to your own Drive.",
+        "Only backups leave, and both go to your own Google account: the cloud backup you link yourself, which the Google Drive app uploads, " +
+        "and Android's own system backup, which syncs settings, relationship tags, merged accounts and common words — not your records. Turn that one off under Settings → Google → Backup.",
     "Why can't I see who sent a common word?" to
         "Senders have only been recorded since v3.20. Words counted before that have no sender data; newly received messages do.",
     "How do I see who called me?" to
@@ -15167,7 +15173,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                             modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp))
                                 .clickable { confirmUnbindCloud = true }.padding(horizontal = 4.dp, vertical = 6.dp))
                     } else {
-                        Text(L.t("所有資料只存在這支手機。綁定 Google 雲端硬碟後會定期自動把備份更新到雲端（週期可調），換機或重灌都不怕。", "All your data lives on this phone only. Link Google Drive and a backup is pushed there on a schedule you choose, so a new phone or a reinstall costs you nothing."),
+                        Text(L.t("互動紀錄只存在這支手機。綁定 Google 雲端硬碟後會定期自動把備份更新到雲端（週期可調），換機或重灌都不怕。", "Your records live on this phone only. Link Google Drive and a backup is pushed there on a schedule you choose, so a new phone or a reinstall costs you nothing."),
                             fontSize = T.Label, color = AppColors.TextSecondary, lineHeight = 17.sp)
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
@@ -15404,6 +15410,10 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.10" to listOf(
+        "使用說明與常見問題補上一件本來沒講的事：Android 系統層級的自動備份，會把設定、關係標籤、合併的帳號與常用詞同步到你自己的 Google 帳號（互動紀錄不在裡面），可以在手機的系統設定關掉。",
+        "程式沒有改。是以前寫「所有資料只存在這支手機」寫得不夠準。"
+    ),
     "1.1.9" to listOf(
         "備份檔拿掉了沒有用的「密碼」。那段做的不是真的加密，留著只會讓人誤以為檔案有保護。",
         "無障礙服務不再要求「讀取所有視窗」的權限——程式本來就只看最上層那一個。",
@@ -15551,6 +15561,10 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.10" to listOf(
+        "The guide and FAQ now say something they left out: Android's own system backup syncs settings, relationship tags, merged accounts and common words to your own Google account (records are not included), and you can switch it off in your phone's settings.",
+        "Nothing in the app changed. \"Everything stays on this phone\" was simply not accurate enough."
+    ),
     "1.1.9" to listOf(
         "The backup file's \"password\" is gone. It was never real encryption, and leaving it in only suggested the file was protected.",
         "The accessibility service no longer asks to read every window — it only ever looked at the frontmost one.",
@@ -16009,7 +16023,7 @@ fun PermissionDisclosureDialog(kind: String, onAgree: () -> Unit, onDismiss: () 
                         .background(AppColors.FriendBg).padding(10.dp)
                 ) {
                     Text(L.t("資料只存在這支手機", "Your data stays on this phone"), fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.FriendText)
-                    Text(L.t("本 App 沒有網路權限，無法把資料傳出手機，開發者也看不到。除非你自己綁定雲端備份，資料不會離開手機。隨時可以到系統設定關閉權限，或在 App 內清除資料。", "This app has no internet permission, so it cannot send anything off your phone and the developer cannot see it. Unless you link a cloud backup yourself, nothing leaves the device. You can revoke the permissions in system settings or erase the data in the app at any time."),
+                    Text(L.t("本 App 沒有網路權限，無法把資料傳出手機，開發者也看不到。會離開手機的只有備份，而且都進你自己的 Google 帳號：你綁定的雲端備份，以及 Android 系統層級的自動備份（同步設定與名單，可在系統設定關掉）。隨時可以到系統設定關閉權限，或在 App 內清除資料。", "This app has no internet permission, so it cannot send anything off your phone and the developer cannot see it. Only backups leave, and both go to your own Google account: the cloud backup you link yourself, and Android's system backup (settings and lists, switchable off in system settings). You can revoke the permissions in system settings or erase the data in the app at any time."),
                         fontSize = T.Micro, color = AppColors.FriendText, lineHeight = 16.sp)
                 }
             }
