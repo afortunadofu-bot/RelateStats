@@ -13642,8 +13642,9 @@ val USER_FAQ = listOf(
         "到「設定 → 偏好 → 未分類提醒」關掉就不會再出現。它本來就有節制：要累積到 20 位常聊的人沒分類才會發，" +
         "而且最多一天一次；分掉幾個人讓數量低於 20，它自己就不會再來。分類只影響「關係分布」那類依標籤拆開的統計，不分也不會少記任何資料。",
     "許願區的願望會自動傳出去嗎？" to
-        "不會。App 沒有網路權限，不可能自己把任何東西傳出去。按「寄出」是開你自己的郵件 App、內容也看得到，" +
-        "要不要真的寄出去由你決定。願望清單只留在這支手機，和你自己帳號裡的系統備份。",
+        "不會。App 沒有網路權限，不可能自己把任何東西傳出去。要送出有兩條路，都得你自己動手：" +
+        "按「寄出」是把內容寫進你自己郵件 App 的草稿，看得到、要不要寄由你決定；或是用瀏覽器打開公開的許願板自己填。" +
+        "願望清單本身只留在這支手機，和你自己帳號裡的系統備份。",
     "可以在 App 裡按一下就同意權限嗎？" to
         "不行。通知存取與無障礙服務是 Android 的特殊權限，規定只能在系統設定裡由你親手打開，" +
         "沒有任何方式可以讓 App 自己要到。App 能做的是把你送到正確的那一頁，並把要按的步驟列出來。",
@@ -13711,7 +13712,9 @@ val USER_FAQ_EN = listOf(
         "and at most once a day. Sort a few so the count drops below 20 and it stops on its own. Sorting only affects tag-based breakdowns — " +
         "nothing is recorded any less if you never sort.",
     "Does the app send my wishes automatically?" to
-        "No. The app has no internet permission, so it cannot send anything anywhere. The form opens in your browser and you choose whether to submit it.",
+        "No. The app has no internet permission, so it cannot send anything on its own. There are two ways to send one, and both are yours to take: " +
+        "Send writes the text into a draft in your own mail app, where you can read it and decide; or the public wish board opens in your browser and you fill it in there. " +
+        "The wish list itself stays on this phone and in your own account's system backup.",
     "Can I grant the permissions from inside the app?" to
         "No. Notification access and the accessibility service are special Android permissions that, by design, can only be switched on by you in system settings. " +
         "No app can request them for you. All this app can do is take you to the right page and list the steps.",
