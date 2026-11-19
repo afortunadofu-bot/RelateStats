@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  ⚠️ 不要加回 flagRetrieveInteractiveWindows。
+     那個旗標給的是「可以列舉並讀取畫面上所有互動視窗」，包含別的 App
+     疊在上面的浮動視窗。ChatTrackerService 從頭到尾只用 rootInActiveWindow，
+     getWindows() 一次都沒呼叫過 —— 要了用不到的權限，對外的無障礙用途
+     聲明也更難講清楚。要加之前先確認程式真的需要列舉視窗。
+
+  ⚠️ flagIncludeNotImportantViews 要留著：聊天室標題常常沒被標成
+     important for accessibility，拿掉就抓不到對話對象。
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagIncludeNotImportantViews"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_desc"
     android:isAccessibilityTool="false"

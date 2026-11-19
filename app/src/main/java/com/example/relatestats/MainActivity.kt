@@ -1487,7 +1487,6 @@ object DataRepository {
     val pendingRecap = MutableStateFlow(false)
 
     var autoBackupEnabled = MutableStateFlow(false)
-    var autoBackupPassword = MutableStateFlow("")
     var lastAutoBackupTime = MutableStateFlow(0L)
 
     // 自動清理掉的異常紀錄數（設定頁顯示用）
@@ -1736,7 +1735,9 @@ object DataRepository {
         recapHour.value = p.getInt("recap_hour", 21).coerceIn(0, 23)
         recapMinute.value = p.getInt("recap_minute", 0).coerceIn(0, 59)
         autoBackupEnabled.value = p.getBoolean("auto_backup_enabled", false)
-        autoBackupPassword.value = p.getString("auto_backup_pwd", "") ?: ""
+        // ⚠️ 舊版把備份密碼明文存在這裡。欄位已經拿掉，值也要一起清掉 ——
+        //    留著就是一行誰都讀得到的密碼，而且使用者多半在別處也用同一組。
+        if (p.contains("auto_backup_pwd")) p.edit().remove("auto_backup_pwd").apply()
         lastAutoBackupTime.value = p.getLong("last_auto_backup_time", 0L)
 
         // 先讀新的檔案；沒有就從舊版的 SharedPreferences 搬過來（只會發生一次）
@@ -1931,14 +1932,9 @@ object DataRepository {
         prefs?.edit()?.putInt("week_start_day", day)?.apply()
     }
 
-    fun setAutoBackup(enabled: Boolean, pwd: String) {
+    fun setAutoBackup(enabled: Boolean) {
         autoBackupEnabled.value = enabled
-        autoBackupPassword.value = pwd
-        prefs?.edit()?.apply {
-            putBoolean("auto_backup_enabled", enabled)
-            putString("auto_backup_pwd", pwd)
-            apply()
-        }
+        prefs?.edit()?.putBoolean("auto_backup_enabled", enabled)?.apply()
     }
 
     // 背景執行緒 + 1.5 秒去抖動，避免每則通知都全量寫檔
@@ -2524,7 +2520,7 @@ object DataRepository {
         undoAvailable.value = true
         ioScope.launch {
             runCatching {
-                val payload = buildBackupString(snapRecords, snapAliases, snapCats, snapAvail, "")
+                val payload = buildBackupString(snapRecords, snapAliases, snapCats, snapAvail)
                 File(ctx.filesDir, UNDO_FILE).writeText(payload)
             }.onFailure { undoAvailable.value = false }
         }
@@ -2536,7 +2532,7 @@ object DataRepository {
         return runCatching {
             val f = File(ctx.filesDir, UNDO_FILE)
             if (!f.exists()) return false
-            val ok = importBackupString(f.readText(), "")
+            val ok = importBackupString(f.readText())
             if (ok) { f.delete(); undoAvailable.value = false; undoLabel.value = "" }
             ok
         }.getOrDefault(false)
@@ -3062,7 +3058,7 @@ object DataRepository {
         if (bad > 0) {
             runCatching {
                 File(context.filesDir, "RelateStats_PreCleanup_${System.currentTimeMillis()}.txt")
-                    .writeText(exportBackupString(""))
+                    .writeText(exportBackupString())
             }
             removeAbnormalRecords()
         }
@@ -3081,7 +3077,7 @@ object DataRepository {
         dir.listFiles()?.forEach { runCatching { it.delete() } }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
         val file = File(dir, "RelateStats_Backup_$stamp.txt")
-        file.writeText(exportBackupString(""))
+        file.writeText(exportBackupString())
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
         Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -3101,7 +3097,7 @@ object DataRepository {
 
     fun forceAutoBackup(context: Context) {
         try {
-            val backupStr = exportBackupString(autoBackupPassword.value)
+            val backupStr = exportBackupString()
             val file = File(context.filesDir, "RelateStats_AutoBackup.txt")
             file.writeText(backupStr)
 
@@ -3118,7 +3114,7 @@ object DataRepository {
             val file = File(context.filesDir, "RelateStats_AutoBackup.txt")
             if (!file.exists()) return false
             val backupStr = file.readText()
-            return importBackupString(backupStr, autoBackupPassword.value)
+            return importBackupString(backupStr)
         } catch (e: Exception) {
             return false
         }
@@ -3260,7 +3256,7 @@ object DataRepository {
     }
 
     private fun writeBackupTo(ctx: Context, uri: Uri): Boolean {
-        val payload = runCatching { exportBackupString("").toByteArray() }.getOrNull() ?: return false
+        val payload = runCatching { exportBackupString().toByteArray() }.getOrNull() ?: return false
         // ⚠️ 先用 "wt"（先清空再寫）。部分文件提供者不認 "wt"，才退回 "w"。
         //    "w" 在某些提供者不會截斷，新檔比舊檔短時尾巴會殘留舊內容，所以只當備援。
         val ok = listOf("wt", "w").any { mode ->
@@ -3276,16 +3272,26 @@ object DataRepository {
         return ok
     }
 
-    fun exportBackupString(key: String): String = buildBackupString(
-        _interactions.value, _aliases.value, _categories.value, _availableCategories.value, key
+    fun exportBackupString(): String = buildBackupString(
+        _interactions.value, _aliases.value, _categories.value, _availableCategories.value
     )
 
+    /**
+     * ⚠️ 這裡以前有一條「密碼」分支，做的是**重複金鑰 XOR**（維吉尼亞）。
+     *    那不是加密：檔頭固定 "V12"、分隔符 |#| 與 ; 整份重複出現，
+     *    已知明文攻擊幾秒就能把金鑰還原。而且密碼是明文存在
+     *    同一個 SharedPreferences 的 auto_backup_pwd 裡 ——
+     *    鎖跟鑰匙放同一個抽屜。
+     * ⚠️ 現在是純 Base64，**沒有加密**。這樣是誠實的：
+     *    備份檔會被分享到雲端硬碟／Keep／Gmail，使用者應該知道
+     *    那個檔案本身沒有保護，而不是以為有。
+     *    真要加密就用 AES-GCM ＋ PBKDF2／Argon2 導出金鑰，不要自己接 XOR。
+     */
     private fun buildBackupString(
         recordList: List<InteractionRecord>,
         aliasMap: Map<String, String>,
         catMap: Map<String, String>,
-        availCats: List<ContactCategory>,
-        key: String
+        availCats: List<ContactCategory>
     ): String {
         val records = recordList.joinToString(";") { it.toCsvString() }
         val aliases = aliasMap.map { "${it.key}|=|${it.value}" }.joinToString(";")
@@ -3293,15 +3299,7 @@ object DataRepository {
         val customCats = availCats.joinToString(";") { it.toCsvString() }
         // V12：區段改用 \u001D 分隔（見 splitBackupSections）
         val combined = listOf("V12", records, aliases, categories, customCats).joinToString(BACKUP_SECTION_SEP)
-
-        if (key.isEmpty()) return Base64.encodeToString(combined.toByteArray(), Base64.NO_WRAP)
-
-        val bytes = combined.toByteArray()
-        val keyBytes = key.toByteArray()
-        for (i in bytes.indices) {
-            bytes[i] = (bytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
-        }
-        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+        return Base64.encodeToString(combined.toByteArray(), Base64.NO_WRAP)
     }
 
     private const val BACKUP_SECTION_SEP = "\u001D"
@@ -3326,20 +3324,9 @@ object DataRepository {
         }
     }
 
-    fun importBackupString(backupStr: String, key: String): Boolean {
+    fun importBackupString(backupStr: String): Boolean {
         try {
-            val bytes = Base64.decode(backupStr, Base64.NO_WRAP)
-            val decodedStr = if (key.isNotEmpty()) {
-                val keyBytes = key.toByteArray()
-                if (keyBytes.isEmpty()) return false
-                for (i in bytes.indices) {
-                    bytes[i] = (bytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
-                }
-                String(bytes)
-            } else {
-                String(bytes)
-            }
-
+            val decodedStr = String(Base64.decode(backupStr, Base64.NO_WRAP))
             val parts = splitBackupSections(decodedStr)
             // 欄位數不足代表備份檔損毀
             if (parts.size < 5 || !parts[0].startsWith("V")) return false
@@ -4734,7 +4721,7 @@ class RelateViewModel : ViewModel() {
     fun completeOnboarding() { DataRepository.completeOnboarding() }
     fun setWeekStartDay(day: Int) { DataRepository.setWeekStartDay(day) }
     fun checkAutoBackup(context: Context) { DataRepository.performAutoBackupIfNeeded(context) }
-    fun setAutoBackup(enabled: Boolean, pwd: String) { DataRepository.setAutoBackup(enabled, pwd) }
+    fun setAutoBackup(enabled: Boolean) { DataRepository.setAutoBackup(enabled) }
     fun restoreAutoBackup(context: Context): Boolean { return DataRepository.restoreAutoBackup(context) }
 
     /**
@@ -5879,8 +5866,8 @@ class RelateViewModel : ViewModel() {
     fun countAbnormalRecords() = DataRepository.countAbnormalRecords()
     fun removeAbnormalRecords() = DataRepository.removeAbnormalRecords()
     fun buildShareBackupIntent(context: Context) = DataRepository.buildShareBackupIntent(context)
-    fun exportBackup(key: String) = DataRepository.exportBackupString(key)
-    fun importBackup(str: String, key: String) = DataRepository.importBackupString(str, key)
+    fun exportBackup() = DataRepository.exportBackupString()
+    fun importBackup(str: String) = DataRepository.importBackupString(str)
 }
 
 fun getDeviceUsageTimeSec(context: Context, filter: DateFilter, weekStartDay: Int, allRangeStart: Long = 0L): Long {
@@ -14381,7 +14368,7 @@ fun SettingsView(viewModel: RelateViewModel) {
             ioScope.launch {
                 val ok = withContext(Dispatchers.IO) {
                     runCatching {
-                        val payload = viewModel.exportBackup("").toByteArray()
+                        val payload = viewModel.exportBackup().toByteArray()
                         context.contentResolver.openOutputStream(uri)?.use { it.write(payload) } ?: return@runCatching false
                         true
                     }.getOrDefault(false)
@@ -14397,7 +14384,7 @@ fun SettingsView(viewModel: RelateViewModel) {
                 val content = withContext(Dispatchers.IO) {
                     runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }.getOrNull()
                 }
-                val ok = content != null && viewModel.importBackup(content, "")
+                val ok = content != null && viewModel.importBackup(content)
                 Toast.makeText(context,
                     if (ok) L.t("還原完成，共 ${DataRepository.interactions.value.size} 筆紀錄（保留這支手機上的新紀錄 ${DataRepository.lastRestoreKept} 筆）", "Restore complete — ${DataRepository.interactions.value.size} records in total (${DataRepository.lastRestoreKept} newer records from this phone were kept)")
                     else L.t("檔案無效或格式錯誤", "Invalid file or wrong format"),
@@ -15417,6 +15404,12 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.8" to listOf(
+        "關掉 Android 的自動備份。以前系統會自己把聯絡人名字、關係標籤與詞頻傳上你的 Google 雲端——那跟「所有資料只存在這支手機」衝突，而且你在 App 裡沒得選。",
+        "換機或重裝之後，設定不會再自動跟過去。要帶資料請走「設定 → 備份與還原」，那是你自己按的。",
+        "備份檔拿掉了沒有用的「密碼」。那段做的不是真的加密，留著只會讓人誤以為檔案有保護。",
+        "無障礙服務不再要求「讀取所有視窗」的權限——程式本來就只看最上層那一個。"
+    ),
     "1.1.7" to listOf(
         "自己撥出去的通話不會再被歸到「分不出方向」。判斷方式跟原本一樣：對方打來一定先跳鈴響通知，我撥出去只有「通話中」——只是這個判斷以前漏了一條路沒套上。",
         "通話當下如果通知服務剛好在重啟，那一通還是會算「分不出方向」。沒看到誰先響的時候，寧可說不知道。",
@@ -15559,6 +15552,12 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.8" to listOf(
+        "Android's automatic backup is now off. The system used to copy contact names, relationship tags and word counts to your Google cloud on its own — which contradicts \"everything stays on this phone\", and you had no say in it.",
+        "Settings no longer follow you to a new phone or survive a reinstall. To carry your data over, use Settings → Backup & restore — something you choose to do.",
+        "The backup file's \"password\" is gone. It was never real encryption, and leaving it in only suggested the file was protected.",
+        "The accessibility service no longer asks to read every window — it only ever looked at the frontmost one."
+    ),
     "1.1.7" to listOf(
         "Calls you place are no longer filed under Direction unknown. The tell is the same as before — an incoming call rings first, a call you place never does — it just was not applied on one of the two code paths.",
         "A call that happens while the notification service is restarting still counts as Direction unknown. If we did not see who rang first, we say so.",

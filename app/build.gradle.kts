@@ -34,8 +34,8 @@ android {
          *    1.0.0 起為公開發行版；在那之前的 3.x 是上架前的開發版本，
          *    歷史保留在 docs/CHANGELOG.md，沒有刪掉。
          */
-        versionCode = 114
-        versionName = "1.1.7"
+        versionCode = 115
+        versionName = "1.1.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

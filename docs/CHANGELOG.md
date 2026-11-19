@@ -1,5 +1,97 @@
 # 修復紀錄
 
+## v1.1.8 build 115（2026-11-19）— OWASP MASVS 盤點
+
+照 OWASP MASVS 與 Mobile Top 10 把 manifest、四個 xml 設定、備份匯出入、
+廣播接收器、記錄輸出與相依套件樹走過一遍。四項要改，全部在這一版。
+
+### 一、自動備份把聯絡人名字送上雲端（MASVS-STORAGE-1、M6／M9）
+
+`allowBackup="true"`，備份規則 include 了 `RelateStatsData.xml`。那個檔裡有：
+
+| key | 內容 |
+|-----|------|
+| `aliases` | 真實聯絡人名字 |
+| `all_categories` | 名字＋伴侶／家人這種關係標籤 |
+| `word_freq` / `word_senders` | 訊息切出來的詞，以及誰說的 |
+| `blocked_names` / `deleted_names` | 名字 |
+
+⚠️ App 裡白紙黑字寫著「所有資料只存在這支手機」。開著自動備份時**那句話不成立**。
+
+要講公道的部分也要講：送的是**使用者自己的** Google 帳號，不是開發者；
+Android 9 以上用裝置鎖定密碼做端對端加密，Google 讀不到。
+但它是 OS 自動觸發的，**App 裡沒有任何地方讓使用者選**，
+而且 Play 資料安全性表單該不該申報這一項，查不到權威答案。
+
+改成 `allowBackup="false"`。
+
+⚠️ `allowBackup="false"` **只關掉 cloud-backup**。
+Android 12 以上的 device-transfer（換機直傳）不吃那個旗標，
+`data_extraction_rules.xml` 要自己把五個 domain 都 exclude 掉。
+`backup_rules.xml` 一起改成純 exclude，當作第二道鎖。
+
+代價：換機或重裝之後設定不會再自動跟過去。
+這個代價很小 —— 使用說明本來就只教「設定 → 備份與還原」那條路，
+從來沒有答應過自動備份。
+
+### 二、備份的「密碼」是重複金鑰 XOR（MASVS-CRYPTO-1、M10）
+
+```kotlin
+bytes[i] = (bytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
+```
+
+這是維吉尼亞密碼，不是加密。檔頭固定 `V12`、分隔符 `|#|` 與 `;` 整份重複出現，
+已知明文攻擊幾秒就把金鑰還原。而且密碼明文存在同一個 SharedPreferences 的
+`auto_backup_pwd` —— 鎖跟鑰匙放同一個抽屜。
+
+⚠️ 這條路當時其實是**死的**：`setAutoBackup()` 沒有任何 UI 呼叫，
+所有實際的匯出匯入都傳 `""`。但留著就是等哪天有人接回 UI。
+
+整段刪掉，`key` 參數從 `buildBackupString` / `exportBackupString` /
+`importBackupString` 與兩個 ViewModel 包裝一路拿掉。
+備份檔現在是純 Base64，**沒有加密** —— 這樣是誠實的：
+檔案會被分享到雲端硬碟／Keep／Gmail，使用者該知道它本身沒有保護。
+真要加密就用 AES-GCM ＋ PBKDF2／Argon2，不要自己接 XOR。
+
+讀設定時順手把舊版留下的 `auto_backup_pwd` 清掉。
+
+### 三、無障礙服務要了用不到的權限（MASVS-PLATFORM-1、M8）
+
+設定檔有 `flagRetrieveInteractiveWindows` ——「可以列舉並讀取畫面上所有
+互動視窗」，包含別的 App 疊上來的浮動視窗。
+但 `ChatTrackerService` 從頭到尾只用 `rootInActiveWindow`，
+`getWindows()` 一次都沒呼叫。拿掉是純賺：權限變小，
+對 Google 的無障礙用途聲明也更好講。
+
+`flagIncludeNotImportantViews` 留著 —— 聊天室標題常常沒被標成
+important for accessibility，拿掉就抓不到對話對象。
+
+### 四、FileProvider 開了整個 filesDir（低）
+
+`<files-path name="internal" path="." />` 把內部目錄整個當根。
+filesDir 裡放的是紀錄本體、每日詞頻、垃圾桶備份。
+要真的外流還得有人去產生 URI，但程式裡**唯一**一處 `getUriForFile`
+指的是 `cacheDir/backups/`，根本用不到這個範圍。刪掉。
+
+### 通過的
+
+無 INTERNET 權限（相依樹確認過，`app-update:2.1.0` 沒帶進來，
+也不是有 CVE-2020-8913 的舊 `play:core`）·
+完全沒有 `Log.*` 或 `println` ·
+PendingIntent 全部 `FLAG_IMMUTABLE` ·
+BootReceiver 有驗 action ·
+RecapReceiver 與 FileProvider `exported="false"` ·
+每晚回顧通知不含任何人名 ·
+SAF 有 `takePersistableUriPermission` 並釋放舊的 ·
+release 有 minify + shrink ·
+簽章金鑰走 `keystore.properties` 且在 .gitignore ·
+`isAccessibilityTool="false"` 標對了。
+
+### 沒做
+
+沒跑 MobSF 這類自動化掃描；沒對匯入備份檔做 fuzz；
+沒加 FLAG_SECURE（加了會擋掉使用者自己的截圖分享功能）。
+
 ## v1.1.7 build 114（2026-11-16）— 分不出方向
 
 使用者：「分不清楚方向怎麼現在還有，都更新完了。」

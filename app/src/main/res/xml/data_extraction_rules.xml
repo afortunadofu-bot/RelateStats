@@ -1,11 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 12 以上的備份／轉移規則。只備份主要資料檔，不含快取的分享暫存檔。
-     ⚠️ 不要再加 exclude：已經只 include 一個檔，exclude 別的檔會被 release lint 判成致命錯誤。 -->
+<!--
+  Android 12 以上的備份／轉移規則。全部排除。
+
+  ⚠️ 以前這裡 include 了 RelateStatsData.xml，也就是把 aliases（真實聯絡人名字）、
+     all_categories（名字＋伴侶／家人這種關係標籤）、word_freq／word_senders
+     （訊息切出來的詞與誰說的）整份交給 Android 自動備份傳上 Google 雲端。
+     送的是使用者自己的 Google 帳號、Android 9 以上也有端對端加密，
+     但 App 裡白紙黑字寫著「所有資料只存在這支手機」—— 那句話當時是不成立的。
+     而且那是 OS 自動觸發的，App 裡沒有任何地方讓使用者選。
+
+  ⚠️ allowBackup="false" 只關掉 cloud-backup。Android 12 以上的
+     device-transfer（換機直傳）不吃那個旗標，一定要在這裡自己排除，
+     否則換手機時資料還是會整份跟過去。
+
+  ⚠️ 換機要帶資料請走 App 自己的備份（設定 → 備份與還原）——
+     那條路使用者按得到、看得到檔案在哪、也可以選擇不做。
+-->
 <data-extraction-rules>
     <cloud-backup>
-        <include domain="sharedpref" path="RelateStatsData.xml" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </cloud-backup>
     <device-transfer>
-        <include domain="sharedpref" path="RelateStatsData.xml" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </device-transfer>
 </data-extraction-rules>

@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <!-- 備份檔透過 FileProvider 分享出去（Google 雲端硬碟 / LINE Keep / Gmail…）。
-         備份字串可能有十幾 MB，不能塞進 Intent 的 EXTRA_TEXT，會超過 Binder 上限。 -->
+         備份字串可能有十幾 MB，不能塞進 Intent 的 EXTRA_TEXT，會超過 Binder 上限。
+
+         ⚠️ 這裡只開 cacheDir/backups/ 一個資料夾，**不要**再開
+         <files-path path="." />。filesDir 裡放的是紀錄本體、每日詞頻、
+         垃圾桶備份；整個目錄當根等於只差「有人產生一個 URI」就外流。
+         程式裡唯一一處 getUriForFile 指的就是這個資料夾，不需要更大的範圍。 -->
     <cache-path name="backups" path="backups/" />
-    <files-path name="internal" path="." />
 </paths>
