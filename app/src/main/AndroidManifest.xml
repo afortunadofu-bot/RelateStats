@@ -8,14 +8,15 @@
     <!-- 每晚回顧與「服務被關掉」提醒 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- ⚠️ allowBackup 不要改回 true。Android 自動備份會把 RelateStatsData.xml
-         整份傳上使用者的 Google 雲端 —— 那裡面有真實聯絡人名字、關係標籤
-         與訊息詞頻，跟 App 自己寫的「所有資料只存在這支手機」直接衝突，
-         而且是 OS 自動觸發，使用者在 App 裡沒得選。
-         換機要帶資料請走「設定 → 備份與還原」，那是使用者自己按的。
-         （Android 12 以上的換機直傳不吃這個旗標，另見 data_extraction_rules.xml） -->
+    <!-- ⚠️ 自動備份是**刻意開著**的：換機與重裝之後設定會自己回來。
+         代價是 RelateStatsData.xml（含真實聯絡人名字、關係標籤、訊息詞頻）
+         由 Android 自動傳上使用者的 Google 雲端 —— 使用者自己的帳號，
+         Android 9 以上端對端加密，但 App 裡沒有地方讓他選。
+         這個取捨是明知道的，不是漏掉的；完整理由見 docs/CHANGELOG.md v1.1.8。
+         要關的話 allowBackup="false" 只關掉 cloud-backup，
+         換機直傳要另外在 data_extraction_rules.xml 排除。 -->
     <application
-        android:allowBackup="false"
+        android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

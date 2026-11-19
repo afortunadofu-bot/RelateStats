@@ -15404,11 +15404,10 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
-    "1.1.8" to listOf(
-        "關掉 Android 的自動備份。以前系統會自己把聯絡人名字、關係標籤與詞頻傳上你的 Google 雲端——那跟「所有資料只存在這支手機」衝突，而且你在 App 裡沒得選。",
-        "換機或重裝之後，設定不會再自動跟過去。要帶資料請走「設定 → 備份與還原」，那是你自己按的。",
+    "1.1.9" to listOf(
         "備份檔拿掉了沒有用的「密碼」。那段做的不是真的加密，留著只會讓人誤以為檔案有保護。",
-        "無障礙服務不再要求「讀取所有視窗」的權限——程式本來就只看最上層那一個。"
+        "無障礙服務不再要求「讀取所有視窗」的權限——程式本來就只看最上層那一個。",
+        "分享備份檔時開放的範圍縮到只剩那一個暫存資料夾。"
     ),
     "1.1.7" to listOf(
         "自己撥出去的通話不會再被歸到「分不出方向」。判斷方式跟原本一樣：對方打來一定先跳鈴響通知，我撥出去只有「通話中」——只是這個判斷以前漏了一條路沒套上。",
@@ -15552,11 +15551,10 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
-    "1.1.8" to listOf(
-        "Android's automatic backup is now off. The system used to copy contact names, relationship tags and word counts to your Google cloud on its own — which contradicts \"everything stays on this phone\", and you had no say in it.",
-        "Settings no longer follow you to a new phone or survive a reinstall. To carry your data over, use Settings → Backup & restore — something you choose to do.",
+    "1.1.9" to listOf(
         "The backup file's \"password\" is gone. It was never real encryption, and leaving it in only suggested the file was protected.",
-        "The accessibility service no longer asks to read every window — it only ever looked at the frontmost one."
+        "The accessibility service no longer asks to read every window — it only ever looked at the frontmost one.",
+        "Sharing a backup now exposes only the one temporary folder it lives in."
     ),
     "1.1.7" to listOf(
         "Calls you place are no longer filed under Direction unknown. The tell is the same as before — an incoming call rings first, a call you place never does — it just was not applied on one of the two code paths.",
