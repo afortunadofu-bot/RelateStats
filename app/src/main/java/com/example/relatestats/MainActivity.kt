@@ -3425,16 +3425,30 @@ object DailyRecap {
         runCatching { am.cancel(pending(ctx)) }
     }
 
+    /** 排行榜上的一位：顯示名、筆數、主要在哪個 App、關係標籤（頭像配色跟著標籤走） */
+    data class TopPerson(val name: String, val count: Int, val app: String, val cat: ContactCategory)
+
+    /**
+     * 「這天哪裡不一樣」的事實。
+     *
+     * ⚠️ 這裡只放數字與名字，**不要放句子** —— RecapStat 是 remember(day) 住的，
+     *    把組好的中文字串存進來，使用者切成英文之後那一句不會跟著換。
+     * kind：1 一個人佔比高　2 這週第一次聊到的人數　3 跟第一名連續幾天　4 夜間佔比　5 人數比平常多／少（n 可為負）
+     */
+    data class Insight(val kind: Int, val n: Int, val name: String = "")
+
     /** 回顧用的數字：今天與昨天並排，才能比 */
     data class RecapStat(
         val msgs: Int, val people: Int, val dur: Long,
         val yMsgs: Int, val yPeople: Int, val yDur: Long,
-        /** 聊最多的五個人：名字、筆數、主要在哪個 App。版面上是第一個區塊，所以放寬到五位 */
-        val top: List<Triple<String, Int, String>>,
+        /** 聊最多的五個人。版面上是第一個區塊，所以放寬到五位 */
+        val top: List<TopPerson>,
         /** 今天每小時的互動筆數（24 格） */
         val hourly: List<Int>,
         /** 依標籤分的互動對象人數，由多到少 */
-        val catShare: List<Pair<ContactCategory, Int>>
+        val catShare: List<Pair<ContactCategory, Int>>,
+        /** 這天哪裡不一樣。沒有一條夠反常就是 null */
+        val insight: Insight?
     )
 
     /** 今天沒有真人互動就回 null —— 沒事就不要吵人。 */
@@ -3456,12 +3470,49 @@ object DailyRecap {
         t.forEach { cal.timeInMillis = it.timestamp; hourly[cal.get(Calendar.HOUR_OF_DAY)]++ }
 
         val catList = DataRepository.availableCategories.value
+        fun catOf(n: String) = catList.firstOrNull { it.id == cats[n] } ?: ContactCategory.OTHER
         val people = t.mapTo(HashSet()) { nameOf(it) }
         val catShare = people
-            .groupingBy { n -> catList.firstOrNull { it.id == cats[n] } ?: ContactCategory.OTHER }
+            .groupingBy { n -> catOf(n) }
             .eachCount().entries.sortedByDescending { it.value }.map { it.key to it.value }
 
         val byName = t.groupBy { nameOf(it) }
+
+        // ── 這天哪裡不一樣 ──
+        // ⚠️ 規則有五條，但一天只講一句：每條算一個「反常分數」（1.0 剛好踩到門檻），
+        //    取分數最高的那條，都不到 1.0 就不講。寧可空著 —— 每天都看到同一種句子，兩週就麻木了。
+        // ⚠️ 分母一律用 t.size（這天的全部紀錄），不要拿 msgs（只算收到的訊息）去除，
+        //    那會算出一個對不起來的百分比。
+        val totalRec = t.size
+        val topEntry = byName.entries.maxByOrNull { it.value.size }
+        val topName = topEntry?.key ?: ""
+        val weekAgo = today - 7 * 86_400_000L
+        val wk = all.filter { it.timestamp in weekAgo until today && !isExcludedFromStats(nameOf(it), cats) }
+        val seenBefore = wk.mapTo(HashSet()) { nameOf(it) }
+        val fresh = people.count { it !in seenBefore }
+        var streak = 0
+        if (topEntry != null) {
+            val daysWithTop = wk.filter { nameOf(it) == topName }.mapTo(HashSet()) { startOfDayMs(it.timestamp) }
+            streak = 1
+            while (streak <= 7 && (today - streak * 86_400_000L) in daysWithTop) streak++
+        }
+        val topShare = if (totalRec > 0) (topEntry?.value?.size ?: 0).toFloat() / totalRec else 0f
+        val eveShare = if (totalRec > 0) (18..23).sumOf { hourly[it] }.toFloat() / totalRec else 0f
+        val dayPeople = wk.groupBy { startOfDayMs(it.timestamp) }
+            .map { (_, rs) -> rs.mapTo(HashSet()) { nameOf(it) }.size }
+        val avgPeople = if (dayPeople.isEmpty()) 0f else dayPeople.sum().toFloat() / dayPeople.size
+        val peopleGap = people.size - avgPeople
+        val peopleBar = maxOf(5f, avgPeople * 0.3f)
+        val topDisplay = ScreenshotMode.display(topName)
+        val insight = listOf(
+            (topShare / 0.40f) to Insight(1, (topShare * 100).toInt(), topDisplay),
+            (fresh / 2f) to Insight(2, fresh),
+            (streak / 3f) to Insight(3, streak, topDisplay),
+            (eveShare / 0.60f) to Insight(4, (eveShare * 100).toInt()),
+            (if (avgPeople < 1f) 0f else kotlin.math.abs(peopleGap) / peopleBar) to
+                Insight(5, peopleGap.toInt())
+        ).filter { it.first >= 1f }.maxByOrNull { it.first }?.second
+
         return RecapStat(
             msgs = t.count { it.isIncoming && !it.isCall },
             people = people.size,
@@ -3470,10 +3521,12 @@ object DailyRecap {
             yPeople = y.mapTo(HashSet()) { nameOf(it) }.size,
             yDur = y.sumOf { it.durationSeconds.toLong() },
             top = byName.entries.sortedByDescending { it.value.size }.take(5).map { (n, rs) ->
-                Triple(ScreenshotMode.display(n), rs.size, rs.groupingBy { it.appName }.eachCount().maxByOrNull { it.value }?.key ?: "")
+                TopPerson(ScreenshotMode.display(n), rs.size,
+                    rs.groupingBy { it.appName }.eachCount().maxByOrNull { it.value }?.key ?: "", catOf(n))
             },
             hourly = hourly.toList(),
-            catShare = catShare
+            catShare = catShare,
+            insight = insight
         )
     }
 
@@ -6078,6 +6131,19 @@ private fun recapDelta(cur: Long, prev: Long, prevLabel: String, fmt: (Long) -> 
     else -> ("−" + fmt(prev - cur)) to -1
 }
 
+/**
+ * 洞察句：事實在 DailyRecap 算好，句子在這裡組。
+ * ⚠️ d 是「今天／這天」，翻到過去某一天的時候不能寫死「今天」。
+ */
+private fun insightText(ins: DailyRecap.Insight, d: String): String = when (ins.kind) {
+    1 -> L.t("${ins.name} 一個人就佔了${d}的 ${ins.n}%", "${ins.name} alone is ${ins.n}% of ${d}")
+    2 -> L.t("${d}有 ${ins.n} 個人是這週第一次聊到", "${ins.n} people you had not talked to all week")
+    3 -> L.t("連續 ${ins.n} 天都跟 ${ins.name} 聊", "${ins.n} days in a row with ${ins.name}")
+    4 -> L.t("${d} ${ins.n}% 的互動在 18:00 之後", "${ins.n}% of ${d} happened after 6 PM")
+    else -> if (ins.n >= 0) L.t("${d}聊到的人比平常多 ${ins.n} 位", "${ins.n} more people than usual ${d}")
+            else L.t("${d}聊到的人比平常少 ${-ins.n} 位", "${-ins.n} fewer people than usual ${d}")
+}
+
 /** 標頭那句話：用訊息量跟前一天比，給一個有溫度的總結，而不是再重複一次數字 */
 private fun recapHeadline(r: DailyRecap.RecapStat, isToday: Boolean): String {
     val d = if (isToday) L.t("今天", "today") else L.t("這天", "that day")
@@ -6200,9 +6266,11 @@ fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
                     if (recap.top.isNotEmpty()) {
                         RecapSectionTitle(L.t("${d}聊最多", "Most chatted ${d}"),
                             L.t("前 ${recap.top.size} 位", "Top ${recap.top.size}"), topPad = 2.dp)
-                        val topMax = recap.top.first().second.toFloat()
-                        recap.top.forEachIndexed { i, (name, cnt, app) ->
-                            val c = pal.at(i)
+                        val topMax = recap.top.first().count.toFloat()
+                        recap.top.forEachIndexed { i, (name, cnt, app, cat) ->
+                            // ⚠️ 頭像吃關係標籤的顏色，不要用圖表配色 —— 正下方「跟誰聊」那條色帶
+                            //    就是標籤色，同一個人在兩個區塊若是兩種顏色，看起來像兩件事。
+                            val c = if (cat.dashed) AppColors.TextTertiary else cat.color
                             Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("${i + 1}", fontSize = T.Micro, fontWeight = FontWeight.Black,
                                     color = if (i == 0) pal.accent else AppColors.TextTertiary,
@@ -6230,6 +6298,11 @@ fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text(L.t("$cnt 筆", "$cnt records"), fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
                                     maxLines = 1, softWrap = false)
+                            }
+                            // 洞察句掛在第一名下面：這件事本來就是關於他的，而且不佔一個獨立區塊
+                            if (i == 0) recap.insight?.let { ins ->
+                                Text(insightText(ins, d), fontSize = T.Micro, color = AppColors.TextTertiary,
+                                    modifier = Modifier.padding(start = 55.dp, bottom = 4.dp))
                             }
                         }
                     }
@@ -13480,7 +13553,8 @@ val USER_GUIDE = listOf(
     GuideSection(
         "9", "每晚回顧",
         listOf(
-            "每天到你設定的時間（預設 21:00，可在「設定 → 偏好 → 每晚回顧通知 → 通知時間」改）會發一則通知。點開後先看概要：一句今天跟昨天比的總結，接著是今天聊最多的五個人，然後是聊天對象的標籤分布、今天幾點聊最多的節奏圖，最後才是訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）。",
+            "每天到你設定的時間（預設 21:00，可在「設定 → 偏好 → 每晚回顧通知 → 通知時間」改）會發一則通知。點開後先看概要：一句今天跟昨天比的總結，接著是今天聊最多的五個人（頭像顏色跟著他的關係標籤走），然後是聊天對象的標籤分布、今天幾點聊最多的節奏圖，最後才是訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）。",
+            "第一名下面有時候會多一行小字，講今天跟平常哪裡不一樣：某個人佔掉大半、有人是這週第一次聊到、連續幾天都跟同一個人聊、互動集中在晚上、聊到的人比平常多或少。一天只講一句，挑最反常的那件事；今天沒有特別的事就不會出現 —— 寧可空著，也不要每天講一樣的廢話。",
             "關掉概要（✕ 或「看完整報告」）會直接帶你到分析頁的那一天。今天沒有互動就不會發通知；可以在「設定 → 偏好」關掉。",
             "不必等通知：畫面上方的「每日報告」隨時打開今天的報告，用日期旁的 ‹ › 翻看過去每一天，「回今天」一鍵回來。",
             "如果停留時間偵測（無障礙服務）被系統關掉，也會另外發通知提醒你重新開啟。"
@@ -13613,7 +13687,8 @@ val USER_GUIDE_EN = listOf(
     GuideSection(
         "9", "Nightly recap",
         listOf(
-            "A notification arrives at the time you set (9:00 PM by default, changed under Settings → Notifications → Nightly recap → Notification time). Opening it shows a summary first: one line comparing today with yesterday, then the five people you chatted with most, then the tag breakdown of who you talked to, the rhythm chart of when you chatted most, and last the three number cards for messages, people and time (with ▲▼ against yesterday).",
+            "A notification arrives at the time you set (9:00 PM by default, changed under Settings → Notifications → Nightly recap → Notification time). Opening it shows a summary first: one line comparing today with yesterday, then the five people you chatted with most (each avatar takes the colour of their relationship tag), then the tag breakdown of who you talked to, the rhythm chart of when you chatted most, and last the three number cards for messages, people and time (with ▲▼ against yesterday).",
+            "Under the first name there is sometimes one small line telling you what was different about today: one person took most of it, someone you had not talked to all week, several days in a row with the same person, everything happening after 6 PM, more or fewer people than usual. Only one line a day, whichever is furthest from normal — and nothing at all on an ordinary day, because a line you see every day stops meaning anything.",
             "Closing the summary (✕ or See the full report) takes you to that day on the Insights page. Nothing is sent on a day with no activity, and you can turn it off under Settings → Notifications.",
             "You do not have to wait for it: Daily report at the top of the screen opens today's report any time, the ‹ › arrows beside the date walk back through previous days, and Today jumps back.",
             "If the system switches off the accessibility service, a separate notification tells you to turn it back on."
@@ -15421,6 +15496,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.12" to listOf(
+        "每日報告的第一名下面會多一行小字，講今天跟平常哪裡不一樣——某個人佔掉大半、有人是這週第一次聊到、連續幾天都跟同一個人聊、互動都在晚上、人數比平常多或少。",
+        "一天只講一句，挑最反常的那件事。今天沒有特別的事就不講，不會每天塞一句廢話給你。",
+        "排行榜的頭像改用那個人的關係標籤顏色，跟正下方「跟誰聊」那條色帶對得起來了。"
+    ),
     "1.1.11" to listOf(
         "每日報告改成先給人、再給數字：一打開就是今天聊最多的人，而且從三位加到五位。",
         "三張數字卡（訊息／對象／停留）降到最下面。它們適合回頭對照，不適合當開場白。",
@@ -15577,6 +15657,11 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.12" to listOf(
+        "One small line under the first name now tells you what was different about today \u2014 one person took most of it, someone you had not talked to all week, several days in a row with the same person, everything after 6 PM, more or fewer people than usual.",
+        "Only one line a day, whichever is furthest from normal. On an ordinary day there is no line at all.",
+        "Avatars in the list now take the colour of each person's relationship tag, so they match the band right below them."
+    ),
     "1.1.11" to listOf(
         "The daily report leads with people instead of numbers: the ones you chatted with most are now the first thing you see, and the list went from three to five.",
         "The three number cards (messages, people, time) moved to the bottom. They are good for looking back, not for opening with.",
