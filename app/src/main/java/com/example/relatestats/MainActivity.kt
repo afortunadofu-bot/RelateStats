@@ -3429,7 +3429,7 @@ object DailyRecap {
     data class RecapStat(
         val msgs: Int, val people: Int, val dur: Long,
         val yMsgs: Int, val yPeople: Int, val yDur: Long,
-        /** 聊最多的三個人：名字、筆數、主要在哪個 App */
+        /** 聊最多的五個人：名字、筆數、主要在哪個 App。版面上是第一個區塊，所以放寬到五位 */
         val top: List<Triple<String, Int, String>>,
         /** 今天每小時的互動筆數（24 格） */
         val hourly: List<Int>,
@@ -3469,7 +3469,7 @@ object DailyRecap {
             yMsgs = y.count { it.isIncoming && !it.isCall },
             yPeople = y.mapTo(HashSet()) { nameOf(it) }.size,
             yDur = y.sumOf { it.durationSeconds.toLong() },
-            top = byName.entries.sortedByDescending { it.value.size }.take(3).map { (n, rs) ->
+            top = byName.entries.sortedByDescending { it.value.size }.take(5).map { (n, rs) ->
                 Triple(ScreenshotMode.display(n), rs.size, rs.groupingBy { it.appName }.eachCount().maxByOrNull { it.value }?.key ?: "")
             },
             hourly = hourly.toList(),
@@ -6071,9 +6071,9 @@ fun appColorScheme(): ColorScheme {
 
 /** 這天 vs 前一天的差：(文字, 方向) 方向 1 多、-1 少、0 一樣或前一天沒有 */
 private fun recapDelta(cur: Long, prev: Long, prevLabel: String, fmt: (Long) -> String): Pair<String, Int> = when {
-    prev == 0L && cur == 0L -> "跟${prevLabel}一樣" to 0
-    prev == 0L -> "${prevLabel}沒有" to 0
-    cur == prev -> "跟${prevLabel}一樣" to 0
+    prev == 0L && cur == 0L -> L.t("跟${prevLabel}一樣", "Same as ${prevLabel}") to 0
+    prev == 0L -> L.t("${prevLabel}沒有", "Nothing ${prevLabel}") to 0
+    cur == prev -> L.t("跟${prevLabel}一樣", "Same as ${prevLabel}") to 0
     cur > prev -> ("+" + fmt(cur - prev)) to 1
     else -> ("−" + fmt(prev - cur)) to -1
 }
@@ -6084,20 +6084,22 @@ private fun recapHeadline(r: DailyRecap.RecapStat, isToday: Boolean): String {
     val p = if (isToday) L.t("昨天", "yesterday") else L.t("前一天", "the day before")
     val y = r.yMsgs
     return when {
-        y == 0 -> "${d}跟 ${r.people} 個人有互動"
-        r.msgs >= y * 1.3 -> "${d}比${p}熱鬧不少"
-        r.msgs >= y * 1.05 -> "${d}比${p}多聊了一些"
-        r.msgs <= y * 0.7 -> "${d}比${p}安靜許多"
-        r.msgs <= y * 0.95 -> "${d}比${p}少聊了一點"
-        else -> "${d}跟${p}差不多熱絡"
+        y == 0 -> L.t("${d}跟 ${r.people} 個人有互動", "You were in touch with ${r.people} people ${d}")
+        r.msgs >= y * 1.3 -> L.t("${d}比${p}熱鬧不少", "A lot busier ${d} than ${p}")
+        r.msgs >= y * 1.05 -> L.t("${d}比${p}多聊了一些", "A bit more chatting ${d} than ${p}")
+        r.msgs <= y * 0.7 -> L.t("${d}比${p}安靜許多", "Much quieter ${d} than ${p}")
+        r.msgs <= y * 0.95 -> L.t("${d}比${p}少聊了一點", "A little quieter ${d} than ${p}")
+        else -> L.t("${d}跟${p}差不多熱絡", "About as busy ${d} as ${p}")
     }
 }
 
 /**
  * 每日報告的概要。
  *
- * 版面由上而下：彩色標頭（日期切換＋總結一句＋主數字）→ 三張數字卡（各自跟前一天比）→
- * 這天的節奏（24 小時長條）→ 聊天對象的關係分布 → 聊最多的三個人。
+ * 版面由上而下：彩色標頭（日期切換＋總結一句＋主數字）→ 聊最多的五個人 →
+ * 聊天對象的關係分布 → 這天的節奏（24 小時長條）→ 三張數字卡（各自跟前一天比）。
+ * ⚠️ 順序是刻意的：打開第一眼要看到「人」，不是三個第一眼無感的數字。
+ *    數字卡還在，只是降到最後 —— 它的用途是回頭對照，不是當開場白。
  * ⚠️ 顏色全部取自目前的圖表配色（brand／accent／colors／tags），換配色時這裡會一起換。
  * ⚠️ 高度上限是螢幕的 78%，內容區自己捲動 —— 不設上限時，資料多的日子會把卡片撐到螢幕底，
  *    「看完整報告」就跟系統導覽列疊在一起。
@@ -6115,7 +6117,8 @@ fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
     val recap = remember(day) { DailyRecap.buildRecap(day + 12 * 3_600_000L) }
     val dateText = remember(day) { SimpleDateFormat("M 月 d 日 EEEE", Locale.TAIWAN).format(Date(day)) }
     val maxH = (LocalConfiguration.current.screenHeightDp * 0.78f).dp
-    val prevLabel = if (isToday) L.t("昨天", "Yesterday") else L.t("前一天", "Previous day")
+    // ⚠️ 英文是接在句子中間用的（"Same as yesterday"），所以小寫
+    val prevLabel = if (isToday) L.t("昨天", "yesterday") else L.t("前一天", "the day before")
     val d = if (isToday) L.t("今天", "today") else L.t("這天", "that day")
     fun shift(days: Int) {
         val c = Calendar.getInstance().apply { timeInMillis = day; add(Calendar.DATE, days) }
@@ -6193,14 +6196,67 @@ fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
                 if (recap == null) {
                     Text(L.t("${d}沒有跟真人的互動紀錄。", "No activity with real people ${d}."), fontSize = T.Body, color = AppColors.TextSecondary)
                 } else {
-                    // ── 三張數字卡 ──
-                    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        RecapTile(L.t("訊息", "Messages"), "${recap.msgs}", L.t("則", "msgs"),
-                            recapDelta(recap.msgs.toLong(), recap.yMsgs.toLong(), prevLabel) { "$it" }, pal.tagStyle(1), Modifier.weight(1f))
-                        RecapTile(L.t("對象", "People"), "${recap.people}", L.t("位", "people"),
-                            recapDelta(recap.people.toLong(), recap.yPeople.toLong(), prevLabel) { "$it" }, pal.tagStyle(2), Modifier.weight(1f))
-                        RecapTile("停留", formatDuration(recap.dur), "",
-                            recapDelta(recap.dur, recap.yDur, prevLabel) { formatDuration(it) }, pal.tagStyle(3), Modifier.weight(1f))
+                    // ── 聊最多（排第一：先看到人，數字放後面）──
+                    if (recap.top.isNotEmpty()) {
+                        RecapSectionTitle(L.t("${d}聊最多", "Most chatted ${d}"),
+                            L.t("前 ${recap.top.size} 位", "Top ${recap.top.size}"), topPad = 2.dp)
+                        val topMax = recap.top.first().second.toFloat()
+                        recap.top.forEachIndexed { i, (name, cnt, app) ->
+                            val c = pal.at(i)
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${i + 1}", fontSize = T.Micro, fontWeight = FontWeight.Black,
+                                    color = if (i == 0) pal.accent else AppColors.TextTertiary,
+                                    maxLines = 1, softWrap = false, modifier = Modifier.width(13.dp))
+                                Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(c.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center) {
+                                    Text(name.trim().take(1).ifEmpty { "?" }, fontSize = T.Body, fontWeight = FontWeight.Black,
+                                        color = c, maxLines = 1, softWrap = false)
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(name, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                        if (app.isNotBlank()) {
+                                            Text(" · $app", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
+                                        }
+                                    }
+                                    Box(modifier = Modifier.padding(top = 4.dp).fillMaxWidth().height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)).background(AppColors.BorderLight.copy(alpha = 0.6f))) {
+                                        Box(modifier = Modifier.fillMaxWidth(cnt / topMax).fillMaxHeight()
+                                            .clip(RoundedCornerShape(3.dp)).background(c))
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(L.t("$cnt 筆", "$cnt records"), fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
+                                    maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+
+                    // ── 關係分布 ──
+                    val shares = recap.catShare.filter { it.second > 0 }
+                    if (shares.isNotEmpty()) {
+                        RecapSectionTitle(L.t("跟誰聊", "Who you talked to"), L.t("${recap.people} 位", "${recap.people} people"))
+                        val total = shares.sumOf { it.second }.toFloat()
+                        Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            shares.forEach { (cat, n) ->
+                                Box(modifier = Modifier.weight(n / total).fillMaxHeight()
+                                    .background(if (cat.dashed) AppColors.BorderLight else cat.color))
+                            }
+                        }
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            shares.forEach { (cat, n) ->
+                                Text("${ContactCategory.displayLabel(cat)} $n", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = cat.color,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.tagChip(cat, 8.dp).padding(horizontal = 8.dp, vertical = 3.dp))
+                            }
+                        }
                     }
 
                     // ── 這天的節奏 ──
@@ -6237,63 +6293,15 @@ fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
                         }
                     }
 
-                    // ── 關係分布 ──
-                    val shares = recap.catShare.filter { it.second > 0 }
-                    if (shares.isNotEmpty()) {
-                        RecapSectionTitle(L.t("跟誰聊", "Who you talked to"), L.t("${recap.people} 位", "${recap.people} people"))
-                        val total = shares.sumOf { it.second }.toFloat()
-                        Row(modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            shares.forEach { (cat, n) ->
-                                Box(modifier = Modifier.weight(n / total).fillMaxHeight()
-                                    .background(if (cat.dashed) AppColors.BorderLight else cat.color))
-                            }
-                        }
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            shares.forEach { (cat, n) ->
-                                Text("${ContactCategory.displayLabel(cat)} $n", fontSize = T.Micro, fontWeight = FontWeight.Bold, color = cat.color,
-                                    maxLines = 1, softWrap = false,
-                                    modifier = Modifier.tagChip(cat, 8.dp).padding(horizontal = 8.dp, vertical = 3.dp))
-                            }
-                        }
-                    }
-
-                    // ── 聊最多 ──
-                    if (recap.top.isNotEmpty()) {
-                        RecapSectionTitle(L.t("${d}聊最多", "Most chatted ${d}"), null)
-                        val topMax = recap.top.first().second.toFloat()
-                        recap.top.forEachIndexed { i, (name, cnt, app) ->
-                            val c = pal.at(i)
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(c.copy(alpha = 0.16f)),
-                                    contentAlignment = Alignment.Center) {
-                                    Text(name.trim().take(1).ifEmpty { "?" }, fontSize = T.Body, fontWeight = FontWeight.Black,
-                                        color = c, maxLines = 1, softWrap = false)
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(name, fontSize = T.Body, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                                        if (app.isNotBlank()) {
-                                            Text(" · $app", fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
-                                        }
-                                    }
-                                    Box(modifier = Modifier.padding(top = 4.dp).fillMaxWidth().height(6.dp)
-                                        .clip(RoundedCornerShape(3.dp)).background(AppColors.BorderLight.copy(alpha = 0.6f))) {
-                                        Box(modifier = Modifier.fillMaxWidth(cnt / topMax).fillMaxHeight()
-                                            .clip(RoundedCornerShape(3.dp)).background(c))
-                                    }
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(L.t("$cnt 筆", "$cnt records"), fontSize = T.Label, fontWeight = FontWeight.Bold, color = AppColors.TextSecondary,
-                                    maxLines = 1, softWrap = false)
-                            }
-                        }
+                    // ── 三張數字卡（擺最後：這是「回頭對照」用的，不是第一眼要看的）──
+                    RecapSectionTitle(L.t("跟${prevLabel}比", "Compared with ${prevLabel}"), null)
+                    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RecapTile(L.t("訊息", "Messages"), "${recap.msgs}", L.t("則", "msgs"),
+                            recapDelta(recap.msgs.toLong(), recap.yMsgs.toLong(), prevLabel) { "$it" }, pal.tagStyle(1), Modifier.weight(1f))
+                        RecapTile(L.t("對象", "People"), "${recap.people}", L.t("位", "people"),
+                            recapDelta(recap.people.toLong(), recap.yPeople.toLong(), prevLabel) { "$it" }, pal.tagStyle(2), Modifier.weight(1f))
+                        RecapTile(L.t("停留", "Time"), formatDuration(recap.dur), "",
+                            recapDelta(recap.dur, recap.yDur, prevLabel) { formatDuration(it) }, pal.tagStyle(3), Modifier.weight(1f))
                     }
                 }
             }
@@ -6310,8 +6318,8 @@ fun RecapDialog(day: Long, onDayChange: (Long) -> Unit, onClose: () -> Unit) {
 }
 
 @Composable
-private fun RecapSectionTitle(title: String, trailing: String?) {
-    Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun RecapSectionTitle(title: String, trailing: String?, topPad: Dp = 18.dp) {
+    Row(modifier = Modifier.fillMaxWidth().padding(top = topPad, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, fontSize = T.Label, fontWeight = FontWeight.Black, color = AppColors.TextPrimary, modifier = Modifier.weight(1f))
         if (trailing != null) Text(trailing, fontSize = T.Micro, color = AppColors.TextTertiary, maxLines = 1, softWrap = false)
     }
@@ -13472,7 +13480,7 @@ val USER_GUIDE = listOf(
     GuideSection(
         "9", "每晚回顧",
         listOf(
-            "每天到你設定的時間（預設 21:00，可在「設定 → 偏好 → 每晚回顧通知 → 通知時間」改）會發一則通知。點開後先看概要：一句今天跟昨天比的總結、訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）、今天幾點聊最多的節奏圖、聊天對象的標籤分布，以及聊最多的三個人。",
+            "每天到你設定的時間（預設 21:00，可在「設定 → 偏好 → 每晚回顧通知 → 通知時間」改）會發一則通知。點開後先看概要：一句今天跟昨天比的總結，接著是今天聊最多的五個人，然後是聊天對象的標籤分布、今天幾點聊最多的節奏圖，最後才是訊息／對象／停留三張數字卡（▲▼ 標出比昨天多或少）。",
             "關掉概要（✕ 或「看完整報告」）會直接帶你到分析頁的那一天。今天沒有互動就不會發通知；可以在「設定 → 偏好」關掉。",
             "不必等通知：畫面上方的「每日報告」隨時打開今天的報告，用日期旁的 ‹ › 翻看過去每一天，「回今天」一鍵回來。",
             "如果停留時間偵測（無障礙服務）被系統關掉，也會另外發通知提醒你重新開啟。"
@@ -13605,7 +13613,7 @@ val USER_GUIDE_EN = listOf(
     GuideSection(
         "9", "Nightly recap",
         listOf(
-            "A notification arrives at the time you set (9:00 PM by default, changed under Settings → Notifications → Nightly recap → Notification time). Opening it shows a summary first: one line comparing today with yesterday, three number cards for messages, people and time (with ▲▼ against yesterday), a rhythm chart of when you chatted most, the tag breakdown of who you talked to, and your top three.",
+            "A notification arrives at the time you set (9:00 PM by default, changed under Settings → Notifications → Nightly recap → Notification time). Opening it shows a summary first: one line comparing today with yesterday, then the five people you chatted with most, then the tag breakdown of who you talked to, the rhythm chart of when you chatted most, and last the three number cards for messages, people and time (with ▲▼ against yesterday).",
             "Closing the summary (✕ or See the full report) takes you to that day on the Insights page. Nothing is sent on a day with no activity, and you can turn it off under Settings → Notifications.",
             "You do not have to wait for it: Daily report at the top of the screen opens today's report any time, the ‹ › arrows beside the date walk back through previous days, and Today jumps back.",
             "If the system switches off the accessibility service, a separate notification tells you to turn it back on."
@@ -15413,6 +15421,11 @@ const val UPDATE_STALE_DAYS = 30
  *    沒人會在手機上捲三十個版本。
  */
 val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
+    "1.1.11" to listOf(
+        "每日報告改成先給人、再給數字：一打開就是今天聊最多的人，而且從三位加到五位。",
+        "三張數字卡（訊息／對象／停留）降到最下面。它們適合回頭對照，不適合當開場白。",
+        "英文版的總結句本來是中文句型套英文詞（\"today比yesterday多聊了一些\"），現在是正常的英文。"
+    ),
     "1.1.10" to listOf(
         "使用說明與常見問題補上一件本來沒講的事：Android 系統層級的自動備份，會把設定、關係標籤、合併的帳號與常用詞同步到你自己的 Google 帳號（互動紀錄不在裡面），可以在手機的系統設定關掉。",
         "程式沒有改。是以前寫「所有資料只存在這支手機」寫得不夠準。"
@@ -15564,6 +15577,11 @@ val RELEASE_NOTES: List<Pair<String, List<String>>> = listOf(
  * ⚠️ 發新版時**兩份都要加**。只加中文的話，英文使用者的更新說明會缺一版。
  */
 val RELEASE_NOTES_EN: List<Pair<String, List<String>>> = listOf(
+    "1.1.11" to listOf(
+        "The daily report leads with people instead of numbers: the ones you chatted with most are now the first thing you see, and the list went from three to five.",
+        "The three number cards (messages, people, time) moved to the bottom. They are good for looking back, not for opening with.",
+        "The summary line in English used to be a Chinese sentence with English words dropped in. It reads as English now."
+    ),
     "1.1.10" to listOf(
         "The guide and FAQ now say something they left out: Android's own system backup syncs settings, relationship tags, merged accounts and common words to your own Google account (records are not included), and you can switch it off in your phone's settings.",
         "Nothing in the app changed. \"Everything stays on this phone\" was simply not accurate enough."
