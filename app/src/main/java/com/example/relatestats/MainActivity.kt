@@ -3483,6 +3483,10 @@ object DailyRecap {
         //    取分數最高的那條，都不到 1.0 就不講。寧可空著 —— 每天都看到同一種句子，兩週就麻木了。
         // ⚠️ 分母一律用 t.size（這天的全部紀錄），不要拿 msgs（只算收到的訊息）去除，
         //    那會算出一個對不起來的百分比。
+        // ⚠️ 剛裝好的人沒有「平常」可以比：前七天的每個人都是「這週第一次」，
+        //    人數平均也只有一兩天撐著。規則 2、5 要等前七天至少有三天有紀錄才算。
+        // ⚠️ 分數是「超過門檻幾倍」，各條的倍率尺度不一樣，所以上限壓在 3 倍 ——
+        //    不然一天認識十個新朋友（5 倍）會永遠蓋過「一個人佔了 95%」（2.4 倍）。
         val totalRec = t.size
         val topEntry = byName.entries.maxByOrNull { it.value.size }
         val topName = topEntry?.key ?: ""
@@ -3503,15 +3507,19 @@ object DailyRecap {
         val avgPeople = if (dayPeople.isEmpty()) 0f else dayPeople.sum().toFloat() / dayPeople.size
         val peopleGap = people.size - avgPeople
         val peopleBar = maxOf(5f, avgPeople * 0.3f)
+        val hasPast = dayPeople.size >= 3
+        // 一天跟 47 個人互動的人，兩個新面孔是日常；一天只跟 5 個人互動的人，兩個就是事件。
+        val freshBar = maxOf(2f, people.size * 0.15f)
         val topDisplay = ScreenshotMode.display(topName)
         val insight = listOf(
             (topShare / 0.40f) to Insight(1, (topShare * 100).toInt(), topDisplay),
-            (fresh / 2f) to Insight(2, fresh),
+            (if (hasPast) fresh / freshBar else 0f) to Insight(2, fresh),
             (streak / 3f) to Insight(3, streak, topDisplay),
             (eveShare / 0.60f) to Insight(4, (eveShare * 100).toInt()),
-            (if (avgPeople < 1f) 0f else kotlin.math.abs(peopleGap) / peopleBar) to
-                Insight(5, peopleGap.toInt())
-        ).filter { it.first >= 1f }.maxByOrNull { it.first }?.second
+            (if (hasPast && avgPeople >= 1f) kotlin.math.abs(peopleGap) / peopleBar else 0f) to
+                Insight(5, Math.round(peopleGap))
+        ).map { (score, ins) -> minOf(score, 3f) to ins }
+            .filter { it.first >= 1f }.maxByOrNull { it.first }?.second
 
         return RecapStat(
             msgs = t.count { it.isIncoming && !it.isCall },
